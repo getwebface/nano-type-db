@@ -11,10 +11,12 @@ interface WebSocketMessage {
 }
 
 // 1. Define the Manifest explicitly
+// Added 'search' to actions
 const ACTIONS = {
   createTask: { params: ["title"] },
   completeTask: { params: ["id"] },
   deleteTask: { params: ["id"] },
+  search: { params: ["query"] },
   getUsage: { params: [] },
   getAuditLog: { params: [] }
 };
@@ -38,6 +40,17 @@ const MIGRATIONS = [
         // Audit Log for Undo/History
         sql.exec(`CREATE TABLE IF NOT EXISTS _audit_log (id INTEGER PRIMARY KEY, action TEXT, payload TEXT, timestamp TEXT)`);
     }
+  },
+  {
+      version: 3,
+      up: (sql: any) => {
+          try {
+              sql.exec("ALTER TABLE _usage ADD COLUMN ai_ops INTEGER DEFAULT 0");
+          } catch (e) {
+              // Column might already exist or table issue
+              console.warn("Migration v3 warning:", e);
+          }
+      }
   }
 ];
 
@@ -45,12 +58,14 @@ export class DataStore extends DurableObject {
   sql: any; 
   subscribers: Map<string, Set<WebSocket>>;
   env: Env;
+  doId: string;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.env = env;
     this.sql = ctx.storage.sql;
     this.subscribers = new Map();
+    this.doId = ctx.id.toString();
     
     this.runMigrations();
   }
@@ -73,7 +88,7 @@ export class DataStore extends DurableObject {
     }
   }
 
-  trackUsage(type: 'reads' | 'writes') {
+  trackUsage(type: 'reads' | 'writes' | 'ai_ops') {
       const today = new Date().toISOString().split('T')[0];
       try {
         this.sql.exec(
@@ -202,18 +217,46 @@ export class DataStore extends DurableObject {
             const method = data.method || data.action;
             
             // Log the attempt
-            this.trackUsage('writes');
-            this.logAction(method, data.payload);
-
+            // 'reads' or 'writes' tracked inside specific blocks or generally here?
+            // Let's track writes here for mutations, but we have some read RPCs now.
+            
             switch (method) {
-                case "createTask":
+                case "createTask": {
+                    this.trackUsage('writes');
+                    this.logAction(method, data.payload);
                     const title = data.payload?.title || "Untitled Task";
-                    this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending')", title);
+                    
+                    // 1. Insert into DB
+                    const result = this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending') RETURNING id", title).toArray();
+                    const newId = result[0]?.id;
+
+                    // 2. Generate Embedding (Async) & Store
+                    if (newId && this.env.AI && this.env.VECTOR_INDEX) {
+                        try {
+                            const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [title] });
+                            const values = embeddings.data[0];
+                            if (values) {
+                                // Namespace ID with DO ID to prevent collision if index is shared
+                                await this.env.VECTOR_INDEX.upsert([{ 
+                                    id: `${this.doId}:${newId}`, 
+                                    values,
+                                    metadata: { doId: this.doId, taskId: newId } 
+                                }]);
+                                this.trackUsage('ai_ops');
+                            }
+                        } catch (e) {
+                            console.error("AI Embedding failed", e);
+                        }
+                    }
+
                     webSocket.send(JSON.stringify({ type: "mutation_success", action: "createTask" }));
                     this.broadcastUpdate("tasks");
                     break;
+                }
 
                 case "completeTask":
+                    this.trackUsage('writes');
+                    this.logAction(method, data.payload);
                     if (data.payload?.id) {
                         this.sql.exec("UPDATE tasks SET status = 'completed' WHERE id = ?", data.payload.id);
                         webSocket.send(JSON.stringify({ type: "mutation_success", action: "completeTask" }));
@@ -222,19 +265,57 @@ export class DataStore extends DurableObject {
                     break;
 
                 case "deleteTask":
+                    this.trackUsage('writes');
+                    this.logAction(method, data.payload);
                     if (data.payload?.id) {
                         this.sql.exec("DELETE FROM tasks WHERE id = ?", data.payload.id);
+                        // Also delete from Vector Index
+                        if (this.env.VECTOR_INDEX) {
+                            this.env.VECTOR_INDEX.deleteByIds([`${this.doId}:${data.payload.id}`]).catch(console.error);
+                        }
                         webSocket.send(JSON.stringify({ type: "mutation_success", action: "deleteTask" }));
                         this.broadcastUpdate("tasks");
                     }
                     break;
                 
+                case "search": {
+                    this.trackUsage('ai_ops'); // It's an AI op
+                    const query = data.payload?.query;
+                    if (!query) {
+                        webSocket.send(JSON.stringify({ type: "query_result", data: [], originalSql: "search" }));
+                        break;
+                    }
+                    
+                    let results: any[] = [];
+                    if (this.env.AI && this.env.VECTOR_INDEX) {
+                         const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [query] });
+                         const values = embeddings.data[0];
+                         // Query vectors
+                         const matches = await this.env.VECTOR_INDEX.query(values, { topK: 5 });
+                         
+                         // Filter matches for this DO
+                         const taskIds = matches.matches
+                            .filter(m => m.id.startsWith(this.doId))
+                            .map(m => m.id.split(':')[1]); // Extract taskId
+                         
+                         if (taskIds.length > 0) {
+                             const placeholders = taskIds.map(() => '?').join(',');
+                             results = this.sql.exec(`SELECT * FROM tasks WHERE id IN (${placeholders})`, ...taskIds).toArray();
+                         }
+                    }
+                    
+                    webSocket.send(JSON.stringify({ type: "query_result", data: results, originalSql: "search" }));
+                    break;
+                }
+
                 case "getUsage":
+                    this.trackUsage('reads');
                     const usage = this.sql.exec("SELECT * FROM _usage ORDER BY date DESC LIMIT 30").toArray();
                     webSocket.send(JSON.stringify({ type: "query_result", data: usage, originalSql: "getUsage" }));
                     break;
 
                 case "getAuditLog":
+                     this.trackUsage('reads');
                      const logs = this.sql.exec("SELECT * FROM _audit_log ORDER BY timestamp DESC LIMIT 50").toArray();
                      webSocket.send(JSON.stringify({ type: "query_result", data: logs, originalSql: "getAuditLog" }));
                      break;

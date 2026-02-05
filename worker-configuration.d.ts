@@ -1,4 +1,4 @@
-import { DurableObjectNamespace, R2Bucket, D1Database } from "cloudflare:workers";
+import { DurableObjectNamespace, R2Bucket, D1Database, VectorizeIndex, Ai } from "cloudflare:workers";
 
 declare global {
 	interface Env {
@@ -7,6 +7,10 @@ declare global {
 		AUTH_DB: D1Database;
 		BETTER_AUTH_SECRET: string;
         // Standard Cloudflare Rate Limit Binding
-        RATE_LIMITER: any; 
+        RATE_LIMITER: any;
+        // Vector Database
+        VECTOR_INDEX: VectorizeIndex;
+        // AI Binding
+        AI: Ai;
 	}
 }
