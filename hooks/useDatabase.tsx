@@ -1,11 +1,9 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
-import { DatabaseContextType, QueryResult, UpdateEvent, ToastMessage, Schema } from '../types';
+import { DatabaseContextType, QueryResult, UpdateEvent, ToastMessage, Schema, UsageStat } from '../types';
 
-// Mock Worker URL - in production this would be your Cloudflare Worker domain
-// For local dev with `wrangler dev`, it usually runs on port 8787
 const WORKER_URL = 'ws://localhost:8787'; 
-const HTTP_URL = 'http://localhost:8787'; // Helper for fetch requests
-const DEMO_TOKEN = 'demo-token'; // Hardcoded for demo purposes
+const HTTP_URL = 'http://localhost:8787'; 
+const DEMO_TOKEN = 'demo-token';
 
 const DatabaseContext = createContext<DatabaseContextType | null>(null);
 
@@ -15,6 +13,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const [lastResult, setLastResult] = useState<QueryResult | null>(null);
     const [toasts, setToasts] = useState<ToastMessage[]>([]);
     const [schema, setSchema] = useState<Schema | null>(null);
+    const [usageStats, setUsageStats] = useState<UsageStat[]>([]);
     const currentRoomIdRef = useRef<string>("");
     
     const subscribedTablesRef = useRef<Set<string>>(new Set());
@@ -30,7 +29,6 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const refreshSchema = useCallback(async () => {
         if (!currentRoomIdRef.current) return;
         try {
-            // Pass Authorization header
             const res = await fetch(`${HTTP_URL}/schema?room_id=${currentRoomIdRef.current}`, {
                 headers: { 'Authorization': `Bearer ${DEMO_TOKEN}` }
             });
@@ -43,27 +41,41 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
     }, []);
 
+    const refreshUsage = useCallback(() => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+             socket.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
+        }
+    }, [socket]);
+
     const connect = useCallback((roomId: string) => {
         if (socket) {
             socket.close();
         }
 
         currentRoomIdRef.current = roomId;
-        // Pass token in query param for WebSocket connection
         const ws = new WebSocket(`${WORKER_URL}?room_id=${roomId}&token=${DEMO_TOKEN}`);
 
         ws.onopen = () => {
             console.log('Connected to DO');
             setIsConnected(true);
-            // Fetch schema immediately upon connection
             refreshSchema();
+            // Initial usage fetch
+            setTimeout(() => {
+                ws.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
+            }, 500);
         };
 
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
 
             if (data.type === 'query_result') {
-                setLastResult(data);
+                if (data.originalSql === 'getUsage') {
+                    setUsageStats(data.data);
+                } else if (data.originalSql === 'getAuditLog') {
+                    // Handle audit log if needed
+                } else {
+                    setLastResult(data);
+                }
             } else if (data.event === 'update') {
                 addToast(`Table '${data.table}' updated`);
                 window.dispatchEvent(new CustomEvent('db-update', { detail: { table: data.table } }));
@@ -84,13 +96,9 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const runQuery = useCallback((sql: string, tableContext?: string) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
         
-        // Simple heuristic to detect if this is a "Create Task" intent from the demo UI
-        // In a real app, you would call a specific function like `createTask()`
         const isInsertTask = /INSERT INTO tasks/i.test(sql);
         
         if (isInsertTask) {
-             // EXTRACT TITLE for RPC
-             // Very basic regex to extract 'Value' from: INSERT INTO tasks ... VALUES ('Value', ...)
              const match = sql.match(/VALUES\s*\(\s*'([^']*)'/i);
              const title = match ? match[1] : "New Task";
              
@@ -101,11 +109,9 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
              return;
         }
 
-        // Fallback for other queries (Read-Only)
         const isMutation = /^(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)/i.test(sql.trim());
         const isSchemaChange = /^(CREATE|ALTER|DROP)/i.test(sql.trim());
 
-        // We still send "mutate" for other things, but backend will likely reject it now.
         const payload = {
             action: isMutation ? 'mutate' : 'query',
             sql,
@@ -117,8 +123,11 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         if (isSchemaChange) {
             setTimeout(refreshSchema, 500);
         }
+        
+        // Refresh usage stats after queries (demo purpose)
+        setTimeout(refreshUsage, 1000);
 
-    }, [socket, refreshSchema]);
+    }, [socket, refreshSchema, refreshUsage]);
 
     const subscribe = useCallback((table: string) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -127,7 +136,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, [socket]);
 
     return (
-        <DatabaseContext.Provider value={{ isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema }}>
+        <DatabaseContext.Provider value={{ isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage }}>
             {children}
         </DatabaseContext.Provider>
     );
@@ -139,7 +148,6 @@ export const useDatabase = () => {
     return context;
 };
 
-// The "Convex-like" Hook
 export const useRealtimeQuery = (tableName: string) => {
     const { runQuery, subscribe, lastResult, isConnected } = useDatabase();
     const [data, setData] = useState<any[]>([]);

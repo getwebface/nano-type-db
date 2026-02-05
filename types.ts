@@ -31,10 +31,18 @@ export interface DatabaseContextType {
     toasts: ToastMessage[];
     schema: Schema | null;
     refreshSchema: () => void;
+    usageStats: UsageStat[];
+    refreshUsage: () => void;
 }
 
 export interface ToastMessage {
     id: string;
     message: string;
     type: 'success' | 'info';
+}
+
+export interface UsageStat {
+    date: string;
+    reads: number;
+    writes: number;
 }

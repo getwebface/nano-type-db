@@ -7,6 +7,15 @@ export { DataStore };
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
+
+    // 0. Rate Limiting Protection
+    if (env.RATE_LIMITER) {
+        const { success } = await env.RATE_LIMITER.limit({ key: clientIp });
+        if (!success) {
+            return new Response("Rate limit exceeded. Please slow down.", { status: 429 });
+        }
+    }
     
     // Initialize Auth
     const auth = createAuth(env);
@@ -20,29 +29,20 @@ export default {
     const roomId = url.searchParams.get("room_id");
 
     if (!roomId) {
-        // Only require room_id for DO connections
-        // Allow public access to index or other static assets if served from here (though usually Vite handles that)
         return new Response("Missing room_id query parameter", { status: 400 });
     }
 
     // 2. Protect Database Access
-    // Check for session in headers or cookies
     const session = await auth.api.getSession({ headers: request.headers });
     
-    // Allow if it is a "Manifest" request for generator (optional, likely wants dev protection)
-    // For now, strict protection on everything database related.
-    // If dev mode, you might want to skip this or use a specific dev token.
     if (!session) {
-         // Fallback for Demo/Dev: If "demo-token" is present in query (from our simple UI), allow it 
-         // BUT in production this should be removed or replaced with real auth flow.
+         // Fallback for Demo/Dev
          const queryToken = url.searchParams.get("token");
          if (queryToken !== "demo-token") {
              return new Response("Unauthorized", { status: 401 });
          }
-         // Mock user for demo token
          request.headers.set("X-User-ID", "demo-user");
     } else {
-         // Pass user ID to Durable Object
          request.headers.set("X-User-ID", session.user.id);
     }
 

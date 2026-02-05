@@ -2,14 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { useRealtimeQuery, useDatabase } from '../hooks/useDatabase';
 import { DataGrid } from './DataGrid';
 import { SqlConsole } from './SqlConsole';
-import { Layout, Table2, HardDrive, Circle, Plus, Loader2 } from 'lucide-react';
+import { Layout, Table2, HardDrive, Circle, Plus, Loader2, Activity } from 'lucide-react';
 
 export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
-    const { schema } = useDatabase();
-    // Default to 'tasks' or the first available table if 'tasks' doesn't exist
+    const { schema, usageStats } = useDatabase();
     const [selectedTable, setSelectedTable] = useState<string>('tasks');
     
-    // Auto-select first table if 'tasks' isn't found
     useEffect(() => {
         if (schema) {
             const tables = Object.keys(schema);
@@ -21,6 +19,10 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
 
     const data = useRealtimeQuery(selectedTable);
     const tableList = schema ? Object.keys(schema) : [];
+
+    // Calculate totals
+    const totalReads = usageStats.reduce((acc, stat) => acc + stat.reads, 0);
+    const totalWrites = usageStats.reduce((acc, stat) => acc + stat.writes, 0);
 
     return (
         <div className="flex h-screen overflow-hidden bg-slate-900 text-slate-100 font-sans">
@@ -63,6 +65,34 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                         ))
                     )}
                 </nav>
+
+                {/* Usage Meter */}
+                <div className="p-4 border-t border-slate-800 bg-slate-900/50">
+                    <div className="flex items-center gap-2 mb-3 text-slate-400">
+                        <Activity size={16} />
+                        <span className="text-xs font-bold uppercase tracking-wider">Usage (Session)</span>
+                    </div>
+                    <div className="space-y-3">
+                        <div>
+                            <div className="flex justify-between text-xs mb-1">
+                                <span className="text-slate-500">Reads</span>
+                                <span className="text-slate-200">{totalReads}</span>
+                            </div>
+                            <div className="w-full bg-slate-800 rounded-full h-1.5">
+                                <div className="bg-blue-500 h-1.5 rounded-full" style={{ width: `${Math.min(totalReads, 100)}%` }}></div>
+                            </div>
+                        </div>
+                        <div>
+                            <div className="flex justify-between text-xs mb-1">
+                                <span className="text-slate-500">Writes</span>
+                                <span className="text-slate-200">{totalWrites}</span>
+                            </div>
+                            <div className="w-full bg-slate-800 rounded-full h-1.5">
+                                <div className="bg-orange-500 h-1.5 rounded-full" style={{ width: `${Math.min(totalWrites * 5, 100)}%` }}></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </aside>
 
             {/* Main Content */}

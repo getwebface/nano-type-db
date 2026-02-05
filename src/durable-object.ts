@@ -14,7 +14,9 @@ interface WebSocketMessage {
 const ACTIONS = {
   createTask: { params: ["title"] },
   completeTask: { params: ["id"] },
-  deleteTask: { params: ["id"] }
+  deleteTask: { params: ["id"] },
+  getUsage: { params: [] },
+  getAuditLog: { params: [] }
 };
 
 const MIGRATIONS = [
@@ -26,6 +28,15 @@ const MIGRATIONS = [
       if (count === 0) {
         sql.exec(`INSERT INTO tasks (title, status) VALUES ('Buy milk', 'pending'), ('Walk the dog', 'completed')`);
       }
+    }
+  },
+  {
+    version: 2,
+    up: (sql: any) => {
+        // Usage Metering Table
+        sql.exec(`CREATE TABLE IF NOT EXISTS _usage (date TEXT PRIMARY KEY, reads INTEGER DEFAULT 0, writes INTEGER DEFAULT 0)`);
+        // Audit Log for Undo/History
+        sql.exec(`CREATE TABLE IF NOT EXISTS _audit_log (id INTEGER PRIMARY KEY, action TEXT, payload TEXT, timestamp TEXT)`);
     }
   }
 ];
@@ -62,6 +73,30 @@ export class DataStore extends DurableObject {
     }
   }
 
+  trackUsage(type: 'reads' | 'writes') {
+      const today = new Date().toISOString().split('T')[0];
+      try {
+        this.sql.exec(
+            `INSERT INTO _usage (date, ${type}) VALUES (?, 1) 
+             ON CONFLICT(date) DO UPDATE SET ${type} = ${type} + 1`,
+            today
+        );
+      } catch (e) {
+          console.error("Usage tracking failed", e);
+      }
+  }
+
+  logAction(action: string, payload: any) {
+      try {
+          this.sql.exec(
+              `INSERT INTO _audit_log (action, payload, timestamp) VALUES (?, ?, datetime('now'))`,
+              action, JSON.stringify(payload)
+          );
+      } catch (e) {
+          console.error("Audit logging failed", e);
+      }
+  }
+
   getSchema() {
     const tables = this.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_%' ESCAPE '\\' AND name != 'sqlite_sequence'").toArray();
     const schema: Record<string, any[]> = {};
@@ -96,6 +131,7 @@ export class DataStore extends DurableObject {
 
     // MANIFEST ENDPOINT
     if (url.pathname === "/manifest") {
+      this.trackUsage('reads');
       return Response.json({
         actions: ACTIONS,
         tables: this.getSchema() 
@@ -108,6 +144,7 @@ export class DataStore extends DurableObject {
     }
 
     if (url.pathname === "/schema") {
+      this.trackUsage('reads');
       const schema = this.getSchema();
       return new Response(JSON.stringify(schema), {
         headers: { "Content-Type": "application/json" }
@@ -152,6 +189,7 @@ export class DataStore extends DurableObject {
         }
 
         if (data.action === "query" && data.sql) {
+          this.trackUsage('reads');
           const results = this.sql.exec(data.sql).toArray();
           webSocket.send(JSON.stringify({ 
             type: "query_result", 
@@ -163,6 +201,10 @@ export class DataStore extends DurableObject {
         if (data.action === "rpc" || (data.action as string) === "createTask") {
             const method = data.method || data.action;
             
+            // Log the attempt
+            this.trackUsage('writes');
+            this.logAction(method, data.payload);
+
             switch (method) {
                 case "createTask":
                     const title = data.payload?.title || "Untitled Task";
@@ -187,6 +229,16 @@ export class DataStore extends DurableObject {
                     }
                     break;
                 
+                case "getUsage":
+                    const usage = this.sql.exec("SELECT * FROM _usage ORDER BY date DESC LIMIT 30").toArray();
+                    webSocket.send(JSON.stringify({ type: "query_result", data: usage, originalSql: "getUsage" }));
+                    break;
+
+                case "getAuditLog":
+                     const logs = this.sql.exec("SELECT * FROM _audit_log ORDER BY timestamp DESC LIMIT 50").toArray();
+                     webSocket.send(JSON.stringify({ type: "query_result", data: logs, originalSql: "getAuditLog" }));
+                     break;
+
                 default:
                     webSocket.send(JSON.stringify({ error: `Unknown RPC method: ${method}` }));
             }
