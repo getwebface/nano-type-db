@@ -1,6 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import type { DurableObjectState } from "cloudflare:workers";
-import * as fs from 'node:fs';
+// `node:fs` is not available in Cloudflare Workers; file-system backups
+// are only performed when running in a Node environment. In Workers
+// we skip file-based backups and rely on R2 or other mechanisms.
 
 interface WebSocketMessage {
   action: "subscribe" | "query" | "mutate" | "rpc";
@@ -122,24 +124,36 @@ export class DataStore extends DurableObject {
     return schema;
   }
 
-  async backupToR2() {
+    async backupToR2() {
       try {
-          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-          const backupPath = `/tmp/backup-${timestamp}.db`;
-          this.sql.exec(`VACUUM INTO '${backupPath}'`);
-          const fileBuffer = fs.readFileSync(backupPath);
-          
-          if (this.env.BACKUP_BUCKET) {
-             await this.env.BACKUP_BUCKET.put(`backup-${timestamp}.db`, fileBuffer);
-             console.log(`Backup uploaded: backup-${timestamp}.db`);
-          } else {
-             console.log("R2 Bucket not configured, skipping upload.");
-          }
-          fs.unlinkSync(backupPath);
+        // If running in Node (local dev), allow file-based backup. In the
+        // Cloudflare Workers runtime there is no `fs` module, so skip.
+        const runningInNode = typeof process !== "undefined" && (process as any).versions?.node;
+        if (!runningInNode) {
+          console.log("Backup skipped: running in Cloudflare Workers (no fs available). To enable, run locally in Node.");
+          return;
+        }
+
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const backupPath = `/tmp/backup-${timestamp}.db`;
+        // @ts-ignore: VACUUM INTO used for local SQLite file export
+        this.sql.exec(`VACUUM INTO '${backupPath}'`);
+        // Lazy require to avoid bundling `fs` into worker bundle
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const fs = require('fs');
+        const fileBuffer = fs.readFileSync(backupPath);
+
+        if (this.env.BACKUP_BUCKET) {
+         await this.env.BACKUP_BUCKET.put(`backup-${timestamp}.db`, fileBuffer);
+         console.log(`Backup uploaded: backup-${timestamp}.db`);
+        } else {
+         console.log("R2 Bucket not configured, skipping upload.");
+        }
+        fs.unlinkSync(backupPath);
       } catch (err) {
-          console.error("Backup failed:", err);
+        console.error("Backup failed:", err);
       }
-  }
+    }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
