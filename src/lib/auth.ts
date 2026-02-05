@@ -21,8 +21,16 @@ export const createAuth = (env: Env) => {
   // SECURITY: Require secret in production, generate random one in development
   let secret = env.BETTER_AUTH_SECRET;
   if (!secret) {
-    // Only allow missing secret in development
-    const isDev = providedBase.includes('localhost') || providedBase.includes('127.0.0.1');
+    // Only allow missing secret in development (localhost or 127.0.0.1)
+    let isDev = false;
+    try {
+      const url = new URL(providedBase);
+      isDev = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+    } catch (e) {
+      // Invalid URL, treat as production
+      isDev = false;
+    }
+    
     if (isDev) {
       // Generate a random secret for development
       secret = `dev-${crypto.randomUUID()}`;

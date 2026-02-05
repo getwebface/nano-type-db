@@ -280,6 +280,10 @@ export class NanoStore extends DurableObject {
   rateLimiters: Map<string, RateLimiter>;
   // SECURITY: Memory tracker for debounced writes
   memoryTracker: MemoryTracker;
+  
+  // SECURITY: Configuration constants
+  private static readonly MAX_SUBSCRIBERS_PER_TABLE = 10000;
+  private static readonly SEMANTIC_SUBSCRIPTION_TTL_MS = 60 * 60 * 1000; // 1 hour
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -813,19 +817,17 @@ export class NanoStore extends DurableObject {
 
       if (data.action === "subscribe" && data.table) {
         // SECURITY: Limit number of subscribers per table to prevent DoS
-        const MAX_SUBSCRIBERS_PER_TABLE = 10000;
-        
         if (!this.subscribers.has(data.table)) {
           this.subscribers.set(data.table, new Set());
         }
         
         const tableSubscribers = this.subscribers.get(data.table)!;
         
-        if (tableSubscribers.size >= MAX_SUBSCRIBERS_PER_TABLE) {
+        if (tableSubscribers.size >= NanoStore.MAX_SUBSCRIBERS_PER_TABLE) {
           try {
             webSocket.send(JSON.stringify({
               type: "error",
-              error: `Table '${data.table}' subscription limit reached (${MAX_SUBSCRIBERS_PER_TABLE} max). Please try again later.`
+              error: `Table '${data.table}' subscription limit reached (${NanoStore.MAX_SUBSCRIBERS_PER_TABLE} max). Please try again later.`
             }));
           } catch (e) {
             console.error("Failed to send subscription limit error:", e);
@@ -855,8 +857,14 @@ export class NanoStore extends DurableObject {
             switch (method) {
                 case "createTask": {
                     try {
-                        // SECURITY: Rate limit check (100 creates per minute per user)
+                        // SECURITY: Get userId from authenticated session
+                        // X-User-ID is set by the edge worker (src/index.ts) AFTER successful
+                        // authentication. The client cannot set this header - it's added by the
+                        // worker which validates the session/API key before forwarding to DO.
+                        // This ensures rate limits are per actual user, not spoofable.
                         const userId = request.headers.get("X-User-ID") || "anonymous";
+                        
+                        // SECURITY: Rate limit check (100 creates per minute per user)
                         if (!this.checkRateLimit(userId, "createTask", 100, 60000)) {
                             webSocket.send(JSON.stringify({ 
                                 type: "mutation_error", 
@@ -1371,10 +1379,9 @@ export class NanoStore extends DurableObject {
                             throw new Error('Failed to generate embedding vector');
                         }
                         
-                        // SECURITY: Store subscription with TTL (1 hour default) to prevent memory leaks
+                        // SECURITY: Store subscription with TTL to prevent memory leaks
                         // Key format: semantic_sub:{topic}:{timestamp}
                         const subKey = `semantic_sub:${topic}:${Date.now()}`;
-                        const TTL_MS = 60 * 60 * 1000; // 1 hour
                         
                         this.memoryStore.set(subKey, {
                             topic,
@@ -1382,7 +1389,7 @@ export class NanoStore extends DurableObject {
                             vector,
                             threshold,
                             socket: webSocket // Store socket reference for notifications
-                        }, TTL_MS); // Add TTL to automatically cleanup old subscriptions
+                        }, NanoStore.SEMANTIC_SUBSCRIPTION_TTL_MS); // Add TTL to automatically cleanup old subscriptions
                         
                         webSocket.send(JSON.stringify({ 
                             type: "success", 

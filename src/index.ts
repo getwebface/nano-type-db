@@ -1,6 +1,6 @@
 import { NanoStore } from "./durable-object";
 import { createAuth } from "./lib/auth";
-import { SecurityHeaders } from "./lib/security";
+import { SecurityHeaders, InputValidator } from "./lib/security";
 import type { ExecutionContext, ScheduledController } from "cloudflare:workers";
 
 export { NanoStore, NanoStore as DataStore };
@@ -105,12 +105,22 @@ export default {
         // Generate secure API key
         const keyId = `nk_live_${crypto.randomUUID().replace(/-/g, '')}`;
         
-        // SECURITY: Set expiration date (default: 90 days, max: 365 days)
-        const expiresInDays = Math.min(body.expiresInDays || 90, 365);
+        // SECURITY: Validate and set expiration date
+        // Ensure expiresInDays is positive (default: 90 days, max: 365 days)
+        let expiresInDays = 90; // default
+        if (body.expiresInDays !== undefined) {
+            const daysInput = Number(body.expiresInDays);
+            if (isNaN(daysInput) || daysInput <= 0) {
+                return SecurityHeaders.apply(
+                    new Response("expiresInDays must be a positive number", { status: 400 })
+                );
+            }
+            expiresInDays = Math.min(daysInput, 365);
+        }
         const expiresAt = Date.now() + (expiresInDays * 24 * 60 * 60 * 1000);
         
-        // SECURITY: Sanitize key name
-        const keyName = (body.name || "Unnamed Key").trim().slice(0, 100);
+        // SECURITY: Sanitize key name using InputValidator
+        const keyName = InputValidator.sanitizeString(body.name || "Unnamed Key", 100, false) || "Unnamed Key";
         
         try {
             await env.AUTH_DB.prepare(
