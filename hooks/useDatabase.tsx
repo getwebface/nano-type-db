@@ -382,7 +382,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 socket.close();
             }
         };
-    }, [socket]);
+    }, []); // Empty dependency array ensures this only runs on unmount
 
     return (
         <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction }}>

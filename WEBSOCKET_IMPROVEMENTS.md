@@ -17,7 +17,7 @@ The WebSocket connection system has been significantly enhanced to provide bette
 ### 2. **Automatic Reconnection**
 
 - **Smart Reconnection**: Automatically attempts to reconnect on connection loss
-- **Exponential Backoff**: Uses a 3-second interval between reconnection attempts
+- **Fixed Interval**: Uses a consistent 3-second interval between reconnection attempts
 - **Max Attempts**: Limits reconnection attempts to 5 to prevent infinite loops
 - **Clean Close Detection**: Only reconnects on abnormal closures (not user-initiated disconnects)
 
@@ -99,7 +99,7 @@ handleSession(webSocket: WebSocket) {
 ## Future Enhancements
 
 - [ ] Add connection quality metrics (latency, packet loss)
-- [ ] Implement exponential backoff for reconnection intervals
+- [ ] Implement exponential backoff for reconnection intervals (currently uses fixed 3s interval)
 - [ ] Add option to manually reconnect
 - [ ] Show reconnection progress/countdown
 - [ ] Add WebSocket debugging mode for development
