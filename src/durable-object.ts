@@ -127,6 +127,12 @@ export class DataStore extends DurableObject {
     return schema;
   }
 
+  isValidTableName(tableName: string): boolean {
+    // Validate table name against schema
+    const schema = this.getSchema();
+    return schema.hasOwnProperty(tableName);
+  }
+
     async backupToR2() {
       try {
         // If running in Node (local dev), allow file-based backup. In the
@@ -411,6 +417,12 @@ export class DataStore extends DurableObject {
   }
 
   getPrimaryKey(tableName: string): string {
+    // Validate table name first
+    if (!this.isValidTableName(tableName)) {
+      console.warn(`Invalid table name: ${tableName}`);
+      return 'id';
+    }
+    
     // Get primary key column from table schema
     try {
       const columns = this.sql.exec(`PRAGMA table_info("${tableName}")`).toArray();
@@ -439,7 +451,7 @@ export class DataStore extends DurableObject {
     const pkField = this.getPrimaryKey(tableName);
     
     // Check if data has the primary key field
-    if (oldData.length > 0 && !oldData[0].hasOwnProperty(pkField)) {
+    if (oldData.length > 0 && !Object.prototype.hasOwnProperty.call(oldData[0], pkField)) {
       console.warn(`Table ${tableName} rows don't have field '${pkField}', falling back to full data`);
       return { added: newData, modified: [], deleted: [] };
     }
@@ -472,6 +484,12 @@ export class DataStore extends DurableObject {
   }
 
   broadcastUpdate(table: string) {
+    // Validate table name to prevent SQL injection
+    if (!this.isValidTableName(table)) {
+      console.error(`Invalid table name for broadcast: ${table}`);
+      return;
+    }
+    
     if (this.subscribers.has(table)) {
       const sockets = this.subscribers.get(table)!;
       
@@ -485,12 +503,15 @@ export class DataStore extends DurableObject {
       // Update snapshot
       this.tableSnapshots.set(table, currentData);
       
+      // Only send fullData if this is the initial broadcast (no previous data)
+      const isInitial = previousData.length === 0;
+      
       // Send diff to subscribers
       const message = JSON.stringify({ 
         event: "update", 
         table,
         diff,
-        fullData: currentData // Send full data for initial load or fallback
+        fullData: isInitial ? currentData : undefined // Only send full data on initial load
       });
       
       for (const socket of sockets) {

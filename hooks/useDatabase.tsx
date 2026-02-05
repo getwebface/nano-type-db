@@ -167,8 +167,8 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const performOptimisticAction = useCallback((action: string, payload: any, optimisticUpdate: () => void, rollback: () => void) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
         
-        // Generate unique ID for this update
-        const updateId = Math.random().toString(36).substring(7);
+        // Generate unique ID for this update using crypto API
+        const updateId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).substring(7)}`;
         
         // Apply optimistic update immediately
         optimisticUpdate();
@@ -243,12 +243,12 @@ export const useRealtimeQuery = (tableName: string) => {
                         const sampleRow = currentData[0] || diff.added[0] || diff.modified[0] || diff.deleted[0];
                         if (!sampleRow) return currentData;
                         
-                        const pkField = sampleRow.hasOwnProperty('id') 
+                        const pkField = Object.prototype.hasOwnProperty.call(sampleRow, 'id')
                             ? 'id' 
                             : Object.keys(sampleRow).find(k => k.toLowerCase().endsWith('id')) || 'id';
                         
                         // If rows don't have the detected PK field, fall back to full data
-                        if (!sampleRow.hasOwnProperty(pkField)) {
+                        if (!Object.prototype.hasOwnProperty.call(sampleRow, pkField)) {
                             return fullData || currentData;
                         }
                         
