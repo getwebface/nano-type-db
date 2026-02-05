@@ -255,6 +255,18 @@ const MIGRATIONS = [
               console.warn("Migration v5 warning:", e);
           }
       }
+  },
+  {
+      version: 6,
+      up: (sql: any) => {
+          // Add user_id column to tasks table for Row Level Security
+          try {
+              sql.exec("ALTER TABLE tasks ADD COLUMN user_id TEXT");
+          } catch (e) {
+              // Column might already exist
+              console.warn("Migration v6 warning:", e);
+          }
+      }
   }
 ];
 
@@ -885,7 +897,8 @@ export class NanoStore extends DurableObject {
                         
                         // 1. Insert into DB (Primary operation - must succeed)
                         // Set vector_status to 'pending' initially (will be updated to 'indexed' or 'failed')
-                        const result = this.sql.exec("INSERT INTO tasks (title, status, vector_status) VALUES (?, 'pending', 'pending') RETURNING *", title).toArray();
+                        // Store user_id for Row Level Security
+                        const result = this.sql.exec("INSERT INTO tasks (title, status, vector_status, user_id) VALUES (?, 'pending', 'pending', ?) RETURNING *", title, userId).toArray();
                         const newTask = result[0];
 
                         // 2. Replicate to D1 for distributed reads (async, non-blocking)
@@ -1107,6 +1120,35 @@ export class NanoStore extends DurableObject {
                 }
 
                 case "streamIntent": {
+                    // SECURITY: Psychic Data is gated to pro tier users only
+                    // Auto-sensing with AI embeddings burns through budget quickly
+                    const userId = request.headers.get("X-User-ID") || "anonymous";
+                    
+                    // Check user tier from AUTH_DB
+                    try {
+                        const userCheck = await this.env.AUTH_DB.prepare(
+                            "SELECT tier FROM user WHERE id = ?"
+                        ).bind(userId).first();
+                        
+                        if (!userCheck || userCheck.tier !== 'pro') {
+                            webSocket.send(JSON.stringify({ 
+                                type: "error", 
+                                error: "Psychic Search is a pro-tier feature. Please upgrade to access AI-powered auto-sensing.",
+                                feature: "psychic_search"
+                            }));
+                            break;
+                        }
+                    } catch (e: any) {
+                        console.warn("Tier check failed for streamIntent:", e.message);
+                        // Fail closed - deny access if we can't verify tier
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "Unable to verify subscription tier. Please try again.",
+                            feature: "psychic_search"
+                        }));
+                        break;
+                    }
+                    
                     // Psychic Data: Predict user needs and pre-push data
                     const text = data.payload?.text;
                     if (!text || typeof text !== 'string') {
@@ -1213,6 +1255,9 @@ export class NanoStore extends DurableObject {
                      break;
 
                 case "listTasks": {
+                     // SECURITY: Get userId for Row Level Security filtering
+                     const userId = request.headers.get("X-User-ID") || "anonymous";
+                     
                      // Read from D1 replica for horizontal scaling
                      // Support pagination to avoid loading large datasets (max 1000 per page)
                      const limitRaw = data.payload?.limit;
@@ -1226,11 +1271,26 @@ export class NanoStore extends DurableObject {
                      const safeLimit = Math.min(Math.max(1, limit), 1000); // Between 1-1000
                      const safeOffset = Math.max(0, offset); // Non-negative
                      
-                     const tasks = await this.readFromD1(
-                         "SELECT * FROM tasks ORDER BY id LIMIT ? OFFSET ?", 
-                         safeLimit, 
-                         safeOffset
-                     );
+                     // ROW LEVEL SECURITY: Filter tasks by user permissions
+                     // First, check if user has explicit read permissions for tasks table
+                     let hasReadPermission = false;
+                     try {
+                         const permissionCheck = await this.env.AUTH_DB.prepare(
+                             "SELECT can_read FROM permissions WHERE user_id = ? AND room_id = ? AND table_name = 'tasks'"
+                         ).bind(userId, this.doId).first();
+                         
+                         if (permissionCheck && permissionCheck.can_read) {
+                             hasReadPermission = true;
+                         }
+                     } catch (e: any) {
+                         console.warn("Permission check failed:", e.message);
+                     }
+                     
+                     // Filter by user_id: show only tasks created by this user OR tasks where user has explicit read permission
+                     const tasks = hasReadPermission 
+                         ? await this.readFromD1("SELECT * FROM tasks ORDER BY id LIMIT ? OFFSET ?", safeLimit, safeOffset)
+                         : await this.readFromD1("SELECT * FROM tasks WHERE user_id = ? ORDER BY id LIMIT ? OFFSET ?", userId, safeLimit, safeOffset);
+                     
                      webSocket.send(JSON.stringify({ 
                          type: "query_result", 
                          data: tasks, 

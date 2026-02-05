@@ -86,6 +86,26 @@ const ConnectionScreen: React.FC = () => {
 function App() {
     // Check session status using Better Auth hook
     const { data: session, isPending } = authClient.useSession();
+    const [userTier, setUserTier] = useState<string>('free');
+
+    // Fetch user tier when session is available
+    React.useEffect(() => {
+        if (session?.user?.id) {
+            // Fetch user tier from the server
+            fetch(`/api/user-tier?user_id=${session.user.id}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.tier) {
+                        setUserTier(data.tier);
+                    }
+                })
+                .catch(err => {
+                    console.error('Failed to fetch user tier:', err);
+                    // Default to free tier on error
+                    setUserTier('free');
+                });
+        }
+    }, [session?.user?.id]);
 
     if (isPending) {
         return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-500">Loading...</div>;
@@ -95,8 +115,11 @@ function App() {
         return <AuthScreen />;
     }
 
+    // Only enable psychic auto-sensing for pro tier users
+    const isPro = userTier === 'pro';
+
     return (
-        <DatabaseProvider psychic={true}>
+        <DatabaseProvider psychic={isPro}>
             <Toaster />
             <ConnectionScreen />
         </DatabaseProvider>

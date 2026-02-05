@@ -36,6 +36,32 @@ export default {
         });
     }
 
+    // User Tier Endpoint
+    if (url.pathname === "/api/user-tier") {
+        const session = await auth.api.getSession({ headers: request.headers });
+        if (!session?.user?.id) {
+            return SecurityHeaders.apply(
+                new Response("Unauthorized", { status: 401 })
+            );
+        }
+
+        try {
+            const userTier = await env.AUTH_DB.prepare(
+                "SELECT tier FROM user WHERE id = ?"
+            ).bind(session.user.id).first();
+
+            return SecurityHeaders.apply(
+                Response.json({ 
+                    tier: userTier?.tier || 'free'
+                })
+            );
+        } catch (e: any) {
+            return SecurityHeaders.apply(
+                new Response(`Error fetching user tier: ${e.message}`, { status: 500 })
+            );
+        }
+    }
+
     // 2. Serve Static Assets (React App)
     if (env.ASSETS) {
       try {
