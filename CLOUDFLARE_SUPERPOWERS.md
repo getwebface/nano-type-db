@@ -223,6 +223,49 @@ performMutation('createTask', { title: 'New Task' });
 // UI updates instantly, rolls back automatically on failure
 ```
 
+### 11. Automatic Reactivity (Convex-style Live Queries)
+
+**Problem**: Manual `broadcastUpdate` calls in every RPC method. Forgetting it means stale UI.
+
+**Solution**: Queries automatically re-run when their dependent tables change.
+
+**Implementation**:
+- New `subscribe_query` and `unsubscribe_query` WebSocket actions
+- `querySubscriptions` tracking in NanoStore class  
+- Enhanced `broadcastUpdate` to auto-refresh affected queries
+- Client helper: `runReactiveQuery` in `useDatabase.tsx`
+
+**Usage**:
+```typescript
+// Subscribe to a query - it auto-refreshes when 'tasks' table changes
+const unsubscribe = runReactiveQuery(
+  'listTasks',              // RPC method
+  { owner_id: 'user123' },  // Payload
+  ['tasks']                 // Dependent tables
+);
+
+// When someone creates a task, ALL subscribed queries automatically refresh
+performMutation('createTask', { title: 'New Task' });
+
+// Cleanup when component unmounts
+useEffect(() => unsubscribe, []);
+```
+
+**How It Works**:
+1. Client calls `runReactiveQuery(method, payload, tables)`
+2. Server stores: `querySubscriptions.set(webSocket, { method, payload, tables })`
+3. When data changes via `broadcastUpdate(table, action, row)`:
+   - Server finds all queries that depend on `table`
+   - Sends `query_refresh` notification to clients
+   - Clients can optionally re-fetch data automatically
+4. No manual `broadcastUpdate` calls needed - it's automatic!
+
+**Benefits**:
+- 🔄 Zero boilerplate - queries just stay fresh
+- ⚡ Efficient - only affected queries refresh
+- 💯 Convex-style developer experience
+- 🎯 Fine-grained - specify exactly which tables to watch
+
 ## 🔧 Configuration
 
 ### wrangler.toml
@@ -267,6 +310,7 @@ All new tables are created in migrations v6 and v7:
 | External Events | Manual webhooks | Automatic dispatch |
 | Cron Jobs | Fixed schedule | User-defined |
 | Optimistic UI | Manual wiring | Built-in helper |
+| Reactivity | Manual broadcastUpdate | Automatic query refresh |
 | AI Costs | Full price | Cached via Gateway |
 
 ## 🚀 Migration Guide

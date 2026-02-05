@@ -515,6 +515,45 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         // Use the existing performOptimisticAction with our optimistic logic
         performOptimisticAction(method, payload, optimisticUpdate, rollback);
     }, [socket, lastResult, performOptimisticAction, addToast]);
+    
+    /**
+     * Reactive query execution - automatically re-runs when data changes
+     * This is the "automatic reactivity" feature similar to Convex
+     */
+    const runReactiveQuery = useCallback((method: string, payload: any, tables: string[]) => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+            addToast("Not connected to database", "error");
+            return;
+        }
+        
+        const queryId = crypto.randomUUID ? crypto.randomUUID() : `query_${Date.now()}`;
+        
+        // Subscribe to query - it will auto-refresh when tables change
+        socket.send(JSON.stringify({
+            action: 'subscribe_query',
+            queryId,
+            method,
+            payload,
+            tables
+        }));
+        
+        // Also execute the query immediately via RPC
+        socket.send(JSON.stringify({
+            action: 'rpc',
+            method,
+            payload
+        }));
+        
+        // Return unsubscribe function
+        return () => {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({
+                    action: 'unsubscribe_query',
+                    queryId
+                }));
+            }
+        };
+    }, [socket, addToast]);
 
     const subscribe = useCallback((table: string) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -636,7 +675,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     }, []); // Empty dependency array ensures this only runs on unmount
 
     return (
-        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, performMutation, socket, setCursor, setPresence, getPsychicData }}>
+        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, performMutation, runReactiveQuery, socket, setCursor, setPresence, getPsychicData }}>
             {children}
         </DatabaseContext.Provider>
     );

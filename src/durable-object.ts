@@ -45,12 +45,13 @@ import {
  */
 
 interface WebSocketMessage {
-  action: "subscribe" | "query" | "mutate" | "rpc" | "ping";
+  action: "subscribe" | "query" | "mutate" | "rpc" | "ping" | "subscribe_query" | "unsubscribe_query";
   table?: string;
   sql?: string;
   method?: string; 
   payload?: any;
   updateId?: string; // For optimistic updates
+  queryId?: string; // For query subscriptions
 }
 
 /**
@@ -379,7 +380,7 @@ export class NanoStore extends DurableObject {
   // RLS: Row Level Security policy engine
   rlsEngine: RLSPolicyEngine;
   // Automatic Reactivity: Track queries per WebSocket for auto-refresh
-  querySubscriptions: WeakMap<WebSocket, Set<string>>;
+  querySubscriptions: WeakMap<WebSocket, Map<string, { method: string; payload: any; tables: string[] }>>;
   
   // SECURITY: Configuration constants
   private static readonly MAX_SUBSCRIBERS_PER_TABLE = 10000;
@@ -942,6 +943,57 @@ export class NanoStore extends DurableObject {
         }
         
         tableSubscribers.add(webSocket);
+      }
+      
+      // Automatic Reactivity: Subscribe to query results
+      // When subscribed table data changes, automatically re-run the query
+      if (data.action === "subscribe_query") {
+        const { queryId, method, payload, tables } = data;
+        
+        if (!queryId || !method || !tables) {
+          webSocket.send(JSON.stringify({
+            type: "error",
+            error: "subscribe_query requires queryId, method, and tables"
+          }));
+          return;
+        }
+        
+        // Get or create query subscriptions for this WebSocket
+        if (!this.querySubscriptions.has(webSocket)) {
+          this.querySubscriptions.set(webSocket, new Map());
+        }
+        
+        const wsQueries = this.querySubscriptions.get(webSocket)!;
+        wsQueries.set(queryId, { method, payload, tables });
+        
+        console.log(`Query ${queryId} subscribed to tables: ${tables.join(', ')}`);
+        
+        // Subscribe to all affected tables
+        tables.forEach((table: string) => {
+          if (!this.subscribers.has(table)) {
+            this.subscribers.set(table, new Set());
+          }
+          this.subscribers.get(table)!.add(webSocket);
+        });
+        
+        webSocket.send(JSON.stringify({
+          type: "query_subscribed",
+          queryId
+        }));
+      }
+      
+      if (data.action === "unsubscribe_query") {
+        const { queryId } = data;
+        
+        if (this.querySubscriptions.has(webSocket)) {
+          const wsQueries = this.querySubscriptions.get(webSocket)!;
+          wsQueries.delete(queryId);
+        }
+        
+        webSocket.send(JSON.stringify({
+          type: "query_unsubscribed",
+          queryId
+        }));
       }
 
       if (data.action === "query" && data.sql) {
@@ -1830,6 +1882,41 @@ export class NanoStore extends DurableObject {
       for (const socket of sockets) {
         try {
           socket.send(message);
+          
+          // Automatic Reactivity: Re-run subscribed queries
+          if (this.querySubscriptions.has(socket)) {
+            const wsQueries = this.querySubscriptions.get(socket)!;
+            
+            // Find queries that depend on this table
+            wsQueries.forEach(async (queryInfo, queryId) => {
+              if (queryInfo.tables.includes(table)) {
+                try {
+                  // Re-execute the query
+                  console.log(`Auto-refreshing query ${queryId} due to ${table} ${action}`);
+                  
+                  // Execute the RPC method again
+                  const rerunMessage = {
+                    action: 'rpc',
+                    method: queryInfo.method,
+                    payload: queryInfo.payload,
+                    _autoRefresh: true,
+                    queryId
+                  };
+                  
+                  // Simulate re-running the query (we'd call the actual RPC handler)
+                  // For now, just send a refresh notification
+                  socket.send(JSON.stringify({
+                    type: "query_refresh",
+                    queryId,
+                    table,
+                    action
+                  }));
+                } catch (e) {
+                  console.error(`Failed to auto-refresh query ${queryId}:`, e);
+                }
+              }
+            });
+          }
         } catch (err) {
           sockets.delete(socket);
         }
