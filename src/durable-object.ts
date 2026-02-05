@@ -157,7 +157,7 @@ const ACTIONS = {
   createTask: { params: ["title"] },
   completeTask: { params: ["id"] },
   deleteTask: { params: ["id"] },
-  listTasks: { params: [] },
+  listTasks: { params: ["limit?", "offset?"] }, // Optional pagination params
   search: { params: ["query"] },
   getUsage: { params: [] },
   getAuditLog: { params: [] },
@@ -910,8 +910,25 @@ export class NanoStore extends DurableObject {
 
                 case "listTasks": {
                      // Read from D1 replica for horizontal scaling
-                     const tasks = await this.readFromD1("SELECT * FROM tasks ORDER BY id");
-                     webSocket.send(JSON.stringify({ type: "query_result", data: tasks, originalSql: "listTasks" }));
+                     // Support pagination to avoid loading large datasets
+                     const limit = data.payload?.limit || 100; // Default 100 rows
+                     const offset = data.payload?.offset || 0;
+                     
+                     // Validate pagination parameters
+                     const safeLimit = Math.min(Math.max(1, limit), 1000); // Between 1-1000
+                     const safeOffset = Math.max(0, offset); // Non-negative
+                     
+                     const tasks = await this.readFromD1(
+                         "SELECT * FROM tasks ORDER BY id LIMIT ? OFFSET ?", 
+                         safeLimit, 
+                         safeOffset
+                     );
+                     webSocket.send(JSON.stringify({ 
+                         type: "query_result", 
+                         data: tasks, 
+                         originalSql: "listTasks",
+                         pagination: { limit: safeLimit, offset: safeOffset }
+                     }));
                      break;
                 }
 
