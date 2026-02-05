@@ -7,6 +7,7 @@ import {
   QueryTimeout,
   MemoryTracker 
 } from "./lib/security";
+import { generateTypeSafeClient } from "./client-generator";
 // `node:fs` is not available in Cloudflare Workers; file-system backups
 // are only performed when running in a Node environment. In Workers
 // we skip file-based backups and rely on R2 or other mechanisms.
@@ -202,7 +203,12 @@ const ACTIONS = {
   // Semantic Reflex - Killer Feature #1
   subscribeSemantic: { params: ["topic", "description", "threshold"] },
   // Psychic Data - Killer Feature #2
-  streamIntent: { params: ["text"] }
+  streamIntent: { params: ["text"] },
+  // Webhook Management
+  createWebhook: { params: ["url", "events", "secret?"] },
+  listWebhooks: { params: [] },
+  updateWebhook: { params: ["id", "url?", "events?", "active?"] },
+  deleteWebhook: { params: ["id"] }
 };
 
 const MIGRATIONS = [
@@ -266,6 +272,19 @@ const MIGRATIONS = [
               // Column might already exist
               console.warn("Migration v6 warning:", e);
           }
+          // Webhooks table for client notification system
+          sql.exec(`CREATE TABLE IF NOT EXISTS _webhooks (
+              id TEXT PRIMARY KEY,
+              url TEXT NOT NULL,
+              events TEXT NOT NULL,
+              secret TEXT,
+              active INTEGER DEFAULT 1,
+              created_at INTEGER NOT NULL,
+              last_triggered_at INTEGER,
+              failure_count INTEGER DEFAULT 0
+          )`);
+          // Index for quick active webhook lookups
+          sql.exec(`CREATE INDEX IF NOT EXISTS idx_webhooks_active ON _webhooks(active) WHERE active = 1`);
       }
   }
 ];
@@ -385,6 +404,17 @@ export class NanoStore extends DurableObject {
              ON CONFLICT(date) DO UPDATE SET ${type} = ${type} + 1`,
             today
         );
+        
+        // Log to Cloudflare Analytics Engine for real-time observability
+        if (this.env.ANALYTICS) {
+            this.ctx.waitUntil(
+                this.env.ANALYTICS.writeDataPoint({
+                    blobs: [this.doId, type],
+                    doubles: [1], // count
+                    indexes: [`${type}_${today}`]
+                })
+            );
+        }
       } catch (e) {
           console.error("Usage tracking failed", e);
       }
@@ -761,9 +791,177 @@ export class NanoStore extends DurableObject {
       });
     }
 
+    // DOWNLOAD CLIENT ENDPOINT - Generate and serve type-safe TypeScript client
+    if (url.pathname === "/download-client") {
+      this.trackUsage('reads');
+      const clientCode = generateTypeSafeClient(ACTIONS, this.getSchema());
+      return new Response(clientCode, {
+        headers: {
+          "Content-Type": "application/typescript",
+          "Content-Disposition": 'attachment; filename="nanotype-client.ts"'
+        }
+      });
+    }
+
     if (url.pathname === "/backup") {
         await this.backupToR2();
         return new Response("Backup completed");
+    }
+
+    // Internal endpoint to update vector status (called by queue consumer)
+    if (url.pathname === "/internal/update-vector-status") {
+        if (request.method !== "POST") {
+            return new Response("Method not allowed", { status: 405 });
+        }
+        try {
+            const { taskId, status, values } = await request.json() as { taskId: number, status: string, values?: number[] };
+            
+            // Update vector status in database
+            this.sql.exec("UPDATE tasks SET vector_status = ? WHERE id = ?", status, taskId);
+            this.trackUsage('ai_ops');
+            console.log(`Vector status updated for task ${taskId}: ${status}`);
+            
+            // If indexed successfully and we have values, trigger semantic reflex
+            if (status === 'indexed' && values) {
+                const taskResult = this.sql.exec("SELECT * FROM tasks WHERE id = ?", taskId).toArray();
+                const task = taskResult[0];
+                
+                // Only process semantic reflex if task still exists
+                if (task) {
+                    // NEURAL EVENT LOOP - Semantic Reflex for queued embeddings
+                    for (const key of this.memoryStore.keys()) {
+                        if (key.startsWith('semantic_sub:')) {
+                            const subscription = this.memoryStore.get(key);
+                            if (subscription && subscription.vector && subscription.socket) {
+                                try {
+                                    const similarity = calculateCosineSimilarity(values, subscription.vector);
+                                    if (similarity >= subscription.threshold && subscription.socket?.readyState === 1) {
+                                        subscription.socket.send(JSON.stringify({
+                                            type: "semantic_match",
+                                            topic: subscription.topic,
+                                            similarity: similarity,
+                                            row: task
+                                        }));
+                                        console.log(`Semantic match (queued): task ${taskId} matched "${subscription.topic}" (similarity: ${similarity.toFixed(3)})`);
+                                    }
+                                } catch (e: any) {
+                                    console.error(`Semantic check failed for ${key}:`, e.message);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    console.log(`Task ${taskId} no longer exists - skipping semantic reflex`);
+                }
+            }
+            
+            return new Response("Status updated", { status: 200 });
+        } catch (error: any) {
+            console.error("Failed to update vector status:", error);
+            return new Response(`Error: ${error.message}`, { status: 500 });
+        }
+    }
+
+    // List all backups in R2 bucket
+    if (url.pathname === "/backups") {
+        try {
+            if (!this.env.BACKUP_BUCKET) {
+                return Response.json({ error: "R2 Bucket not configured" }, { status: 500 });
+            }
+            
+            const listed = await this.env.BACKUP_BUCKET.list({ prefix: "backup-" });
+            const backups = listed.objects.map(obj => ({
+                key: obj.key,
+                size: obj.size,
+                uploaded: obj.uploaded.toISOString(),
+                timestamp: obj.key.replace('backup-', '').replace('.db', '')
+            }));
+            
+            // Sort by uploaded date, newest first
+            backups.sort((a, b) => new Date(b.uploaded).getTime() - new Date(a.uploaded).getTime());
+            
+            return Response.json({ backups });
+        } catch (error: any) {
+            console.error("Failed to list backups:", error);
+            return Response.json({ error: error.message }, { status: 500 });
+        }
+    }
+
+    // Restore from a specific backup
+    if (url.pathname === "/restore") {
+        if (request.method !== "POST") {
+            return new Response("Method not allowed", { status: 405 });
+        }
+        
+        try {
+            const { backupKey } = await request.json() as { backupKey: string };
+            
+            if (!this.env.BACKUP_BUCKET) {
+                return Response.json({ error: "R2 Bucket not configured" }, { status: 500 });
+            }
+            
+            // Validate backup key
+            if (!backupKey || !backupKey.startsWith('backup-')) {
+                return Response.json({ error: "Invalid backup key" }, { status: 400 });
+            }
+            
+            // Fetch backup from R2
+            const backup = await this.env.BACKUP_BUCKET.get(backupKey);
+            if (!backup) {
+                return Response.json({ error: "Backup not found" }, { status: 404 });
+            }
+            
+            // For Cloudflare Workers Durable Objects, we can't directly restore the SQLite file
+            // Instead, we need to parse it and reconstruct the tables
+            // This is a simplified version - in production, you'd want to use a proper SQLite parser
+            console.log(`Restoring from backup: ${backupKey}`);
+            
+            // Note: Full SQLite restoration in Workers would require either:
+            // 1. Parsing the SQLite file format (complex)
+            // 2. Exporting as SQL dump format instead of binary SQLite
+            // 3. Using VACUUM FROM (if available in Workers DO SQLite)
+            
+            // For now, return a message indicating this needs implementation
+            return Response.json({ 
+                message: "Restore functionality requires SQL dump format. Current backup is binary SQLite.",
+                suggestion: "Modify backupToR2() to export as SQL dump for easier restoration"
+            }, { status: 501 });
+            
+        } catch (error: any) {
+            console.error("Failed to restore backup:", error);
+            return Response.json({ error: error.message }, { status: 500 });
+        }
+    }
+
+    // Analytics endpoint - fetch usage data from _usage table
+    if (url.pathname === "/analytics") {
+        try {
+            // Get last 30 days of usage data
+            const usageData = this.sql.exec(
+                "SELECT * FROM _usage ORDER BY date DESC LIMIT 30"
+            ).toArray();
+            
+            // Calculate totals
+            const totals = {
+                reads: 0,
+                writes: 0,
+                ai_ops: 0
+            };
+            
+            usageData.forEach((row: any) => {
+                totals.reads += row.reads || 0;
+                totals.writes += row.writes || 0;
+                totals.ai_ops += row.ai_ops || 0;
+            });
+            
+            return Response.json({
+                daily: usageData.reverse(), // oldest to newest for charts
+                totals
+            });
+        } catch (error: any) {
+            console.error("Failed to fetch analytics:", error);
+            return Response.json({ error: error.message }, { status: 500 });
+        }
     }
 
     if (url.pathname === "/schema") {
@@ -916,7 +1114,18 @@ export class NanoStore extends DurableObject {
 
                         // 3. Generate Embedding & Store (Secondary operation - best effort)
                         // Vector Consistency: Track status in database to allow retry jobs
-                        if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
+                        // PRODUCTION FIX: Use Cloudflare Queue for reliable AI processing with retry
+                        if (newTask && this.env.EMBEDDING_QUEUE) {
+                            // Push embedding job to queue (will retry on failure with exponential backoff)
+                            await this.env.EMBEDDING_QUEUE.send({
+                                taskId: newTask.id,
+                                doId: this.doId,
+                                title: title,
+                                timestamp: Date.now()
+                            });
+                            console.log(`Embedding job queued for task ${newTask.id}`);
+                        } else if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
+                            // FALLBACK: If no queue, use old ctx.waitUntil approach
                             // Use ctx.waitUntil for async operation without blocking the response
                             this.ctx.waitUntil((async () => {
                                 try {
@@ -1634,6 +1843,186 @@ export class NanoStore extends DurableObject {
                     break;
                 }
 
+                // Webhook Management
+                case "createWebhook": {
+                    this.trackUsage('writes');
+                    
+                    const { url, events, secret } = data.payload || {};
+                    
+                    // Validate inputs
+                    if (!url || typeof url !== 'string') {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "createWebhook requires url parameter" 
+                        }));
+                        break;
+                    }
+                    
+                    if (!events || typeof events !== 'string') {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "createWebhook requires events parameter (comma-separated list)" 
+                        }));
+                        break;
+                    }
+                    
+                    // Validate URL format
+                    try {
+                        new URL(url);
+                    } catch (e) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "Invalid webhook URL format" 
+                        }));
+                        break;
+                    }
+                    
+                    try {
+                        const id = `wh_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+                        const now = Date.now();
+                        
+                        this.sql.exec(
+                            `INSERT INTO _webhooks (id, url, events, secret, active, created_at, failure_count) 
+                             VALUES (?, ?, ?, ?, 1, ?, 0)`,
+                            id, url, events, secret || null, now
+                        );
+                        
+                        const webhook = { id, url, events, active: 1, created_at: now };
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_success", 
+                            action: "createWebhook",
+                            data: webhook 
+                        }));
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: `Failed to create webhook: ${e.message}` 
+                        }));
+                    }
+                    break;
+                }
+                
+                case "listWebhooks": {
+                    this.trackUsage('reads');
+                    
+                    try {
+                        const webhooks = this.sql.exec(
+                            `SELECT id, url, events, active, created_at, last_triggered_at, failure_count 
+                             FROM _webhooks ORDER BY created_at DESC`
+                        ).toArray();
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "query_result", 
+                            data: webhooks 
+                        }));
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: `Failed to list webhooks: ${e.message}` 
+                        }));
+                    }
+                    break;
+                }
+                
+                case "updateWebhook": {
+                    this.trackUsage('writes');
+                    
+                    const { id, url, events, active } = data.payload || {};
+                    
+                    if (!id) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "updateWebhook requires id parameter" 
+                        }));
+                        break;
+                    }
+                    
+                    try {
+                        const updates: string[] = [];
+                        const params: any[] = [];
+                        
+                        if (url !== undefined) {
+                            // Validate URL if provided
+                            try {
+                                new URL(url);
+                            } catch (e) {
+                                webSocket.send(JSON.stringify({ 
+                                    type: "error", 
+                                    error: "Invalid webhook URL format" 
+                                }));
+                                break;
+                            }
+                            updates.push("url = ?");
+                            params.push(url);
+                        }
+                        
+                        if (events !== undefined) {
+                            updates.push("events = ?");
+                            params.push(events);
+                        }
+                        
+                        if (active !== undefined) {
+                            updates.push("active = ?");
+                            params.push(active ? 1 : 0);
+                        }
+                        
+                        if (updates.length === 0) {
+                            webSocket.send(JSON.stringify({ 
+                                type: "error", 
+                                error: "No fields to update" 
+                            }));
+                            break;
+                        }
+                        
+                        params.push(id);
+                        this.sql.exec(
+                            `UPDATE _webhooks SET ${updates.join(', ')} WHERE id = ?`,
+                            ...params
+                        );
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_success", 
+                            action: "updateWebhook"
+                        }));
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: `Failed to update webhook: ${e.message}` 
+                        }));
+                    }
+                    break;
+                }
+                
+                case "deleteWebhook": {
+                    this.trackUsage('writes');
+                    
+                    const { id } = data.payload || {};
+                    
+                    if (!id) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "deleteWebhook requires id parameter" 
+                        }));
+                        break;
+                    }
+                    
+                    try {
+                        this.sql.exec(`DELETE FROM _webhooks WHERE id = ?`, id);
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_success", 
+                            action: "deleteWebhook"
+                        }));
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: `Failed to delete webhook: ${e.message}` 
+                        }));
+                    }
+                    break;
+                }
+
                 default:
                     webSocket.send(JSON.stringify({ error: `Unknown RPC method: ${method}` }));
             }
@@ -1705,6 +2094,12 @@ export class NanoStore extends DurableObject {
       return;
     }
     
+    // Dispatch webhooks for this event (async, non-blocking)
+    // We don't await to avoid blocking the broadcast
+    this.dispatchWebhooks(table, action, row).catch(err => {
+      console.error('Webhook dispatch failed:', err);
+    });
+    
     if (this.subscribers.has(table)) {
       const sockets = this.subscribers.get(table)!;
       
@@ -1723,6 +2118,84 @@ export class NanoStore extends DurableObject {
           sockets.delete(socket);
         }
       }
+    }
+  }
+
+  async dispatchWebhooks(table: string, action: 'added' | 'modified' | 'deleted', row: any) {
+    try {
+      // Query active webhooks that match this event
+      const eventName = `${table}.${action}`;
+      const webhooks = this.sql.exec(
+        `SELECT id, url, events, secret FROM _webhooks WHERE active = 1`
+      ).toArray();
+      
+      if (!webhooks || webhooks.length === 0) {
+        return;
+      }
+      
+      // Filter webhooks that subscribe to this event
+      const matchingWebhooks = webhooks.filter((wh: any) => {
+        // Pre-process events string into array (could be cached if performance is critical)
+        const events = wh.events.split(',').map((e: string) => e.trim());
+        return events.includes('*') || events.includes(eventName) || 
+               events.includes(`${table}.*`) || events.includes(`*.${action}`);
+      });
+      
+      if (matchingWebhooks.length === 0) {
+        return;
+      }
+      
+      // Send to Cloudflare Queue for async delivery
+      if (this.env.WEBHOOK_QUEUE) {
+        const payload = {
+          event: eventName,
+          table,
+          action,
+          data: row,
+          timestamp: Date.now()
+        };
+        
+        for (const webhook of matchingWebhooks) {
+          try {
+            await this.env.WEBHOOK_QUEUE.send({
+              webhookId: webhook.id,
+              url: webhook.url,
+              secret: webhook.secret,
+              payload
+            });
+            
+            // Update last triggered time
+            this.sql.exec(
+              `UPDATE _webhooks SET last_triggered_at = ? WHERE id = ?`,
+              Date.now(), webhook.id
+            );
+          } catch (e: any) {
+            console.error(`Failed to queue webhook ${webhook.id}:`, e.message);
+            
+            // Increment failure count and get the new value in one query
+            this.sql.exec(
+              `UPDATE _webhooks SET failure_count = failure_count + 1 WHERE id = ?`,
+              webhook.id
+            );
+            
+            // Check if we should disable (after update to get current count)
+            const result = this.sql.exec(
+              `SELECT failure_count FROM _webhooks WHERE id = ?`,
+              webhook.id
+            ).toArray()[0];
+            
+            if (result && result.failure_count >= 10) {
+              this.sql.exec(
+                `UPDATE _webhooks SET active = 0 WHERE id = ?`,
+                webhook.id
+              );
+              console.warn(`Webhook ${webhook.id} disabled after ${result.failure_count} failures`);
+            }
+          }
+        }
+      }
+    } catch (e: any) {
+      console.error('dispatchWebhooks error:', e.message);
     }
   }
 

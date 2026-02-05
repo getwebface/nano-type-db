@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Key, Copy, Plus, Trash, Check } from 'lucide-react';
+import { Key, Copy, Plus, Trash, Check, Download, FileCode } from 'lucide-react';
 
 interface ApiKey {
     id: string;
@@ -98,7 +98,57 @@ export const ApiKeys: React.FC = () => {
     };
 
     return (
-        <div className="p-6 bg-slate-900 border border-slate-800 rounded-lg">
+        <div className="space-y-6">
+            {/* Download TypeScript Client Section */}
+            <div className="p-6 bg-slate-900 border border-slate-800 rounded-lg">
+                <div className="flex justify-between items-center mb-4">
+                    <div>
+                        <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                            <FileCode className="text-green-500" /> TypeScript Client SDK
+                        </h3>
+                        <p className="text-xs text-slate-500 mt-1">
+                            Download a fully typed TypeScript client for your database
+                        </p>
+                    </div>
+                    <button 
+                        onClick={async () => {
+                            try {
+                                const res = await fetch(`${HTTP_URL}/download-client?room_id=demo&token=demo-token`);
+                                if (res.ok) {
+                                    const blob = await res.blob();
+                                    const url = window.URL.createObjectURL(blob);
+                                    const a = document.createElement('a');
+                                    a.href = url;
+                                    a.download = 'nanotype-client.ts';
+                                    document.body.appendChild(a);
+                                    a.click();
+                                    window.URL.revokeObjectURL(url);
+                                    document.body.removeChild(a);
+                                }
+                            } catch (e) {
+                                console.error('Failed to download client', e);
+                            }
+                        }}
+                        className="bg-green-600 hover:bg-green-700 px-3 py-1.5 rounded text-sm font-bold flex gap-2 items-center transition-colors"
+                    >
+                        <Download size={16} /> Download Client
+                    </button>
+                </div>
+                
+                <div className="p-4 bg-slate-950 border border-slate-800 rounded">
+                    <h4 className="text-xs font-bold text-slate-400 mb-2 uppercase">Features</h4>
+                    <ul className="text-xs text-slate-500 space-y-1">
+                        <li>✓ Full TypeScript type safety</li>
+                        <li>✓ Auto-generated from your schema</li>
+                        <li>✓ Typed action methods</li>
+                        <li>✓ WebSocket support with real-time updates</li>
+                        <li>✓ Promise-based API</li>
+                    </ul>
+                </div>
+            </div>
+
+            {/* API Keys Section */}
+            <div className="p-6 bg-slate-900 border border-slate-800 rounded-lg">
             <div className="flex justify-between items-center mb-6">
                 <div>
                     <h3 className="text-lg font-bold text-white flex items-center gap-2">
@@ -174,6 +224,7 @@ export const ApiKeys: React.FC = () => {
                     </pre>
                 </div>
             )}
+            </div>
         </div>
     );
 };
