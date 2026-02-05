@@ -52,6 +52,7 @@ export interface DatabaseContextType {
     socket: WebSocket | null;
     setCursor: (userId: string, position: any) => void;
     setPresence: (userId: string, status: any) => void;
+    getPsychicData: (key: string) => any;
 }
 
 export interface ToastMessage {

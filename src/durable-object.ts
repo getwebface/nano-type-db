@@ -193,7 +193,9 @@ const ACTIONS = {
   getSyncStatus: { params: [] },
   forceSyncAll: { params: [] },
   // Semantic Reflex - Killer Feature #1
-  subscribeSemantic: { params: ["topic", "description", "threshold"] }
+  subscribeSemantic: { params: ["topic", "description", "threshold"] },
+  // Psychic Data - Killer Feature #2
+  streamIntent: { params: ["text"] }
 };
 
 const MIGRATIONS = [
@@ -971,6 +973,81 @@ export class NanoStore extends DurableObject {
                     }
                     
                     webSocket.send(JSON.stringify({ type: "query_result", data: results, originalSql: "search" }));
+                    break;
+                }
+
+                case "streamIntent": {
+                    // Psychic Data: Predict user needs and pre-push data
+                    const text = data.payload?.text;
+                    if (!text || typeof text !== 'string') {
+                        break;
+                    }
+                    
+                    try {
+                        // Step 1: Generate embedding for the intent text
+                        if (!this.env.AI || !this.env.VECTOR_INDEX) {
+                            console.warn('AI or VECTOR_INDEX not available for streamIntent');
+                            break;
+                        }
+                        
+                        const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [text] });
+                        const values = embeddings.data[0];
+                        
+                        if (!values) {
+                            break;
+                        }
+                        
+                        // Step 2: Query vector index for top 3 matches
+                        const matches = await this.env.VECTOR_INDEX.query(values, { topK: 3 });
+                        
+                        // Step 3: Extract IDs from matches for this DO
+                        const taskIds = matches.matches
+                            .filter(m => m.id.startsWith(this.doId))
+                            .map(m => m.id.split(':')[1]); // Extract taskId
+                        
+                        if (taskIds.length === 0) {
+                            break;
+                        }
+                        
+                        // Step 4: Check sentCache to avoid duplicate pushes
+                        // Use a cache key per WebSocket connection
+                        const wsKey = `psychic_sent:${webSocket.toString()}`;
+                        let sentCache = this.memoryStore.get(wsKey);
+                        if (!sentCache) {
+                            sentCache = new Set<string>();
+                            this.memoryStore.set(wsKey, sentCache, 300000); // 5 min TTL
+                        }
+                        
+                        // Filter out already-sent IDs
+                        const newTaskIds = taskIds.filter(id => !sentCache.has(id));
+                        
+                        if (newTaskIds.length === 0) {
+                            break; // All matches already sent
+                        }
+                        
+                        // Step 5: Fetch full records from SQLite (primary source)
+                        const placeholders = newTaskIds.map(() => '?').join(',');
+                        const records = this.sql.exec(
+                            `SELECT * FROM tasks WHERE id IN (${placeholders})`,
+                            ...newTaskIds
+                        ).toArray();
+                        
+                        // Step 6: Push data to client silently (no state update on client)
+                        if (records.length > 0) {
+                            webSocket.send(JSON.stringify({
+                                type: 'psychic_push',
+                                data: records
+                            }));
+                            
+                            // Mark these IDs as sent
+                            newTaskIds.forEach(id => sentCache.add(id));
+                            this.memoryStore.set(wsKey, sentCache, 300000);
+                            
+                            console.log(`🔮 Psychic push: ${records.length} records for intent "${text}"`);
+                        }
+                    } catch (e: any) {
+                        console.error('streamIntent error:', e.message);
+                    }
                     break;
                 }
 
