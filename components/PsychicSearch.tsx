@@ -87,7 +87,7 @@ export const PsychicSearch: React.FC = () => {
                         console.warn('Search request timed out');
                     }
                     timeoutIdRef.current = null;
-                }, 10000); // 10 second timeout
+                }, 5000); // 5 second timeout
                 
                 socket.send(JSON.stringify({
                     action: 'rpc',

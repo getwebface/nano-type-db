@@ -693,8 +693,9 @@ export class NanoStore extends DurableObject {
   }
 
   handleSession(webSocket: WebSocket) {
-    // ✅ NEW WAY: Register with the Durable Object system to use webSocketMessage()
-    // This connects the WebSocket to the webSocketMessage, webSocketClose, and webSocketError handlers
+    // ✅ NEW WAY: Register with the Durable Object system to use Hibernation API
+    // This connects the WebSocket to the webSocketMessage(), webSocketClose(), and 
+    // webSocketError() class methods defined below (lines 710, 1417, 1439)
     this.ctx.acceptWebSocket(webSocket);
 
     // Send reset message when DO wakes up (handleSession starts)
@@ -1002,13 +1003,17 @@ export class NanoStore extends DurableObject {
                         const matches = await this.env.VECTOR_INDEX.query(values, { topK: 3 });
                         
                         // Step 3: Extract IDs from matches for this DO
+                        // Validate ID format: must be "doId:taskId" with exactly one colon
                         const taskIds = matches.matches
-                            .filter(m => m.id.startsWith(this.doId) && m.id.includes(':'))
-                            .map(m => {
+                            .filter(m => {
+                                if (!m.id.startsWith(this.doId) || !m.id.includes(':')) {
+                                    return false;
+                                }
                                 const parts = m.id.split(':');
-                                return parts.length >= 2 ? parts[1] : null;
+                                // Ensure exactly 2 parts and second part is a valid number
+                                return parts.length === 2 && /^\d+$/.test(parts[1]);
                             })
-                            .filter((id): id is string => id !== null); // Filter out invalid IDs
+                            .map(m => m.id.split(':')[1]); // Safe to split after validation
                         
                         if (taskIds.length === 0) {
                             break;
@@ -1030,11 +1035,17 @@ export class NanoStore extends DurableObject {
                         }
                         
                         // Step 5: Fetch full records from SQLite (primary source)
+                        // Validate that all IDs are numeric before query construction
+                        const validTaskIds = newTaskIds.filter(id => /^\d+$/.test(id));
+                        if (validTaskIds.length === 0) {
+                            break;
+                        }
+                        
                         // Use explicit column selection for security
-                        const placeholders = newTaskIds.map(() => '?').join(',');
+                        const placeholders = validTaskIds.map(() => '?').join(',');
                         const records = this.sql.exec(
                             `SELECT id, title, status FROM tasks WHERE id IN (${placeholders})`,
-                            ...newTaskIds
+                            ...validTaskIds
                         ).toArray();
                         
                         // Step 6: Push data to client silently (no state update on client)
@@ -1045,7 +1056,7 @@ export class NanoStore extends DurableObject {
                             }));
                             
                             // Mark these IDs as sent
-                            newTaskIds.forEach(id => sentCache!.add(id));
+                            validTaskIds.forEach(id => sentCache!.add(id));
                             
                             console.log(`🔮 Psychic push: ${records.length} records for intent "${text}"`);
                         }

@@ -511,7 +511,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                 clearTimeout(debounceTimerRef.current);
             }
 
-            // Debounce: wait 175ms after typing stops
+            // Debounce: trigger after 175ms of typing inactivity
             debounceTimerRef.current = setTimeout(() => {
                 if (text.length > 2) {
                     console.log('🔮 Auto-sensing intent:', text);
