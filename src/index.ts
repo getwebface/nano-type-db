@@ -25,7 +25,7 @@ export default {
       return auth.handler(request);
     }
 
-    // Debug Endpoint (Temporary)
+    // Debug Endpoint
     if (url.pathname === "/debug-auth") {
         const session = await auth.api.getSession({ headers: request.headers });
         return Response.json({ 
@@ -47,8 +47,7 @@ export default {
       }
     }
 
-    // 3. Durable Object Interactions (Logic that needs room_id)
-    // Only enforce room_id and auth checking for backend/API operations
+    // 3. Routing Checks
     const isBackendPath = 
         url.pathname === "/connect" || 
         url.pathname === "/schema" || 
@@ -56,25 +55,19 @@ export default {
         request.headers.get("Upgrade") === "websocket";
 
     if (!isBackendPath) {
-       // If not a specific backend path, and asset wasn't found (404 above),
-       // fall back to SPA index.html for client-side routing.
        if (env.ASSETS) {
           try {
-             // Create a request for index.html
              const indexReq = new Request(new URL("/index.html", url), request);
-             const index = await env.ASSETS.fetch(indexReq);
-             return index;
+             return await env.ASSETS.fetch(indexReq);
           } catch(e) {}
        }
-       // If ASSETS not bound or index fail, 404
        return new Response("Not found", { status: 404 });
     }
 
-    // --- Backend Logic Starts Here ---
-    
-    // Handle Global Query endpoint (before room-specific logic)
+    // --- Backend Logic ---
+
+    // Handle Global Query
     if (url.pathname === "/global-query") {
-        // Verify authentication
         let session;
         try {
             session = await auth.api.getSession({ headers: request.headers });
@@ -86,72 +79,56 @@ export default {
             return new Response("Unauthorized. Please log in.", { status: 401 });
         }
         
-        // Parse query parameters
-        const queryType = url.searchParams.get("type");
-        const roomPattern = url.searchParams.get("room_pattern") || "*";
+        // ... (Global query logic remains same, omitted for brevity) ...
+        // Note: Ideally moving the implementation to a separate function 
+        // would clean this up, but keeping it inline for this paste.
+        // For now, returning 405 if not POST since we are focusing on WS fix.
+        if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
         
-        if (request.method === "POST") {
-            const body = await request.json() as { sql: string; rooms?: string[] };
-            
-            // Execute query across multiple rooms
-            const rooms = body.rooms || []; // List of room IDs to query
-            const results = await Promise.all(
-                rooms.map(async (roomId: string) => {
-                    try {
-                        const id = env.DATA_STORE.idFromName(roomId);
-                        const stub = env.DATA_STORE.get(id);
-                        const response = await stub.fetch(new Request(`http://do/query?sql=${encodeURIComponent(body.sql)}`));
-                        const data = await response.json();
-                        return { roomId, data, success: true };
-                    } catch (error: any) {
-                        return { roomId, error: error.message, success: false };
-                    }
-                })
-            );
-            
-            // Aggregate results
-            const aggregated = results
-                .filter(r => r.success)
-                .flatMap(r => (r as any).data);
-            
-            return Response.json({
-                total: aggregated.length,
-                rooms: results.length,
-                data: aggregated,
-                errors: results.filter(r => !r.success)
-            });
-        }
-        
-        return new Response("Method not allowed", { status: 405 });
+        // Re-implementing the body parsing briefly to ensure code completeness
+        const body = await request.json() as { sql: string; rooms?: string[] };
+        const rooms = body.rooms || [];
+        const results = await Promise.all(
+            rooms.map(async (roomId: string) => {
+                try {
+                    const id = env.DATA_STORE.idFromName(roomId);
+                    const stub = env.DATA_STORE.get(id);
+                    const response = await stub.fetch(new Request(`http://do/query?sql=${encodeURIComponent(body.sql)}`));
+                    const data = await response.json();
+                    return { roomId, data, success: true };
+                } catch (error: any) {
+                    return { roomId, error: error.message, success: false };
+                }
+            })
+        );
+        const aggregated = results.filter(r => r.success).flatMap(r => (r as any).data);
+        return Response.json({
+            total: aggregated.length,
+            rooms: results.length,
+            data: aggregated,
+            errors: results.filter(r => !r.success)
+        });
     }
     
-    // Look for room_id in query params.
     const roomId = url.searchParams.get("room_id");
-
     if (!roomId) {
       return new Response("Missing room_id query parameter", { status: 400 });
     }
 
     // 4. Protect Database Access
-    console.log(`Checking auth for roomId: ${roomId}, path: ${url.pathname}, upgrade: ${request.headers.get("Upgrade")}`);
+    console.log(`Checking auth for roomId: ${roomId}, path: ${url.pathname}`);
     
     let session;
     try {
-        // FIXED LOGIC: Priority Order Swapped
-        
-        // 1. Priority: Try standard browser cookies first
-        // This ensures production (same-domain) requests use the valid signed cookies automatically sent by the browser.
+        // PRIORITY 1: Browser Cookies (Production/Same-Domain)
         session = await auth.api.getSession({ 
             headers: request.headers
         });
 
-        // 2. Fallback: If no session via cookies, try the URL param
-        // This handles local development (cross-port) where cookies might be missing.
+        // PRIORITY 2: URL Token (Dev/Cross-Origin fallback)
         if (!session) {
             const sessionToken = url.searchParams.get("session_token");
-            
             if (sessionToken) {
-                // Verify session token manually
                 session = await auth.api.getSession({ 
                     headers: new Headers({
                         'Cookie': `better-auth.session_token=${sessionToken}`
@@ -164,50 +141,51 @@ export default {
         return new Response(`Auth Error: ${e.message}`, { status: 500 });
     }
     
-    // Debugging: If no session, log cookie presence
     if (!session) {
          console.log("Auth failed: No session found");
-         console.log("Cookies present:", request.headers.get("Cookie"));
-         console.log("Session token param:", url.searchParams.get("session_token"));
-         console.log("Origin:", request.headers.get("Origin"));
-         
          return new Response("Unauthorized. Please log in.", { status: 401 });
-    } else {
-         console.log(`Auth success: User ${session.user.id}`);
-         request.headers.set("X-User-ID", session.user.id);
     }
 
-    // Get the Durable Object ID from the room name
+    console.log(`Auth success: User ${session.user.id}`);
+
+    // --- CRITICAL FIX START ---
+    // Instead of modifying the immutable 'request', we create a new Mutable request
+    // with the User ID header added.
+    const newHeaders = new Headers(request.headers);
+    newHeaders.set("X-User-ID", session.user.id);
+
+    // Get Durable Object ID
     const id = env.DATA_STORE.idFromName(roomId);
-    
-    // Get the stub
     const stub = env.DATA_STORE.get(id);
 
-    // Route websocket upgrades
+    // WebSocket Upgrade
     if (request.headers.get("Upgrade") === "websocket") {
-       console.log("WebSocket upgrade requested for room:", roomId);
-       
        try {
          const newUrl = new URL(request.url);
          newUrl.pathname = "/connect";
-         const newRequest = new Request(newUrl.toString(), request);
-         return stub.fetch(newRequest);
+         
+         // Create fresh request with our new headers
+         const wsRequest = new Request(newUrl.toString(), {
+             headers: newHeaders,
+             method: request.method
+         });
+         
+         return stub.fetch(wsRequest);
        } catch (error: any) {
          console.error("WebSocket upgrade failed:", error);
          return new Response(`WebSocket upgrade failed: ${error.message}`, { status: 500 });
        }
     }
 
-    // Route Schema Introspection & Manifest
-    if (url.pathname === "/schema" || url.pathname === "/manifest") {
-        return stub.fetch(request);
-    }
-
-    // Forward standard requests (if any)
-    return stub.fetch(request);
+    // Standard Request (Schema/Manifest)
+    // Pass the modified headers here too
+    const stdRequest = new Request(request, {
+        headers: newHeaders
+    });
+    return stub.fetch(stdRequest);
+    // --- CRITICAL FIX END ---
   },
 
-  // BACKUP SYSTEM (Cron Job)
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext) {
     console.log("Starting scheduled backup...");
     const id = env.DATA_STORE.idFromName("demo-room");
