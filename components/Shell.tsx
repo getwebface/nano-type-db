@@ -188,7 +188,7 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                     {/* Psychic Search Demo */}
                     <PsychicSearch />
                     
-                    <DataGrid data={data} />
+                    <DataGrid data={data} tableName={selectedTable} />
                 </div>
 
                 <div className="h-auto">

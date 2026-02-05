@@ -541,15 +541,24 @@ export default {
             ).bind(roomId, session.user.id).first();
 
             if (!roomExists) {
-                return new Response("Room not found. Please create it first.", { status: 404 });
+                // Auto-register existing rooms for backward compatibility
+                console.log(`Auto-registering room ${roomId} for user ${session.user.id}`);
+                try {
+                    await env.AUTH_DB.prepare(
+                        "INSERT OR IGNORE INTO rooms (id, user_id, name, created_at, last_accessed_at) VALUES (?, ?, ?, ?, ?)"
+                    ).bind(roomId, session.user.id, roomId, Date.now(), Date.now()).run();
+                } catch (insertError) {
+                    console.error("Failed to auto-register room:", insertError);
+                    // Continue anyway for backward compatibility
+                }
+            } else {
+                // Update last accessed time for registered rooms
+                ctx.waitUntil(
+                    env.AUTH_DB.prepare(
+                        "UPDATE rooms SET last_accessed_at = ? WHERE id = ? AND user_id = ?"
+                    ).bind(Date.now(), roomId, session.user.id).run()
+                );
             }
-
-            // Update last accessed time
-            ctx.waitUntil(
-                env.AUTH_DB.prepare(
-                    "UPDATE rooms SET last_accessed_at = ? WHERE id = ? AND user_id = ?"
-                ).bind(Date.now(), roomId, session.user.id).run()
-            );
         } catch (e: any) {
             console.error("Room validation error:", e);
             // Continue anyway to maintain backward compatibility

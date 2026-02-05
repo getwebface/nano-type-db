@@ -4,6 +4,7 @@ import { Plus, Loader2 } from 'lucide-react';
 interface DataGridProps {
     data: any[] | null;
     isLoading?: boolean;
+    tableName?: string;
 }
 
 const SkeletonRow: React.FC<{ columns: number }> = ({ columns }) => (
@@ -16,7 +17,7 @@ const SkeletonRow: React.FC<{ columns: number }> = ({ columns }) => (
     </tr>
 );
 
-export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false }) => {
+export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tableName = 'table_name' }) => {
     // Loading state with skeleton
     if (isLoading || data === null) {
         return (
@@ -60,7 +61,7 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false }) =
                         This table is empty. Use the SQL console below to insert your first record.
                     </p>
                     <div className="inline-block px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm font-mono text-slate-300">
-                        INSERT INTO tasks (title) VALUES ('My first task')
+                        INSERT INTO {tableName} (column) VALUES ('value')
                     </div>
                 </div>
             </div>

@@ -165,7 +165,7 @@ export const VisualSchemaEditor: React.FC = () => {
                                 value={newTable.name}
                                 onChange={(e) => setNewTable({ ...newTable, name: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '') })}
                                 className="w-full px-4 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                placeholder="e.g. users, products, orders"
+                                placeholder="e.g. users_table, product_items"
                             />
                         </div>
 

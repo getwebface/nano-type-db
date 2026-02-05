@@ -1,11 +1,12 @@
 -- Rooms table for tracking user databases
 -- Solves the "Lost Rooms" problem by maintaining a registry of all user rooms
+-- Note: Timestamps are stored as INTEGER in milliseconds (Date.now()) for consistency with auth tables
 CREATE TABLE IF NOT EXISTS rooms (
     id TEXT PRIMARY KEY, -- room_id (e.g., "my-production-db")
     user_id TEXT NOT NULL,
     name TEXT NOT NULL, -- Display name
-    created_at INTEGER NOT NULL,
-    last_accessed_at INTEGER,
+    created_at INTEGER NOT NULL, -- Timestamp in milliseconds
+    last_accessed_at INTEGER, -- Timestamp in milliseconds
     FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE
 );
 
