@@ -19,13 +19,17 @@ export default {
     // Get the stub
     const stub = env.DATA_STORE.get(id);
 
-    // Rewrite path to /connect if it's a websocket upgrade request
-    // This simplifies the DO logic to just listen on /connect
+    // Route websocket upgrades
     if (request.headers.get("Upgrade") === "websocket") {
        const newUrl = new URL(request.url);
        newUrl.pathname = "/connect";
        const newRequest = new Request(newUrl.toString(), request);
        return stub.fetch(newRequest);
+    }
+
+    // Route Schema Introspection (REST API)
+    if (url.pathname === "/schema") {
+        return stub.fetch(request);
     }
 
     // Forward standard requests (if any)

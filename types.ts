@@ -1,3 +1,16 @@
+export interface ColumnDefinition {
+    cid: number;
+    name: string;
+    type: string;
+    notnull: number;
+    dflt_value: any;
+    pk: number;
+}
+
+export interface Schema {
+    [tableName: string]: ColumnDefinition[];
+}
+
 export interface QueryResult {
     type: "query_result";
     data: any[];
@@ -16,6 +29,8 @@ export interface DatabaseContextType {
     subscribe: (table: string) => void;
     lastResult: QueryResult | null;
     toasts: ToastMessage[];
+    schema: Schema | null;
+    refreshSchema: () => void;
 }
 
 export interface ToastMessage {

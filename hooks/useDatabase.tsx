@@ -1,9 +1,10 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
-import { DatabaseContextType, QueryResult, UpdateEvent, ToastMessage } from '../types';
+import { DatabaseContextType, QueryResult, UpdateEvent, ToastMessage, Schema } from '../types';
 
 // Mock Worker URL - in production this would be your Cloudflare Worker domain
 // For local dev with `wrangler dev`, it usually runs on port 8787
 const WORKER_URL = 'ws://localhost:8787'; 
+const HTTP_URL = 'http://localhost:8787'; // Helper for fetch requests
 
 const DatabaseContext = createContext<DatabaseContextType | null>(null);
 
@@ -12,8 +13,9 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const [isConnected, setIsConnected] = useState(false);
     const [lastResult, setLastResult] = useState<QueryResult | null>(null);
     const [toasts, setToasts] = useState<ToastMessage[]>([]);
+    const [schema, setSchema] = useState<Schema | null>(null);
+    const currentRoomIdRef = useRef<string>("");
     
-    // We need to keep track of subscribed tables to re-fetch on update
     const subscribedTablesRef = useRef<Set<string>>(new Set());
 
     const addToast = (message: string) => {
@@ -24,16 +26,32 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }, 3000);
     };
 
+    const refreshSchema = useCallback(async () => {
+        if (!currentRoomIdRef.current) return;
+        try {
+            const res = await fetch(`${HTTP_URL}/schema?room_id=${currentRoomIdRef.current}`);
+            if (res.ok) {
+                const data = await res.json();
+                setSchema(data);
+            }
+        } catch (e) {
+            console.error("Failed to fetch schema", e);
+        }
+    }, []);
+
     const connect = useCallback((roomId: string) => {
         if (socket) {
             socket.close();
         }
 
+        currentRoomIdRef.current = roomId;
         const ws = new WebSocket(`${WORKER_URL}?room_id=${roomId}`);
 
         ws.onopen = () => {
             console.log('Connected to DO');
             setIsConnected(true);
+            // Fetch schema immediately upon connection
+            refreshSchema();
         };
 
         ws.onmessage = (event) => {
@@ -42,18 +60,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             if (data.type === 'query_result') {
                 setLastResult(data);
             } else if (data.event === 'update') {
-                addToast(`Table '${data.table}' updated externally`);
-                
-                // Magic: Auto re-fetch if we are viewing this table
-                // In a real generic hook, we might use an event bus, 
-                // but here we will rely on the UI component to trigger the refresh 
-                // via a side-effect or we can expose an event emitter.
-                // For simplicity in this demo, we broadcast the event to the context
-                // effectively by triggering a state update that consumers listen to.
-                // However, the cleanest way is to just let the consumer (useRealtimeQuery)
-                // handle the refetch based on a signal.
-                
-                // We'll update a trigger to notify hooks
+                addToast(`Table '${data.table}' updated`);
                 window.dispatchEvent(new CustomEvent('db-update', { detail: { table: data.table } }));
             }
         };
@@ -61,17 +68,18 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         ws.onclose = () => {
             setIsConnected(false);
             setSocket(null);
+            setSchema(null);
         };
 
         setSocket(ws);
-    }, [socket]);
+    }, [socket, refreshSchema]);
 
     const runQuery = useCallback((sql: string, tableContext?: string) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
         
-        // If it's an INSERT/UPDATE/DELETE, we assume it's a mutation
-        const isMutation = /^(INSERT|UPDATE|DELETE)/i.test(sql.trim());
-        
+        const isMutation = /^(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)/i.test(sql.trim());
+        const isSchemaChange = /^(CREATE|ALTER|DROP)/i.test(sql.trim());
+
         const payload = {
             action: isMutation ? 'mutate' : 'query',
             sql,
@@ -79,7 +87,14 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         };
 
         socket.send(JSON.stringify(payload));
-    }, [socket]);
+
+        // If we modified the schema (Create/Drop table), refresh it
+        if (isSchemaChange) {
+            // Give the DB a moment to process the change
+            setTimeout(refreshSchema, 500);
+        }
+
+    }, [socket, refreshSchema]);
 
     const subscribe = useCallback((table: string) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -88,7 +103,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, [socket]);
 
     return (
-        <DatabaseContext.Provider value={{ isConnected, connect, runQuery, subscribe, lastResult, toasts }}>
+        <DatabaseContext.Provider value={{ isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema }}>
             {children}
         </DatabaseContext.Provider>
     );
@@ -129,8 +144,6 @@ export const useRealtimeQuery = (tableName: string) => {
     // Update local state when query results come in
     useEffect(() => {
         if (lastResult && lastResult.originalSql.includes(tableName) && !lastResult.originalSql.toLowerCase().startsWith('insert')) {
-             // Basic check to ensure the result belongs to this view
-             // In a robust app, we'd use Request IDs.
              setData(lastResult.data);
         }
     }, [lastResult, tableName]);

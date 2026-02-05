@@ -7,35 +7,79 @@ interface WebSocketMessage {
   sql?: string;
 }
 
+const MIGRATIONS = [
+  {
+    version: 1,
+    up: (sql: any) => {
+      sql.exec(`CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, title TEXT, status TEXT)`);
+      // Seed initial data only if table was empty/just created
+      const count = sql.exec("SELECT count(*) as c FROM tasks").toArray()[0].c;
+      if (count === 0) {
+        sql.exec(`INSERT INTO tasks (title, status) VALUES ('Buy milk', 'pending'), ('Walk the dog', 'completed')`);
+      }
+    }
+  },
+  // Add version 2 here in the future:
+  // { version: 2, up: (sql) => sql.exec("ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'low'") }
+];
+
 export class DataStore extends DurableObject {
-  sql: any; // Using any to bypass specific strict typing for the new SqlStorage API in this environment
+  sql: any; 
   subscribers: Map<string, Set<WebSocket>>;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    // Initialize SQLite storage
     this.sql = ctx.storage.sql;
-    // Initialize subscriber map: Table Name -> Set of WebSockets
     this.subscribers = new Map();
     
-    // Seed database if empty (For demo purposes)
-    this.seedDatabase();
+    this.runMigrations();
   }
 
-  seedDatabase() {
-    try {
-      const tableExists = this.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'").toArray();
-      if (tableExists.length === 0) {
-        this.sql.exec(`CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT, status TEXT)`);
-        this.sql.exec(`INSERT INTO tasks (title, status) VALUES ('Buy milk', 'pending'), ('Walk the dog', 'completed')`);
+  runMigrations() {
+    // 1. Create migrations table if not exists
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS _migrations (version INTEGER PRIMARY KEY, applied_at TEXT)`);
+
+    // 2. Get current version
+    const lastMigration = this.sql.exec("SELECT max(version) as v FROM _migrations").toArray()[0];
+    let currentVersion = lastMigration.v || 0;
+
+    // 3. Apply new migrations
+    for (const migration of MIGRATIONS) {
+      if (migration.version > currentVersion) {
+        try {
+          migration.up(this.sql);
+          this.sql.exec("INSERT INTO _migrations (version, applied_at) VALUES (?, datetime('now'))", migration.version);
+          console.log(`Applied migration v${migration.version}`);
+        } catch (e) {
+          console.error(`Migration v${migration.version} failed:`, e);
+          throw e; // Stop startup if migration fails
+        }
       }
-    } catch (err) {
-      console.error("Error seeding database:", err);
     }
+  }
+
+  getSchema() {
+    // Introspection: Get all user tables
+    const tables = this.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_%' ESCAPE '\\' AND name != 'sqlite_sequence'").toArray();
+    
+    const schema: Record<string, any[]> = {};
+    for (const t of tables) {
+      const columns = this.sql.exec(`PRAGMA table_info("${t.name}")`).toArray();
+      schema[t.name] = columns;
+    }
+    return schema;
   }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+
+    // Schema Endpoint for Introspection (The "Type" in NanoType)
+    if (url.pathname === "/schema") {
+      const schema = this.getSchema();
+      return new Response(JSON.stringify(schema), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
 
     if (url.pathname === "/connect") {
       const upgradeHeader = request.headers.get("Upgrade");
@@ -74,8 +118,11 @@ export class DataStore extends DurableObject {
           this.subscribers.get(data.table)!.add(webSocket);
         }
 
+        // Security Note: In a production app, you would validate 'data.sql' here.
+        // For the "Security Shield", we would prefer specific actions like "createTask"
+        // rather than raw SQL. But for this generic DB tool, we allow raw SQL 
+        // effectively acting as the "Admin" user.
         if (data.action === "query" && data.sql) {
-          // Execute Query
           const results = this.sql.exec(data.sql).toArray();
           webSocket.send(JSON.stringify({ 
             type: "query_result", 
@@ -85,13 +132,8 @@ export class DataStore extends DurableObject {
         }
 
         if (data.action === "mutate" && data.sql && data.table) {
-          // Execute Mutation
           this.sql.exec(data.sql);
-          
-          // Send success back to sender
           webSocket.send(JSON.stringify({ type: "mutation_success", sql: data.sql }));
-
-          // Broadcast update to subscribers
           this.broadcastUpdate(data.table);
         }
 
@@ -101,7 +143,6 @@ export class DataStore extends DurableObject {
     });
 
     webSocket.addEventListener("close", () => {
-      // Cleanup subscribers
       this.subscribers.forEach((set) => set.delete(webSocket));
     });
   }
