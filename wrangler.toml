@@ -14,10 +14,9 @@ tag = "v1"
 new_classes = ["DataStore"]
 
 # Rules for SQLite storage
-[durable_objects]
-bindings = [
-  { name = "DATA_STORE", class_name = "DataStore" }
-]
+# Durable object binding is defined above using the
+# `[[durable_objects.bindings]]` array; the alternate `[durable_objects]`
+# table form was removed to avoid redefinition errors.
 
 # Backups
 [[r2_buckets]]
