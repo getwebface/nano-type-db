@@ -85,3 +85,15 @@ directory = "./dist"
 # Cron Trigger for Backups (Every hour)
 [triggers]
 crons = ["0 * * * *"]
+
+# Cloudflare Queue for Webhooks
+[[queues.producers]]
+binding = "WEBHOOK_QUEUE"
+queue = "nanotype-webhooks"
+
+[[queues.consumers]]
+queue = "nanotype-webhooks"
+max_batch_size = 10
+max_batch_timeout = 30
+max_retries = 3
+dead_letter_queue = "nanotype-webhooks-dlq"

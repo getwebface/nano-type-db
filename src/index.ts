@@ -53,6 +53,7 @@ export default {
         url.pathname === "/connect" || 
         url.pathname === "/schema" || 
         url.pathname === "/manifest" ||
+        url.pathname === "/download-client" ||
         // Ensure API routes (like /api/keys) are handled by the backend
         url.pathname.startsWith("/api/") ||
         request.headers.get("Upgrade") === "websocket";
@@ -615,6 +616,58 @@ export default {
     ctx.waitUntil(stub.fetch("http://do/backup"));
   },
 
+  async queue(batch: MessageBatch, env: Env): Promise<void> {
+    // Webhook Queue Consumer
+    for (const message of batch.messages) {
+      try {
+        const { webhookId, url, secret, payload } = message.body as {
+          webhookId: string;
+          url: string;
+          secret: string | null;
+          payload: any;
+        };
+        
+        // Prepare webhook request
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          'User-Agent': 'NanoTypeDB-Webhooks/1.0'
+        };
+        
+        // Add HMAC signature if secret is provided
+        if (secret) {
+          const encoder = new TextEncoder();
+          const data = encoder.encode(JSON.stringify(payload));
+          const key = await crypto.subtle.importKey(
+            'raw',
+            encoder.encode(secret),
+            { name: 'HMAC', hash: 'SHA-256' },
+            false,
+            ['sign']
+          );
+          const signature = await crypto.subtle.sign('HMAC', key, data);
+          const hashArray = Array.from(new Uint8Array(signature));
+          const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+          headers['X-Webhook-Signature'] = `sha256=${hashHex}`;
+        }
+        
+        // Dispatch webhook
+        const response = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload)
+        });
+        
+        if (!response.ok) {
+          const errorText = await response.text().catch(() => 'Unable to read response');
+          console.error(`Webhook ${webhookId} to ${url} failed: ${response.status} ${response.statusText} - ${errorText}`);
+          // Retry will be handled by Cloudflare Queue's max_retries config
+          message.retry();
+        } else {
+          console.log(`Webhook ${webhookId} delivered successfully`);
+          message.ack();
+        }
+      } catch (error: any) {
+        console.error('Webhook delivery error:', error.message);
   async queue(batch: MessageBatch, env: Env, ctx: ExecutionContext): Promise<void> {
     // Queue Consumer for AI Embedding with Retry Logic
     console.log(`Processing embedding batch: ${batch.messages.length} messages`);

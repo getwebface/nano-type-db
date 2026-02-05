@@ -1,3 +1,4 @@
+import { DurableObjectNamespace, R2Bucket, D1Database, VectorizeIndex, Ai, Queue } from "cloudflare:workers";
 import { DurableObjectNamespace, R2Bucket, D1Database, VectorizeIndex, Ai, Queue, AnalyticsEngineDataset } from "cloudflare:workers";
 
 declare global {
@@ -19,5 +20,7 @@ declare global {
 		ANALYTICS: AnalyticsEngineDataset;
 		// Static Assets Binding
 		ASSETS: Fetcher;
+		// Webhook Queue
+		WEBHOOK_QUEUE: Queue;
 	}
 }
