@@ -797,6 +797,77 @@ export class NanoStore extends DurableObject {
         }
     }
 
+    // List all backups in R2 bucket
+    if (url.pathname === "/backups") {
+        try {
+            if (!this.env.BACKUP_BUCKET) {
+                return Response.json({ error: "R2 Bucket not configured" }, { status: 500 });
+            }
+            
+            const listed = await this.env.BACKUP_BUCKET.list({ prefix: "backup-" });
+            const backups = listed.objects.map(obj => ({
+                key: obj.key,
+                size: obj.size,
+                uploaded: obj.uploaded.toISOString(),
+                timestamp: obj.key.replace('backup-', '').replace('.db', '')
+            }));
+            
+            // Sort by uploaded date, newest first
+            backups.sort((a, b) => new Date(b.uploaded).getTime() - new Date(a.uploaded).getTime());
+            
+            return Response.json({ backups });
+        } catch (error: any) {
+            console.error("Failed to list backups:", error);
+            return Response.json({ error: error.message }, { status: 500 });
+        }
+    }
+
+    // Restore from a specific backup
+    if (url.pathname === "/restore") {
+        if (request.method !== "POST") {
+            return new Response("Method not allowed", { status: 405 });
+        }
+        
+        try {
+            const { backupKey } = await request.json() as { backupKey: string };
+            
+            if (!this.env.BACKUP_BUCKET) {
+                return Response.json({ error: "R2 Bucket not configured" }, { status: 500 });
+            }
+            
+            // Validate backup key
+            if (!backupKey || !backupKey.startsWith('backup-')) {
+                return Response.json({ error: "Invalid backup key" }, { status: 400 });
+            }
+            
+            // Fetch backup from R2
+            const backup = await this.env.BACKUP_BUCKET.get(backupKey);
+            if (!backup) {
+                return Response.json({ error: "Backup not found" }, { status: 404 });
+            }
+            
+            // For Cloudflare Workers Durable Objects, we can't directly restore the SQLite file
+            // Instead, we need to parse it and reconstruct the tables
+            // This is a simplified version - in production, you'd want to use a proper SQLite parser
+            console.log(`Restoring from backup: ${backupKey}`);
+            
+            // Note: Full SQLite restoration in Workers would require either:
+            // 1. Parsing the SQLite file format (complex)
+            // 2. Exporting as SQL dump format instead of binary SQLite
+            // 3. Using VACUUM FROM (if available in Workers DO SQLite)
+            
+            // For now, return a message indicating this needs implementation
+            return Response.json({ 
+                message: "Restore functionality requires SQL dump format. Current backup is binary SQLite.",
+                suggestion: "Modify backupToR2() to export as SQL dump for easier restoration"
+            }, { status: 501 });
+            
+        } catch (error: any) {
+            console.error("Failed to restore backup:", error);
+            return Response.json({ error: error.message }, { status: 500 });
+        }
+    }
+
     if (url.pathname === "/schema") {
       this.trackUsage('reads');
       const schema = this.getSchema();

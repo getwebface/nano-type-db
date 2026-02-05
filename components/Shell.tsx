@@ -4,12 +4,14 @@ import { DataGrid } from './DataGrid';
 import { SqlConsole } from './SqlConsole';
 import { PsychicSearch } from './PsychicSearch';
 import { ApiKeys } from './ApiKeys';
-import { Layout, Table2, HardDrive, Circle, Plus, Loader2, Activity, Settings } from 'lucide-react';
+import { Snapshots } from './Snapshots';
+import { Layout, Table2, HardDrive, Circle, Plus, Loader2, Activity, Settings, Database } from 'lucide-react';
 
 export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
     const { schema, usageStats, status } = useDatabase();
     const [selectedTable, setSelectedTable] = useState<string>('tasks');
     const [activeView, setActiveView] = useState<'tables' | 'settings'>('tables');
+    const [settingsTab, setSettingsTab] = useState<'api-keys' | 'snapshots' | 'analytics'>('api-keys');
     
     useEffect(() => {
         if (schema) {
@@ -137,14 +139,55 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
             <main className="flex-1 flex flex-col min-w-0">
                 {activeView === 'settings' ? (
                     <>
-                        <header className="px-8 py-6 border-b border-slate-800 bg-slate-900 flex justify-between items-center">
-                            <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                        <header className="px-8 py-6 border-b border-slate-800 bg-slate-900">
+                            <h2 className="text-2xl font-bold text-white flex items-center gap-2 mb-4">
                                 <Settings size={24} />
                                 Settings
                             </h2>
+                            {/* Settings Tabs */}
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={() => setSettingsTab('api-keys')}
+                                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                                        settingsTab === 'api-keys'
+                                            ? 'bg-green-600 text-white'
+                                            : 'bg-slate-800 text-slate-400 hover:text-white'
+                                    }`}
+                                >
+                                    API Keys
+                                </button>
+                                <button
+                                    onClick={() => setSettingsTab('snapshots')}
+                                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${
+                                        settingsTab === 'snapshots'
+                                            ? 'bg-green-600 text-white'
+                                            : 'bg-slate-800 text-slate-400 hover:text-white'
+                                    }`}
+                                >
+                                    <Database size={16} />
+                                    Snapshots
+                                </button>
+                                <button
+                                    onClick={() => setSettingsTab('analytics')}
+                                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${
+                                        settingsTab === 'analytics'
+                                            ? 'bg-green-600 text-white'
+                                            : 'bg-slate-800 text-slate-400 hover:text-white'
+                                    }`}
+                                >
+                                    <Activity size={16} />
+                                    Analytics
+                                </button>
+                            </div>
                         </header>
                         <div className="flex-1 overflow-auto p-8 bg-slate-900">
-                            <ApiKeys />
+                            {settingsTab === 'api-keys' && <ApiKeys />}
+                            {settingsTab === 'snapshots' && <Snapshots />}
+                            {settingsTab === 'analytics' && (
+                                <div className="text-center py-12 text-slate-400">
+                                    Analytics dashboard coming soon...
+                                </div>
+                            )}
                         </div>
                     </>
                 ) : (
