@@ -81,10 +81,23 @@ export default {
 
     // 4. Protect Database Access
     console.log(`Checking auth for roomId: ${roomId}, path: ${url.pathname}, upgrade: ${request.headers.get("Upgrade")}`);
-    const session = await auth.api.getSession({ headers: request.headers });
     
+    let session;
+    try {
+        session = await auth.api.getSession({ 
+            headers: request.headers
+        });
+    } catch (e: any) {
+        console.error("Critical Auth Error:", e);
+        return new Response(`Auth Error: ${e.message}`, { status: 500 });
+    }
+    
+    // Debugging: If no session, log cookie presence
     if (!session) {
          console.log("Auth failed: No session found");
+         console.log("Cookies present:", request.headers.get("Cookie"));
+         console.log("Origin:", request.headers.get("Origin"));
+         
          return new Response("Unauthorized. Please log in.", { status: 401 });
     } else {
          console.log(`Auth success: User ${session.user.id}`);

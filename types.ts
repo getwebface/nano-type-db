@@ -23,6 +23,7 @@ export interface UpdateEvent {
 }
 
 export interface DatabaseContextType {
+    status: 'disconnected' | 'connecting' | 'connected';
     isConnected: boolean;
     connect: (roomId: string) => void;
     runQuery: (sql: string, tableContext?: string) => void;

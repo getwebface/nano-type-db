@@ -25,5 +25,9 @@ export const createAuth = (env: Env) => {
     emailAndPassword: { enabled: true },
     secret: env.BETTER_AUTH_SECRET || "PLACEHOLDER_SECRET_FOR_DEV",
     baseURL,
+    trustedOrigins: [
+        "https://nanotype-db.josh-f96.workers.dev", 
+        "nanotype-db.josh-f96.workers.dev"
+    ],
   });
 };

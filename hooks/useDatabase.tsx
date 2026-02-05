@@ -11,6 +11,7 @@ const DatabaseContext = createContext<DatabaseContextType | null>(null);
 
 export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const [socket, setSocket] = useState<WebSocket | null>(null);
+    const [status, setStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
     const [isConnected, setIsConnected] = useState(false);
     const [lastResult, setLastResult] = useState<QueryResult | null>(null);
     const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -50,9 +51,11 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     const connect = useCallback((roomId: string) => {
         if (socket) {
+            socket.onclose = null;
             socket.close();
         }
 
+        setStatus('connecting');
         currentRoomIdRef.current = roomId;
         
         // Browser automatically sends Cookies (Better Auth Session) with WebSocket
@@ -60,6 +63,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
         ws.onopen = () => {
             console.log('Connected to DO');
+            setStatus('connected');
             setIsConnected(true);
             refreshSchema();
             // Initial usage fetch
@@ -89,6 +93,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
         ws.onclose = () => {
             setIsConnected(false);
+            setStatus('disconnected');
             setSocket(null);
             setSchema(null);
         };
@@ -139,7 +144,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, [socket]);
 
     return (
-        <DatabaseContext.Provider value={{ isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage }}>
+        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage }}>
             {children}
         </DatabaseContext.Provider>
     );

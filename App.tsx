@@ -4,10 +4,10 @@ import { Shell } from './components/Shell';
 import { Toaster } from './components/Toaster';
 import { AuthScreen } from './components/AuthScreen';
 import { authClient } from './src/lib/auth-client';
-import { ArrowRight, Database, LogOut } from 'lucide-react';
+import { ArrowRight, Database, LogOut, Loader2 } from 'lucide-react';
 
 const ConnectionScreen: React.FC = () => {
-    const { connect, isConnected } = useDatabase();
+    const { connect, isConnected, status } = useDatabase();
     const [inputRoom, setInputRoom] = useState('demo-room');
     
     // Allow user to logout
@@ -63,10 +63,19 @@ const ConnectionScreen: React.FC = () => {
 
                     <button
                         type="submit"
+                        disabled={status === 'connecting'}
                         className="group w-full flex justify-center py-3 px-4 border border-transparent text-sm font-bold rounded-lg text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 focus:ring-offset-slate-900 transition-all"
                     >
-                        Connect
-                        <ArrowRight className="ml-2 w-4 h-4 group-hover:translate-x-1 transition-transform" />
+                        {status === 'connecting' ? (
+                            <span className="flex items-center gap-2">
+                                <Loader2 className="animate-spin" /> Waking up Database...
+                            </span>
+                        ) : (
+                            <>
+                            Connect
+                            <ArrowRight className="ml-2 w-4 h-4 group-hover:translate-x-1 transition-transform" />
+                            </>
+                        )}
                     </button>
                 </form>
             </div>
