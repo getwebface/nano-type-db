@@ -71,7 +71,7 @@ dead_letter_queue = "nanotype-embeddings-dlq"
 
 # Analytics Engine for Observability
 [[analytics_engine_datasets]]
-binding = "ANALYTICS"
+binding = "ANALYTICS_ALT"
 
 # Static Assets (React Frontend)
 [assets]
@@ -113,9 +113,9 @@ max_batch_timeout = 30
 # Analytics Engine for Observability
 [[analytics_engine_datasets]]
 binding = "ANALYTICS"
-# Cloudflare Queue for Webhooks
+# Cloudflare Queue for Webhooks (unique binding name)
 [[queues.producers]]
-binding = "WEBHOOK_QUEUE"
+binding = "WEBHOOK_QUEUE_NANOTYPE"
 queue = "nanotype-webhooks"
 
 [[queues.consumers]]
