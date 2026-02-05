@@ -10,7 +10,7 @@ CREATE TABLE permissions (
     can_write INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES user(id)
+    FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_permissions_user_room ON permissions(user_id, room_id);

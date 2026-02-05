@@ -92,7 +92,8 @@ function App() {
     React.useEffect(() => {
         if (session?.user?.id) {
             // Fetch user tier from the server
-            fetch(`/api/user-tier?user_id=${session.user.id}`)
+            // The endpoint authenticates the session and extracts the user ID
+            fetch(`/api/user-tier`)
                 .then(res => res.json())
                 .then(data => {
                     if (data.tier) {

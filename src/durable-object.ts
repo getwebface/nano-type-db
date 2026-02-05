@@ -1296,7 +1296,9 @@ export class NanoStore extends DurableObject {
                          console.warn("Permission check failed:", e.message);
                      }
                      
-                     // Filter by user_id: show only tasks created by this user OR tasks where user has explicit read permission
+                     // Permission model:
+                     // - If user has explicit read permission (can_read = true), show ALL tasks in the room
+                     // - Otherwise, show only tasks created by this user (user_id filter)
                      const tasks = hasReadPermission 
                          ? await this.readFromD1("SELECT * FROM tasks ORDER BY id LIMIT ? OFFSET ?", safeLimit, safeOffset)
                          : await this.readFromD1("SELECT * FROM tasks WHERE user_id = ? ORDER BY id LIMIT ? OFFSET ?", userId, safeLimit, safeOffset);

@@ -49,7 +49,7 @@ export const verification = sqliteTable("verification", {
 
 export const permissions = sqliteTable("permissions", {
   id: text("id").primaryKey(),
-  userId: text("user_id").notNull().references(()=> user.id),
+  userId: text("user_id").notNull().references(() => user.id),
   roomId: text("room_id").notNull(),
   tableName: text("table_name").notNull(),
   canRead: integer("can_read", { mode: "boolean" }).notNull().default(false),
