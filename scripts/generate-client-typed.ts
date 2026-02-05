@@ -40,6 +40,34 @@ function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+// Shared utility for inferring TypeScript types from parameter names
+const PARAM_TYPE_MAP: Record<string, string> = {
+  'id': 'string | number',
+  'limit': 'number',
+  'offset': 'number',
+  'query': 'string',
+  'title': 'string',
+  'text': 'string',
+  'readonly': 'boolean',
+  'userId': 'string',
+  'position': 'string',
+  'status': 'string',
+  'sql': 'string',
+  'key': 'string',
+  'value': 'string',
+  'topic': 'string',
+  'description': 'string',
+  'threshold': 'number',
+  'url': 'string',
+  'events': 'string',
+  'secret': 'string',
+  'active': 'boolean'
+};
+
+function inferParamType(paramName: string): string {
+  return PARAM_TYPE_MAP[paramName] || 'any';
+}
+
 function generateClientCode(manifest: ManifestResponse): string {
   const { actions, tables } = manifest;
   
@@ -108,12 +136,7 @@ function generateClientCode(manifest: ManifestResponse): string {
         const paramName = isOptional ? param.slice(0, -1) : param;
         const optional = isOptional ? '?' : '';
         
-        // Try to infer types from common parameter names
-        let paramType = 'any';
-        if (paramName === 'id') paramType = 'string | number';
-        else if (paramName === 'limit' || paramName === 'offset') paramType = 'number';
-        else if (paramName === 'query' || paramName === 'title' || paramName === 'text') paramType = 'string';
-        else if (paramName === 'readonly') paramType = 'boolean';
+        const paramType = inferParamType(paramName);
         
         lines.push(`  ${paramName}${optional}: ${paramType};`);
       });

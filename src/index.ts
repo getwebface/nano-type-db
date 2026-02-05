@@ -53,6 +53,7 @@ export default {
         url.pathname === "/connect" || 
         url.pathname === "/schema" || 
         url.pathname === "/manifest" ||
+        url.pathname === "/download-client" ||
         // Ensure API routes (like /api/keys) are handled by the backend
         url.pathname.startsWith("/api/") ||
         request.headers.get("Upgrade") === "websocket";
@@ -447,7 +448,8 @@ export default {
         });
         
         if (!response.ok) {
-          console.error(`Webhook ${webhookId} failed: ${response.status} ${response.statusText}`);
+          const errorText = await response.text().catch(() => 'Unable to read response');
+          console.error(`Webhook ${webhookId} to ${url} failed: ${response.status} ${response.statusText} - ${errorText}`);
           // Retry will be handled by Cloudflare Queue's max_retries config
           message.retry();
         } else {

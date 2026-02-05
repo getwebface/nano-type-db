@@ -1849,8 +1849,11 @@ export class NanoStore extends DurableObject {
       return;
     }
     
-    // Dispatch webhooks for this event
-    this.dispatchWebhooks(table, action, row);
+    // Dispatch webhooks for this event (async, non-blocking)
+    // We don't await to avoid blocking the broadcast
+    this.dispatchWebhooks(table, action, row).catch(err => {
+      console.error('Webhook dispatch failed:', err);
+    });
     
     if (this.subscribers.has(table)) {
       const sockets = this.subscribers.get(table)!;
@@ -1887,6 +1890,7 @@ export class NanoStore extends DurableObject {
       
       // Filter webhooks that subscribe to this event
       const matchingWebhooks = webhooks.filter((wh: any) => {
+        // Pre-process events string into array (could be cached if performance is critical)
         const events = wh.events.split(',').map((e: string) => e.trim());
         return events.includes('*') || events.includes(eventName) || 
                events.includes(`${table}.*`) || events.includes(`*.${action}`);
@@ -1923,24 +1927,24 @@ export class NanoStore extends DurableObject {
           } catch (e: any) {
             console.error(`Failed to queue webhook ${webhook.id}:`, e.message);
             
-            // Increment failure count
+            // Increment failure count and get the new value in one query
             this.sql.exec(
               `UPDATE _webhooks SET failure_count = failure_count + 1 WHERE id = ?`,
               webhook.id
             );
             
-            // Disable webhook after 10 failures
-            const failureCount = this.sql.exec(
+            // Check if we should disable (after update to get current count)
+            const result = this.sql.exec(
               `SELECT failure_count FROM _webhooks WHERE id = ?`,
               webhook.id
-            ).toArray()[0]?.failure_count || 0;
+            ).toArray()[0];
             
-            if (failureCount >= 10) {
+            if (result && result.failure_count >= 10) {
               this.sql.exec(
                 `UPDATE _webhooks SET active = 0 WHERE id = ?`,
                 webhook.id
               );
-              console.warn(`Webhook ${webhook.id} disabled after ${failureCount} failures`);
+              console.warn(`Webhook ${webhook.id} disabled after ${result.failure_count} failures`);
             }
           }
         }
