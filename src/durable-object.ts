@@ -368,6 +368,17 @@ export class NanoStore extends DurableObject {
              ON CONFLICT(date) DO UPDATE SET ${type} = ${type} + 1`,
             today
         );
+        
+        // Log to Cloudflare Analytics Engine for real-time observability
+        if (this.env.ANALYTICS) {
+            this.ctx.waitUntil(
+                this.env.ANALYTICS.writeDataPoint({
+                    blobs: [this.doId, type],
+                    doubles: [1], // count
+                    indexes: [`${type}_${today}`]
+                })
+            );
+        }
       } catch (e) {
           console.error("Usage tracking failed", e);
       }
@@ -749,6 +760,162 @@ export class NanoStore extends DurableObject {
         return new Response("Backup completed");
     }
 
+    // Internal endpoint to update vector status (called by queue consumer)
+    if (url.pathname === "/internal/update-vector-status") {
+        if (request.method !== "POST") {
+            return new Response("Method not allowed", { status: 405 });
+        }
+        try {
+            const { taskId, status, values } = await request.json() as { taskId: number, status: string, values?: number[] };
+            
+            // Update vector status in database
+            this.sql.exec("UPDATE tasks SET vector_status = ? WHERE id = ?", status, taskId);
+            this.trackUsage('ai_ops');
+            console.log(`Vector status updated for task ${taskId}: ${status}`);
+            
+            // If indexed successfully and we have values, trigger semantic reflex
+            if (status === 'indexed' && values) {
+                const taskResult = this.sql.exec("SELECT * FROM tasks WHERE id = ?", taskId).toArray();
+                const task = taskResult[0];
+                
+                // Only process semantic reflex if task still exists
+                if (task) {
+                    // NEURAL EVENT LOOP - Semantic Reflex for queued embeddings
+                    for (const key of this.memoryStore.keys()) {
+                        if (key.startsWith('semantic_sub:')) {
+                            const subscription = this.memoryStore.get(key);
+                            if (subscription && subscription.vector && subscription.socket) {
+                                try {
+                                    const similarity = calculateCosineSimilarity(values, subscription.vector);
+                                    if (similarity >= subscription.threshold && subscription.socket?.readyState === 1) {
+                                        subscription.socket.send(JSON.stringify({
+                                            type: "semantic_match",
+                                            topic: subscription.topic,
+                                            similarity: similarity,
+                                            row: task
+                                        }));
+                                        console.log(`Semantic match (queued): task ${taskId} matched "${subscription.topic}" (similarity: ${similarity.toFixed(3)})`);
+                                    }
+                                } catch (e: any) {
+                                    console.error(`Semantic check failed for ${key}:`, e.message);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    console.log(`Task ${taskId} no longer exists - skipping semantic reflex`);
+                }
+            }
+            
+            return new Response("Status updated", { status: 200 });
+        } catch (error: any) {
+            console.error("Failed to update vector status:", error);
+            return new Response(`Error: ${error.message}`, { status: 500 });
+        }
+    }
+
+    // List all backups in R2 bucket
+    if (url.pathname === "/backups") {
+        try {
+            if (!this.env.BACKUP_BUCKET) {
+                return Response.json({ error: "R2 Bucket not configured" }, { status: 500 });
+            }
+            
+            const listed = await this.env.BACKUP_BUCKET.list({ prefix: "backup-" });
+            const backups = listed.objects.map(obj => ({
+                key: obj.key,
+                size: obj.size,
+                uploaded: obj.uploaded.toISOString(),
+                timestamp: obj.key.replace('backup-', '').replace('.db', '')
+            }));
+            
+            // Sort by uploaded date, newest first
+            backups.sort((a, b) => new Date(b.uploaded).getTime() - new Date(a.uploaded).getTime());
+            
+            return Response.json({ backups });
+        } catch (error: any) {
+            console.error("Failed to list backups:", error);
+            return Response.json({ error: error.message }, { status: 500 });
+        }
+    }
+
+    // Restore from a specific backup
+    if (url.pathname === "/restore") {
+        if (request.method !== "POST") {
+            return new Response("Method not allowed", { status: 405 });
+        }
+        
+        try {
+            const { backupKey } = await request.json() as { backupKey: string };
+            
+            if (!this.env.BACKUP_BUCKET) {
+                return Response.json({ error: "R2 Bucket not configured" }, { status: 500 });
+            }
+            
+            // Validate backup key
+            if (!backupKey || !backupKey.startsWith('backup-')) {
+                return Response.json({ error: "Invalid backup key" }, { status: 400 });
+            }
+            
+            // Fetch backup from R2
+            const backup = await this.env.BACKUP_BUCKET.get(backupKey);
+            if (!backup) {
+                return Response.json({ error: "Backup not found" }, { status: 404 });
+            }
+            
+            // For Cloudflare Workers Durable Objects, we can't directly restore the SQLite file
+            // Instead, we need to parse it and reconstruct the tables
+            // This is a simplified version - in production, you'd want to use a proper SQLite parser
+            console.log(`Restoring from backup: ${backupKey}`);
+            
+            // Note: Full SQLite restoration in Workers would require either:
+            // 1. Parsing the SQLite file format (complex)
+            // 2. Exporting as SQL dump format instead of binary SQLite
+            // 3. Using VACUUM FROM (if available in Workers DO SQLite)
+            
+            // For now, return a message indicating this needs implementation
+            return Response.json({ 
+                message: "Restore functionality requires SQL dump format. Current backup is binary SQLite.",
+                suggestion: "Modify backupToR2() to export as SQL dump for easier restoration"
+            }, { status: 501 });
+            
+        } catch (error: any) {
+            console.error("Failed to restore backup:", error);
+            return Response.json({ error: error.message }, { status: 500 });
+        }
+    }
+
+    // Analytics endpoint - fetch usage data from _usage table
+    if (url.pathname === "/analytics") {
+        try {
+            // Get last 30 days of usage data
+            const usageData = this.sql.exec(
+                "SELECT * FROM _usage ORDER BY date DESC LIMIT 30"
+            ).toArray();
+            
+            // Calculate totals
+            const totals = {
+                reads: 0,
+                writes: 0,
+                ai_ops: 0
+            };
+            
+            usageData.forEach((row: any) => {
+                totals.reads += row.reads || 0;
+                totals.writes += row.writes || 0;
+                totals.ai_ops += row.ai_ops || 0;
+            });
+            
+            return Response.json({
+                daily: usageData.reverse(), // oldest to newest for charts
+                totals
+            });
+        } catch (error: any) {
+            console.error("Failed to fetch analytics:", error);
+            return Response.json({ error: error.message }, { status: 500 });
+        }
+    }
+
     if (url.pathname === "/schema") {
       this.trackUsage('reads');
       const schema = this.getSchema();
@@ -893,7 +1060,18 @@ export class NanoStore extends DurableObject {
 
                         // 3. Generate Embedding & Store (Secondary operation - best effort)
                         // Vector Consistency: Track status in database to allow retry jobs
-                        if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
+                        // PRODUCTION FIX: Use Cloudflare Queue for reliable AI processing with retry
+                        if (newTask && this.env.EMBEDDING_QUEUE) {
+                            // Push embedding job to queue (will retry on failure with exponential backoff)
+                            await this.env.EMBEDDING_QUEUE.send({
+                                taskId: newTask.id,
+                                doId: this.doId,
+                                title: title,
+                                timestamp: Date.now()
+                            });
+                            console.log(`Embedding job queued for task ${newTask.id}`);
+                        } else if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
+                            // FALLBACK: If no queue, use old ctx.waitUntil approach
                             // Use ctx.waitUntil for async operation without blocking the response
                             this.ctx.waitUntil((async () => {
                                 try {
