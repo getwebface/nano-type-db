@@ -203,7 +203,7 @@ export default {
                 isApiKey = true;
                 // Mock a session for the DO
                 session = { user: { id: keyRecord.user_id, role: "developer" } };
-                // Update last_used_at asynchronously
+                // Update last_used_at asynchronously (best effort - may not complete if context terminates early)
                 ctx.waitUntil(env.AUTH_DB.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").bind(Date.now(), apiKey).run());
             }
         } catch (e: any) {
