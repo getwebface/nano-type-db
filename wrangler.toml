@@ -29,6 +29,24 @@ binding = "AUTH_DB"
 database_name = "nanotype-auth"
 database_id = "d1b3a27b-a1de-43ab-ba7f-5ebda88b9807"
 
+{
+  "observability": {
+    "enabled": false,
+    "head_sampling_rate": 1,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "persist": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": false,
+      "persist": true,
+      "head_sampling_rate": 1
+    }
+  }
+}
+
 # Vector Index & AI
 [[vectorize]]
 binding = "VECTOR_INDEX"
