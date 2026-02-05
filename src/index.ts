@@ -5,7 +5,7 @@ import type { ExecutionContext, ScheduledController } from "cloudflare:workers";
 export { NanoStore, NanoStore as DataStore };
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
 
@@ -204,10 +204,7 @@ export default {
                 // Mock a session for the DO
                 session = { user: { id: keyRecord.user_id, role: "developer" } };
                 // Update last_used_at asynchronously
-                // @ts-ignore - waitUntil may not be available in all contexts
-                if (typeof ctx !== 'undefined') {
-                    ctx.waitUntil(env.AUTH_DB.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").bind(Date.now(), apiKey).run());
-                }
+                ctx.waitUntil(env.AUTH_DB.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").bind(Date.now(), apiKey).run());
             }
         } catch (e: any) {
             console.error("API Key validation error:", e);
