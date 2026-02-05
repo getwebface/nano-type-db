@@ -215,6 +215,7 @@ export class DataStore extends DurableObject {
   subscribers: Map<string, Set<WebSocket>>;
   env: Env;
   doId: string;
+  ctx: DurableObjectState;
   // Hybrid State: In-memory stores for transient data
   memoryStore: MemoryStore;
   debouncedWriter: DebouncedWriter;
@@ -228,6 +229,7 @@ export class DataStore extends DurableObject {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.ctx = ctx;
     this.env = env;
     this.sql = ctx.storage.sql;
     this.subscribers = new Map();
@@ -262,7 +264,12 @@ export class DataStore extends DurableObject {
     this.runMigrations();
     
     // Perform initial sync to D1 after migrations
-    this.performInitialSync();
+    // Note: This runs asynchronously and doesn't block construction.
+    // The DO can serve requests before initial sync completes.
+    // For stricter consistency, use ctx.blockConcurrencyWhile() in production.
+    this.performInitialSync().catch(e => {
+      console.error("[Sync Engine] Initial sync failed:", e);
+    });
   }
 
   runMigrations() {
@@ -383,21 +390,28 @@ export class DataStore extends DurableObject {
         
         // Modify query to include room_id filter if querying tasks
         let modifiedQuery = query;
+        const roomIdParams = [...params]; // Copy params array
+        
         if (query.includes('FROM tasks') && !query.includes('room_id')) {
-          // Simple query modification - add WHERE or AND clause
+          // Use parameterized query to prevent SQL injection
           if (query.toLowerCase().includes('where')) {
-            modifiedQuery = query.replace(/WHERE/i, `WHERE room_id = '${roomId}' AND`);
+            modifiedQuery = query.replace(/WHERE/i, `WHERE room_id = ? AND`);
+            roomIdParams.unshift(roomId); // Add roomId as first param
           } else if (query.toLowerCase().includes('order by')) {
-            modifiedQuery = query.replace(/ORDER BY/i, `WHERE room_id = '${roomId}' ORDER BY`);
+            modifiedQuery = query.replace(/ORDER BY/i, `WHERE room_id = ? ORDER BY`);
+            roomIdParams.unshift(roomId);
           } else {
-            modifiedQuery = query.replace(/FROM tasks/i, `FROM tasks WHERE room_id = '${roomId}'`);
+            modifiedQuery = query.replace(/FROM tasks/i, `FROM tasks WHERE room_id = ?`);
+            roomIdParams.unshift(roomId);
           }
         }
         
-        const stmt = this.env.READ_REPLICA.prepare(modifiedQuery);
-        if (params.length > 0) {
-          params.forEach((param, i) => stmt.bind(param));
+        // Properly chain bind() calls
+        let stmt = this.env.READ_REPLICA.prepare(modifiedQuery);
+        for (const param of roomIdParams) {
+          stmt = stmt.bind(param);
         }
+        
         const result = await stmt.all();
         return result.results || [];
       } catch (e) {
@@ -674,8 +688,8 @@ export class DataStore extends DurableObject {
                         const result = this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending') RETURNING *", trimmedTitle).toArray();
                         const newTask = result[0];
 
-                        // 2. Replicate to D1 for distributed reads
-                        await this.replicateToD1('tasks', 'insert', newTask);
+                        // 2. Replicate to D1 for distributed reads (async, non-blocking)
+                        this.ctx.waitUntil(this.replicateToD1('tasks', 'insert', newTask));
 
                         // 3. Generate Embedding & Store (Secondary operation - best effort)
                         // Note: This is async and may fail. Vector search may miss this task until
@@ -739,9 +753,9 @@ export class DataStore extends DurableObject {
                         // Fetch the updated row to broadcast
                         const updated = this.sql.exec("SELECT * FROM tasks WHERE id = ?", completeId).toArray()[0];
                         
-                        // Replicate to D1 for distributed reads
+                        // Replicate to D1 for distributed reads (async, non-blocking)
                         if (updated) {
-                            await this.replicateToD1('tasks', 'update', updated);
+                            this.ctx.waitUntil(this.replicateToD1('tasks', 'update', updated));
                         }
                         
                         webSocket.send(JSON.stringify({ 
@@ -781,9 +795,9 @@ export class DataStore extends DurableObject {
                         
                         this.sql.exec("DELETE FROM tasks WHERE id = ?", deleteId);
                         
-                        // Replicate deletion to D1
+                        // Replicate deletion to D1 (async, non-blocking)
                         if (deleted) {
-                            await this.replicateToD1('tasks', 'delete', { id: deleteId });
+                            this.ctx.waitUntil(this.replicateToD1('tasks', 'delete', { id: deleteId }));
                         }
                         
                         // Also delete from Vector Index

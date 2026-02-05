@@ -640,14 +640,14 @@ const results = {
   doOnly: {
     concurrentUsers: 1000,
     queriesPerSecond: 200,
-    avgLatency: '500ms',  // Queue buildup
-    p99Latency: '2000ms'  // Terrible
+    avgLatency: 500,      // ms - Queue buildup
+    p99Latency: 2000      // ms - Terrible
   },
   withSyncEngine: {
     concurrentUsers: 10000,
-    queriesPerSecond: 'Unlimited',
-    avgLatency: '5ms',    // Consistent
-    p99Latency: '15ms'    // Still great!
+    queriesPerSecond: Number.POSITIVE_INFINITY,  // Unlimited
+    avgLatency: 5,        // ms - Consistent
+    p99Latency: 15        // ms - Still great!
   }
 };
 ```

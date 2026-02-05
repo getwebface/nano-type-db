@@ -115,8 +115,11 @@ wrangler d1 execute nanotype-read-replica --command="SELECT COUNT(*) FROM tasks"
 
 ## Future Enhancements
 
-- [ ] Batch replication for higher throughput
-- [ ] Conflict resolution for concurrent writes
-- [ ] Read replica health checks
+- [x] Batch replication for initial sync (implemented via `batchSyncToD1`)
+- [ ] Incremental batch replication for ongoing operations (e.g., batch every 100ms)
+- [ ] Conflict resolution for concurrent writes across multiple DOs
+- [ ] Read replica health checks with automatic circuit breaker
+- [ ] Automatic failover strategies with retry logic
+- [ ] Metrics and monitoring dashboards for sync performance
 - [ ] Automatic failover strategies
 - [ ] Metrics and monitoring dashboards
