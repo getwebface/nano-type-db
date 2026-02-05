@@ -313,7 +313,13 @@ export default {
         let body: { roomId?: string; name?: string };
         try {
             body = await request.json() as { roomId?: string; name?: string };
-        } catch (e) {
+        } catch (e: any) {
+            try {
+                const raw = await request.text();
+                console.error("/api/rooms/create - JSON parse error:", e.message, "rawBody:", raw, "headers:", Object.fromEntries(request.headers));
+            } catch (readErr) {
+                console.error("/api/rooms/create - JSON parse error and failed to read raw body:", e.message, readErr);
+            }
             return SecurityHeaders.apply(
                 new Response("Invalid JSON body", { status: 400 })
             );
