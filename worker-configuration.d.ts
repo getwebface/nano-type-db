@@ -1,4 +1,4 @@
-import { DurableObjectNamespace, R2Bucket, D1Database, VectorizeIndex, Ai } from "cloudflare:workers";
+import { DurableObjectNamespace, R2Bucket, D1Database, VectorizeIndex, Ai, Queue, AnalyticsEngineDataset } from "cloudflare:workers";
 
 declare global {
 	interface Env {
@@ -15,5 +15,10 @@ declare global {
         AI: Ai;
 		// Static Assets Binding
 		ASSETS: Fetcher;
+		// Cloudflare Queues
+		AI_EMBEDDING_QUEUE: Queue;
+		WEBHOOK_QUEUE: Queue;
+		// Analytics Engine
+		ANALYTICS: AnalyticsEngineDataset;
 	}
 }
