@@ -157,7 +157,7 @@ const ACTIONS = {
   createTask: { params: ["title"] },
   completeTask: { params: ["id"] },
   deleteTask: { params: ["id"] },
-  listTasks: { params: ["limit?", "offset?"] }, // Optional pagination params
+  listTasks: { params: ["limit?", "offset?"] }, // Optional pagination (default: limit=100, offset=0, max limit=1000)
   search: { params: ["query"] },
   getUsage: { params: [] },
   getAuditLog: { params: [] },
@@ -910,9 +910,13 @@ export class NanoStore extends DurableObject {
 
                 case "listTasks": {
                      // Read from D1 replica for horizontal scaling
-                     // Support pagination to avoid loading large datasets
-                     const limit = data.payload?.limit || 100; // Default 100 rows
-                     const offset = data.payload?.offset || 0;
+                     // Support pagination to avoid loading large datasets (max 1000 per page)
+                     const limitRaw = data.payload?.limit;
+                     const offsetRaw = data.payload?.offset;
+                     
+                     // Parse and validate pagination parameters (could be strings from payload)
+                     const limit = limitRaw ? parseInt(String(limitRaw), 10) : 100; // Default 100 rows
+                     const offset = offsetRaw ? parseInt(String(offsetRaw), 10) : 0;
                      
                      // Validate pagination parameters
                      const safeLimit = Math.min(Math.max(1, limit), 1000); // Between 1-1000
