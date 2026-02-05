@@ -12,6 +12,8 @@ const OPTIMISTIC_UPDATE_TIMEOUT = 10000; // 10 seconds
 const WS_CONNECTION_TIMEOUT = 10000; // 10 seconds for WebSocket to connect
 const WS_RECONNECT_INTERVAL = 3000; // 3 seconds between reconnection attempts
 const MAX_RECONNECT_ATTEMPTS = 5; // Maximum reconnection attempts
+const HEARTBEAT_INTERVAL = 30000; // 30 seconds - send ping to keep connection alive
+const HEARTBEAT_TIMEOUT = 5000; // 5 seconds - expect pong response
 
 const DatabaseContext = createContext<DatabaseContextType | null>(null);
 
@@ -29,6 +31,9 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const connectionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const shouldReconnectRef = useRef<boolean>(true);
+    const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+    const heartbeatTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const lastPongRef = useRef<number>(Date.now());
     
     const subscribedTablesRef = useRef<Set<string>>(new Set());
 
@@ -70,6 +75,16 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         if (connectionTimeoutRef.current) {
             clearTimeout(connectionTimeoutRef.current);
             connectionTimeoutRef.current = null;
+        }
+        
+        if (heartbeatIntervalRef.current) {
+            clearInterval(heartbeatIntervalRef.current);
+            heartbeatIntervalRef.current = null;
+        }
+        
+        if (heartbeatTimeoutRef.current) {
+            clearTimeout(heartbeatTimeoutRef.current);
+            heartbeatTimeoutRef.current = null;
         }
 
         // Close existing socket if any
@@ -124,6 +139,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             
             // Reset reconnection counter on successful connection
             reconnectAttemptsRef.current = 0;
+            lastPongRef.current = Date.now();
             
             setStatus('connected');
             setIsConnected(true);
@@ -135,6 +151,23 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                     ws.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
                 }
             }, 500);
+            
+            // Start heartbeat to keep connection alive
+            heartbeatIntervalRef.current = setInterval(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    // Send ping
+                    ws.send(JSON.stringify({ action: 'ping' }));
+                    
+                    // Set timeout to check for pong response
+                    heartbeatTimeoutRef.current = setTimeout(() => {
+                        const timeSinceLastPong = Date.now() - lastPongRef.current;
+                        if (timeSinceLastPong > HEARTBEAT_INTERVAL + HEARTBEAT_TIMEOUT) {
+                            console.warn('Heartbeat timeout - connection may be dead');
+                            ws.close();
+                        }
+                    }, HEARTBEAT_TIMEOUT);
+                }
+            }, HEARTBEAT_INTERVAL);
         };
 
         ws.onerror = (error) => {
@@ -151,6 +184,16 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
+
+            // Handle pong response for heartbeat
+            if (data.type === 'pong') {
+                lastPongRef.current = Date.now();
+                if (heartbeatTimeoutRef.current) {
+                    clearTimeout(heartbeatTimeoutRef.current);
+                    heartbeatTimeoutRef.current = null;
+                }
+                return;
+            }
 
             if (data.type === 'query_result') {
                 if (data.originalSql === 'getUsage') {
@@ -198,6 +241,17 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             if (connectionTimeoutRef.current) {
                 clearTimeout(connectionTimeoutRef.current);
                 connectionTimeoutRef.current = null;
+            }
+            
+            // Clear heartbeat timers
+            if (heartbeatIntervalRef.current) {
+                clearInterval(heartbeatIntervalRef.current);
+                heartbeatIntervalRef.current = null;
+            }
+            
+            if (heartbeatTimeoutRef.current) {
+                clearTimeout(heartbeatTimeoutRef.current);
+                heartbeatTimeoutRef.current = null;
             }
             
             setIsConnected(false);
@@ -312,6 +366,14 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             
             if (connectionTimeoutRef.current) {
                 clearTimeout(connectionTimeoutRef.current);
+            }
+            
+            if (heartbeatIntervalRef.current) {
+                clearInterval(heartbeatIntervalRef.current);
+            }
+            
+            if (heartbeatTimeoutRef.current) {
+                clearTimeout(heartbeatTimeoutRef.current);
             }
             
             if (socket) {

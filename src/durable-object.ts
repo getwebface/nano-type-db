@@ -5,7 +5,7 @@ import type { DurableObjectState } from "cloudflare:workers";
 // we skip file-based backups and rely on R2 or other mechanisms.
 
 interface WebSocketMessage {
-  action: "subscribe" | "query" | "mutate" | "rpc";
+  action: "subscribe" | "query" | "mutate" | "rpc" | "ping";
   table?: string;
   sql?: string;
   method?: string; 
@@ -243,6 +243,16 @@ export class DataStore extends DurableObject {
     webSocket.addEventListener("message", async (event) => {
       try {
         const data = JSON.parse(event.data as string) as WebSocketMessage;
+
+        // Handle ping/pong for heartbeat
+        if (data.action === "ping") {
+          try {
+            webSocket.send(JSON.stringify({ type: "pong" }));
+          } catch (e) {
+            console.error("Failed to send pong:", e);
+          }
+          return;
+        }
 
         if (data.action === "subscribe" && data.table) {
           if (!this.subscribers.has(data.table)) {
