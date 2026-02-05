@@ -3,12 +3,17 @@ import { DatabaseProvider, useDatabase } from './hooks/useDatabase';
 import { Shell } from './components/Shell';
 import { Toaster } from './components/Toaster';
 import { AuthScreen } from './components/AuthScreen';
+import { RoomSelection } from './components/RoomSelection';
+import { AccountSettings } from './components/AccountSettings';
 import { authClient } from './src/lib/auth-client';
-import { ArrowRight, Database, LogOut, Loader2 } from 'lucide-react';
+import { LogOut, Settings } from 'lucide-react';
+
+type AppView = 'rooms' | 'settings' | 'shell';
 
 const ConnectionScreen: React.FC = () => {
-    const { connect, isConnected, status } = useDatabase();
-    const [inputRoom, setInputRoom] = useState('demo-room');
+    const { connect, isConnected } = useDatabase();
+    const [currentView, setCurrentView] = useState<AppView>('rooms');
+    const [selectedRoom, setSelectedRoom] = useState<string>('');
     
     // Allow user to logout
     const handleLogout = async () => {
@@ -16,69 +21,37 @@ const ConnectionScreen: React.FC = () => {
         window.location.reload();
     };
 
-    if (isConnected) {
-        return <Shell roomId={inputRoom} />;
+    const handleSelectRoom = (roomId: string) => {
+        setSelectedRoom(roomId);
+        connect(roomId);
+    };
+
+    if (isConnected && selectedRoom) {
+        return <Shell roomId={selectedRoom} />;
+    }
+
+    if (currentView === 'settings') {
+        return <AccountSettings onBack={() => setCurrentView('rooms')} />;
     }
 
     return (
         <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4 relative">
-            <button 
-                onClick={handleLogout}
-                className="absolute top-4 right-4 flex items-center gap-2 text-slate-400 hover:text-white text-sm"
-            >
-                <LogOut size={16} /> Sign Out
-            </button>
-
-            <div className="w-full max-w-md space-y-8">
-                <div className="text-center">
-                    <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-slate-900 border border-slate-800 mb-6">
-                        <Database className="w-8 h-8 text-green-500" />
-                    </div>
-                    <h2 className="text-3xl font-extrabold text-white tracking-tight">
-                        Connect Database
-                    </h2>
-                    <p className="mt-2 text-sm text-slate-400">
-                        Enter a Room ID to spin up your instance.
-                    </p>
-                </div>
-                
-                <form 
-                    onSubmit={(e) => { e.preventDefault(); connect(inputRoom); }}
-                    className="mt-8 space-y-6 bg-slate-900 p-8 rounded-xl border border-slate-800 shadow-2xl"
+            <div className="absolute top-4 right-4 flex items-center gap-2">
+                <button 
+                    onClick={() => setCurrentView(currentView === 'settings' ? 'rooms' : 'settings')}
+                    className="flex items-center gap-2 text-slate-400 hover:text-white text-sm transition-colors"
                 >
-                    <div>
-                        <label htmlFor="room-id" className="block text-sm font-medium text-slate-400">
-                            Room ID
-                        </label>
-                        <input
-                            id="room-id"
-                            type="text"
-                            required
-                            value={inputRoom}
-                            onChange={(e) => setInputRoom(e.target.value)}
-                            className="mt-1 block w-full px-4 py-3 bg-slate-950 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all"
-                            placeholder="e.g. my-production-db"
-                        />
-                    </div>
-
-                    <button
-                        type="submit"
-                        disabled={status === 'connecting'}
-                        className="group w-full flex justify-center py-3 px-4 border border-transparent text-sm font-bold rounded-lg text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 focus:ring-offset-slate-900 transition-all"
-                    >
-                        {status === 'connecting' ? (
-                            <span className="flex items-center gap-2">
-                                <Loader2 className="animate-spin" /> Waking up Database...
-                            </span>
-                        ) : (
-                            <>
-                            Connect
-                            <ArrowRight className="ml-2 w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                            </>
-                        )}
-                    </button>
-                </form>
+                    <Settings size={16} /> {currentView === 'settings' ? 'Databases' : 'Settings'}
+                </button>
+                <button 
+                    onClick={handleLogout}
+                    className="flex items-center gap-2 text-slate-400 hover:text-white text-sm transition-colors"
+                >
+                    <LogOut size={16} /> Sign Out
+                </button>
             </div>
+
+            <RoomSelection onSelectRoom={handleSelectRoom} />
         </div>
     );
 };
