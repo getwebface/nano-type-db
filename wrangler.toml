@@ -57,6 +57,22 @@ binding = "AI"
 # AI Gateway for caching and rate limiting
 gateway = "nano-type-ai-gateway"
 
+# Cloudflare Queue for AI Embeddings (with retry)
+[[queues.producers]]
+binding = "EMBEDDING_QUEUE"
+queue = "nanotype-embeddings"
+
+[[queues.consumers]]
+queue = "nanotype-embeddings"
+max_batch_size = 10
+max_batch_timeout = 30
+max_retries = 5
+dead_letter_queue = "nanotype-embeddings-dlq"
+
+# Analytics Engine for Observability
+[analytics_engine_datasets]
+binding = "ANALYTICS"
+
 # Static Assets (React Frontend)
 [assets]
 binding = "ASSETS"
@@ -97,3 +113,14 @@ max_batch_timeout = 30
 # Analytics Engine for Observability
 [[analytics_engine_datasets]]
 binding = "ANALYTICS"
+# Cloudflare Queue for Webhooks
+[[queues.producers]]
+binding = "WEBHOOK_QUEUE"
+queue = "nanotype-webhooks"
+
+[[queues.consumers]]
+queue = "nanotype-webhooks"
+max_batch_size = 10
+max_batch_timeout = 30
+max_retries = 3
+dead_letter_queue = "nanotype-webhooks-dlq"

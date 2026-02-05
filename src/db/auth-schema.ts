@@ -7,7 +7,8 @@ export const user = sqliteTable("user", {
   emailVerified: integer("emailVerified", { mode: "boolean" }).notNull(),
   image: text("image"),
   createdAt: integer("createdAt", { mode: "timestamp" }).notNull(),
-  updatedAt: integer("updatedAt", { mode: "timestamp" }).notNull()
+  updatedAt: integer("updatedAt", { mode: "timestamp" }).notNull(),
+  tier: text("tier").notNull().default("free") // Subscription tier: 'free' or 'pro'
 });
 
 export const session = sqliteTable("session", {
@@ -44,4 +45,15 @@ export const verification = sqliteTable("verification", {
   expiresAt: integer("expiresAt", { mode: "timestamp" }).notNull(),
   createdAt: integer("createdAt", { mode: "timestamp" }),
   updatedAt: integer("updatedAt", { mode: "timestamp" })
+});
+
+export const permissions = sqliteTable("permissions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => user.id),
+  roomId: text("room_id").notNull(),
+  tableName: text("table_name").notNull(),
+  canRead: integer("can_read", { mode: "boolean" }).notNull().default(false),
+  canWrite: integer("can_write", { mode: "boolean" }).notNull().default(false),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull()
 });

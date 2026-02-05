@@ -6,6 +6,7 @@ export const PsychicSearch: React.FC = () => {
     const [searchText, setSearchText] = useState('');
     const [results, setResults] = useState<any[]>([]);
     const [loadTime, setLoadTime] = useState<number | null>(null);
+    const [upgradeRequired, setUpgradeRequired] = useState(false);
     const messageHandlerRef = useRef<((event: MessageEvent) => void) | null>(null);
     const timeoutIdRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -19,6 +20,21 @@ export const PsychicSearch: React.FC = () => {
                 clearTimeout(timeoutIdRef.current);
             }
         };
+    }, [socket]);
+    
+    // Listen for tier-gating errors from server
+    useEffect(() => {
+        if (!socket) return;
+        
+        const handleTierError = (event: MessageEvent) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'error' && data.feature === 'psychic_search') {
+                setUpgradeRequired(true);
+            }
+        };
+        
+        socket.addEventListener('message', handleTierError);
+        return () => socket.removeEventListener('message', handleTierError);
     }, [socket]);
 
     const handleSearch = () => {
@@ -108,80 +124,101 @@ export const PsychicSearch: React.FC = () => {
             margin: '20px auto'
         }}>
             <h2 style={{ color: '#8b5cf6', marginTop: 0 }}>🔮 Psychic Search Demo</h2>
-            <p style={{ color: '#666', fontSize: '14px' }}>
-                Type slowly (e.g., "urgent") to trigger auto-sensing. Then click Search to see the magic!
-            </p>
             
-            <div style={{ marginBottom: '20px' }}>
-                <input
-                    type="text"
-                    value={searchText}
-                    onChange={(e) => setSearchText(e.target.value)}
-                    placeholder="Type your search query..."
-                    style={{
-                        width: '100%',
-                        padding: '10px',
-                        fontSize: '16px',
-                        border: '2px solid #e5e7eb',
-                        borderRadius: '4px',
-                        outline: 'none',
-                        transition: 'border-color 0.2s'
-                    }}
-                    onFocus={(e) => e.target.style.borderColor = '#8b5cf6'}
-                    onBlur={(e) => e.target.style.borderColor = '#e5e7eb'}
-                />
-            </div>
-            
-            <button
-                onClick={handleSearch}
-                style={{
-                    padding: '10px 20px',
-                    fontSize: '16px',
-                    backgroundColor: '#8b5cf6',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontWeight: 'bold'
-                }}
-                onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#7c3aed'}
-                onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#8b5cf6'}
-            >
-                Search
-            </button>
-            
-            {loadTime !== null && (
-                <div style={{ 
-                    marginTop: '15px', 
-                    padding: '10px', 
-                    backgroundColor: loadTime < 1 ? '#dcfce7' : '#fef3c7',
-                    borderRadius: '4px',
-                    fontWeight: 'bold'
+            {upgradeRequired ? (
+                <div style={{
+                    padding: '20px',
+                    backgroundColor: '#fef3c7',
+                    border: '2px solid #f59e0b',
+                    borderRadius: '8px',
+                    textAlign: 'center'
                 }}>
-                    Load time: {loadTime.toFixed(2)}ms {loadTime < 1 ? '⚡' : '🌐'}
+                    <p style={{ fontSize: '16px', fontWeight: 'bold', color: '#92400e', marginBottom: '10px' }}>
+                        🚀 Upgrade to Pro
+                    </p>
+                    <p style={{ fontSize: '14px', color: '#78350f' }}>
+                        Psychic Search with AI-powered auto-sensing is a premium feature. 
+                        Upgrade to Pro to unlock unlimited AI predictions and semantic search!
+                    </p>
                 </div>
-            )}
-            
-            {results.length > 0 && (
-                <div style={{ marginTop: '20px' }}>
-                    <h3 style={{ fontSize: '16px', marginBottom: '10px' }}>Results:</h3>
-                    <ul style={{ listStyle: 'none', padding: 0 }}>
-                        {results.map((task) => (
-                            <li 
-                                key={task.id} 
-                                style={{
-                                    padding: '10px',
-                                    marginBottom: '8px',
-                                    backgroundColor: 'white',
-                                    border: '1px solid #e5e7eb',
-                                    borderRadius: '4px'
-                                }}
-                            >
-                                <strong>{task.title}</strong> - {task.status}
-                            </li>
-                        ))}
-                    </ul>
-                </div>
+            ) : (
+                <>
+                    <p style={{ color: '#666', fontSize: '14px' }}>
+                        Type slowly (e.g., "urgent") to trigger auto-sensing. Then click Search to see the magic!
+                    </p>
+                    
+                    <div style={{ marginBottom: '20px' }}>
+                        <input
+                            type="text"
+                            value={searchText}
+                            onChange={(e) => setSearchText(e.target.value)}
+                            placeholder="Type your search query..."
+                            style={{
+                                width: '100%',
+                                padding: '10px',
+                                fontSize: '16px',
+                                border: '2px solid #e5e7eb',
+                                borderRadius: '4px',
+                                outline: 'none',
+                                transition: 'border-color 0.2s'
+                            }}
+                            onFocus={(e) => e.target.style.borderColor = '#8b5cf6'}
+                            onBlur={(e) => e.target.style.borderColor = '#e5e7eb'}
+                        />
+                    </div>
+                    
+                    <button
+                        onClick={handleSearch}
+                        style={{
+                            padding: '10px 20px',
+                            fontSize: '16px',
+                            backgroundColor: '#8b5cf6',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            cursor: 'pointer',
+                            fontWeight: 'bold'
+                        }}
+                        onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#7c3aed'}
+                        onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#8b5cf6'}
+                    >
+                        Search
+                    </button>
+                    
+                    {loadTime !== null && (
+                        <div style={{ 
+                            marginTop: '15px', 
+                            padding: '10px', 
+                            backgroundColor: loadTime < 1 ? '#dcfce7' : '#fef3c7',
+                            borderRadius: '4px',
+                            fontWeight: 'bold'
+                        }}>
+                            Load time: {loadTime.toFixed(2)}ms {loadTime < 1 ? '⚡' : '🌐'}
+                        </div>
+                    )}
+                    
+                    {results.length > 0 && (
+                        <div style={{ marginTop: '20px' }}>
+                            <h3 style={{ fontSize: '16px', marginBottom: '10px' }}>Results:</h3>
+                            <ul style={{ listStyle: 'none', padding: 0 }}>
+                                {results.map((task) => (
+                                    <li 
+                                        key={task.id} 
+                                        style={{
+                                            padding: '10px',
+                                            marginBottom: '8px',
+                                            backgroundColor: 'white',
+                                            border: '1px solid #e5e7eb',
+                                            borderRadius: '4px'
+                                        }}
+                                    >
+                                        <strong>{task.title}</strong> - {task.status}
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+                </>
             )}
         </div>
     );

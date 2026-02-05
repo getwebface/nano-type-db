@@ -1,7 +1,7 @@
 import { NanoStore } from "./durable-object";
 import { createAuth } from "./lib/auth";
 import { SecurityHeaders, InputValidator } from "./lib/security";
-import type { ExecutionContext, ScheduledController } from "cloudflare:workers";
+import type { ExecutionContext, ScheduledController, MessageBatch } from "cloudflare:workers";
 
 export { NanoStore, NanoStore as DataStore };
 
@@ -36,6 +36,32 @@ export default {
         });
     }
 
+    // User Tier Endpoint
+    if (url.pathname === "/api/user-tier") {
+        const session = await auth.api.getSession({ headers: request.headers });
+        if (!session?.user?.id) {
+            return SecurityHeaders.apply(
+                new Response("Unauthorized", { status: 401 })
+            );
+        }
+
+        try {
+            const userTier = await env.AUTH_DB.prepare(
+                "SELECT tier FROM user WHERE id = ?"
+            ).bind(session.user.id).first();
+
+            return SecurityHeaders.apply(
+                Response.json({ 
+                    tier: userTier?.tier || 'free'
+                })
+            );
+        } catch (e: any) {
+            return SecurityHeaders.apply(
+                new Response(`Error fetching user tier: ${e.message}`, { status: 500 })
+            );
+        }
+    }
+
     // 2. Serve Static Assets (React App)
     if (env.ASSETS) {
       try {
@@ -53,6 +79,7 @@ export default {
         url.pathname === "/connect" || 
         url.pathname === "/schema" || 
         url.pathname === "/manifest" ||
+        url.pathname === "/download-client" ||
         // Ensure API routes (like /api/keys) are handled by the backend
         url.pathname.startsWith("/api/") ||
         request.headers.get("Upgrade") === "websocket";
@@ -229,6 +256,191 @@ export default {
         }
     }
 
+    // Handle Room Management Endpoints
+    if (url.pathname === "/api/rooms/list") {
+        let session;
+        try {
+            session = await auth.api.getSession({ headers: request.headers });
+        } catch (e: any) {
+            return SecurityHeaders.apply(
+                new Response(`Auth Error: ${e.message}`, { status: 500 })
+            );
+        }
+        
+        if (!session) {
+            return SecurityHeaders.apply(
+                new Response("Unauthorized. Please log in.", { status: 401 })
+            );
+        }
+
+        try {
+            const result = await env.AUTH_DB.prepare(
+                "SELECT id, name, created_at, last_accessed_at FROM rooms WHERE user_id = ? ORDER BY last_accessed_at DESC"
+            ).bind(session.user.id).all();
+
+            return SecurityHeaders.apply(
+                Response.json(result.results || [])
+            );
+        } catch (e: any) {
+            return SecurityHeaders.apply(
+                new Response(`Failed to list rooms: ${e.message}`, { status: 500 })
+            );
+        }
+    }
+
+    if (url.pathname === "/api/rooms/create") {
+        let session;
+        try {
+            session = await auth.api.getSession({ headers: request.headers });
+        } catch (e: any) {
+            return SecurityHeaders.apply(
+                new Response(`Auth Error: ${e.message}`, { status: 500 })
+            );
+        }
+        
+        if (!session) {
+            return SecurityHeaders.apply(
+                new Response("Unauthorized. Please log in.", { status: 401 })
+            );
+        }
+
+        if (request.method !== "POST") {
+            return SecurityHeaders.apply(
+                new Response("Method not allowed", { status: 405 })
+            );
+        }
+
+        let body: { roomId?: string; name?: string };
+        try {
+            body = await request.json() as { roomId?: string; name?: string };
+        } catch (e: any) {
+            try {
+                const raw = await request.text();
+                console.error("/api/rooms/create - JSON parse error:", e.message, "rawBody:", raw, "headers:", Object.fromEntries(request.headers));
+            } catch (readErr) {
+                console.error("/api/rooms/create - JSON parse error and failed to read raw body:", e.message, readErr);
+            }
+            return SecurityHeaders.apply(
+                new Response("Invalid JSON body", { status: 400 })
+            );
+        }
+
+        // Validate room ID
+        const roomId = InputValidator.sanitizeString(body.roomId || "", 50, false);
+        if (!roomId || roomId.length < 3) {
+            return SecurityHeaders.apply(
+                new Response("Room ID must be at least 3 characters", { status: 400 })
+            );
+        }
+
+        const name = InputValidator.sanitizeString(body.name || roomId, 100, false);
+
+        try {
+            // Check plan limits
+            const limitsResult = await env.AUTH_DB.prepare(
+                "SELECT max_rooms FROM plan_limits WHERE user_id = ?"
+            ).bind(session.user.id).first();
+
+            const maxRooms = limitsResult?.max_rooms || 3; // Default to free tier
+
+            // Count existing rooms
+            const countResult = await env.AUTH_DB.prepare(
+                "SELECT COUNT(*) as count FROM rooms WHERE user_id = ?"
+            ).bind(session.user.id).first();
+
+            const currentCount = (countResult as any)?.count || 0;
+
+            if (currentCount >= maxRooms) {
+                return SecurityHeaders.apply(
+                    new Response(`Plan limit reached. Maximum ${maxRooms} rooms allowed.`, { status: 403 })
+                );
+            }
+
+            // Check if room ID already exists
+            const existingRoom = await env.AUTH_DB.prepare(
+                "SELECT id FROM rooms WHERE id = ?"
+            ).bind(roomId).first();
+
+            if (existingRoom) {
+                return SecurityHeaders.apply(
+                    new Response("Room ID already exists", { status: 409 })
+                );
+            }
+
+            // Create room
+            await env.AUTH_DB.prepare(
+                "INSERT INTO rooms (id, user_id, name, created_at, last_accessed_at) VALUES (?, ?, ?, ?, ?)"
+            ).bind(roomId, session.user.id, name, Date.now(), Date.now()).run();
+
+            return SecurityHeaders.apply(
+                Response.json({ 
+                    id: roomId, 
+                    name: name,
+                    created_at: Date.now(),
+                    last_accessed_at: Date.now()
+                })
+            );
+        } catch (e: any) {
+            console.error("Failed to create room:", e);
+            return SecurityHeaders.apply(
+                new Response(`Failed to create room: ${e.message}`, { status: 500 })
+            );
+        }
+    }
+
+    if (url.pathname === "/api/rooms/delete") {
+        let session;
+        try {
+            session = await auth.api.getSession({ headers: request.headers });
+        } catch (e: any) {
+            return SecurityHeaders.apply(
+                new Response(`Auth Error: ${e.message}`, { status: 500 })
+            );
+        }
+        
+        if (!session) {
+            return SecurityHeaders.apply(
+                new Response("Unauthorized. Please log in.", { status: 401 })
+            );
+        }
+
+        if (request.method !== "POST") {
+            return SecurityHeaders.apply(
+                new Response("Method not allowed", { status: 405 })
+            );
+        }
+
+        let body: { roomId: string };
+        try {
+            body = await request.json() as { roomId: string };
+        } catch (e) {
+            return SecurityHeaders.apply(
+                new Response("Invalid JSON body", { status: 400 })
+            );
+        }
+        
+        if (!body.roomId) {
+            return SecurityHeaders.apply(
+                new Response("Invalid room ID", { status: 400 })
+            );
+        }
+        
+        try {
+            // Ensure user can only delete their own rooms
+            await env.AUTH_DB.prepare(
+                "DELETE FROM rooms WHERE id = ? AND user_id = ?"
+            ).bind(body.roomId, session.user.id).run();
+
+            return SecurityHeaders.apply(
+                Response.json({ success: true })
+            );
+        } catch (e: any) {
+            return SecurityHeaders.apply(
+                new Response(`Failed to delete room: ${e.message}`, { status: 500 })
+            );
+        }
+    }
+
     // Handle Global Query
     if (url.pathname === "/global-query") {
         let session;
@@ -354,6 +566,37 @@ export default {
 
     console.log(`Auth success: User ${session.user.id}${isApiKey ? ' (API Key)' : ''}`);
 
+    // Validate room exists in registry (unless using API key for backward compatibility)
+    if (!isApiKey) {
+        try {
+            const roomExists = await env.AUTH_DB.prepare(
+                "SELECT id FROM rooms WHERE id = ? AND user_id = ?"
+            ).bind(roomId, session.user.id).first();
+
+            if (!roomExists) {
+                // Auto-register existing rooms for backward compatibility
+                console.log(`Auto-registering room ${roomId} for user ${session.user.id}`);
+                try {
+                    await env.AUTH_DB.prepare(
+                        "INSERT OR IGNORE INTO rooms (id, user_id, name, created_at, last_accessed_at) VALUES (?, ?, ?, ?, ?)"
+                    ).bind(roomId, session.user.id, roomId, Date.now(), Date.now()).run();
+                } catch (insertError) {
+                    console.error("Failed to auto-register room:", insertError);
+                    // Continue anyway for backward compatibility
+                }
+            } else {
+                // Update last accessed time for registered rooms
+                ctx.waitUntil(
+                    env.AUTH_DB.prepare(
+                        "UPDATE rooms SET last_accessed_at = ? WHERE id = ? AND user_id = ?"
+                    ).bind(Date.now(), roomId, session.user.id).run()
+                );
+            }
+        } catch (e: any) {
+            console.error("Room validation error:", e);
+            // Continue anyway to maintain backward compatibility
+        }
+    }
 
     // --- CRITICAL FIX START ---
     // Instead of modifying the immutable 'request', we create a new Mutable request
@@ -403,5 +646,89 @@ export default {
     const id = env.DATA_STORE.idFromName("demo-room");
     const stub = env.DATA_STORE.get(id);
     ctx.waitUntil(stub.fetch("http://do/backup"));
-  }
+  },
+
+    async queue(batch: MessageBatch, env: Env, ctx: ExecutionContext): Promise<void> {
+        for (const message of batch.messages) {
+            try {
+                // Distinguish message types by body shape
+                const body = message.body as any;
+
+                // Webhook message
+                if (body && body.webhookId && body.url) {
+                    const { webhookId, url, secret, payload } = body as {
+                        webhookId: string;
+                        url: string;
+                        secret?: string | null;
+                        payload: any;
+                    };
+
+                    const headers: Record<string, string> = {
+                        'Content-Type': 'application/json',
+                        'User-Agent': 'NanoTypeDB-Webhooks/1.0'
+                    };
+
+                    if (secret) {
+                        try {
+                            const encoder = new TextEncoder();
+                            const data = encoder.encode(JSON.stringify(payload));
+                            const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+                            const signature = await crypto.subtle.sign('HMAC', key, data);
+                            const hashArray = Array.from(new Uint8Array(signature));
+                            const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+                            headers['X-Webhook-Signature'] = `sha256=${hashHex}`;
+                        } catch (sigErr) {
+                            console.error('Failed to compute webhook signature:', sigErr);
+                        }
+                    }
+
+                    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(payload) });
+                    if (!res.ok) {
+                        const errorText = await res.text().catch(() => 'Unable to read response');
+                        console.error(`Webhook ${body.webhookId} failed: ${res.status} ${res.statusText} - ${errorText}`);
+                        message.retry();
+                    } else {
+                        console.log(`Webhook ${body.webhookId} delivered`);
+                        message.ack();
+                    }
+                    continue;
+                }
+
+                // Embedding job
+                if (body && typeof body.taskId === 'number' && body.doId && body.title) {
+                    const job = body as { taskId: number; doId: string; title: string; timestamp: number };
+                    try {
+                        const embeddings = await env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [job.title] });
+                        const values = embeddings.data?.[0];
+                        if (values && env.VECTOR_INDEX) {
+                            await env.VECTOR_INDEX.upsert([{ id: `${job.doId}:${job.taskId}`, values, metadata: { doId: job.doId, taskId: job.taskId } }]);
+                            const doIdObj = env.DATA_STORE.idFromString(job.doId);
+                            const stub = env.DATA_STORE.get(doIdObj);
+                            await stub.fetch('http://do/internal/update-vector-status', { method: 'POST', body: JSON.stringify({ taskId: job.taskId, status: 'indexed', values }) });
+                            if (env.ANALYTICS) {
+                                ctx.waitUntil(env.ANALYTICS.writeDataPoint({ blobs: [job.doId, 'ai_embedding_success'], doubles: [job.taskId, Date.now() - (job.timestamp || Date.now())], indexes: [`task_${job.taskId}`] }));
+                            }
+                            message.ack();
+                        } else {
+                            throw new Error('No embedding values returned');
+                        }
+                    } catch (err: any) {
+                        console.error('Embedding job failed:', err);
+                        if (env.ANALYTICS) {
+                            ctx.waitUntil(env.ANALYTICS.writeDataPoint({ blobs: [body.doId || 'unknown', 'ai_embedding_failure'], doubles: [body.taskId || 0, message.attempts || 0], indexes: [`error_${Date.now()}`] }));
+                        }
+                        message.retry();
+                    }
+                    continue;
+                }
+
+                // Unknown message type — ack to avoid infinite retries
+                console.warn('Unknown queue message type, acking:', message.body);
+                message.ack();
+            } catch (error: any) {
+                console.error('Queue processing error:', error);
+                try { message.retry(); } catch (_) {}
+            }
+        }
+    }
 };
