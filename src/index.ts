@@ -137,22 +137,27 @@ export default {
     
     let session;
     try {
-        // For WebSocket connections, try to get session token from query params first
-        // This solves the cross-port cookie issue in development
-        const sessionToken = url.searchParams.get("session_token");
+        // FIXED LOGIC: Priority Order Swapped
         
-        if (sessionToken) {
-            // Verify session token directly
-            session = await auth.api.getSession({ 
-                headers: new Headers({
-                    'Cookie': `better-auth.session_token=${sessionToken}`
-                })
-            });
-        } else {
-            // Fall back to standard cookie-based auth
-            session = await auth.api.getSession({ 
-                headers: request.headers
-            });
+        // 1. Priority: Try standard browser cookies first
+        // This ensures production (same-domain) requests use the valid signed cookies automatically sent by the browser.
+        session = await auth.api.getSession({ 
+            headers: request.headers
+        });
+
+        // 2. Fallback: If no session via cookies, try the URL param
+        // This handles local development (cross-port) where cookies might be missing.
+        if (!session) {
+            const sessionToken = url.searchParams.get("session_token");
+            
+            if (sessionToken) {
+                // Verify session token manually
+                session = await auth.api.getSession({ 
+                    headers: new Headers({
+                        'Cookie': `better-auth.session_token=${sessionToken}`
+                    })
+                });
+            }
         }
     } catch (e: any) {
         console.error("Critical Auth Error:", e);
