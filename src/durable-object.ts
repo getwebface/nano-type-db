@@ -380,6 +380,10 @@ export class DataStore extends DurableObject {
   /**
    * Read from D1 replica with fallback to DO SQLite
    * This provides distributed read scaling while maintaining resilience
+   * 
+   * Note: Query modification is designed for simple SELECT queries.
+   * Complex queries with subqueries, JOINs, or nested WHERE clauses
+   * should pre-include room_id filtering to avoid modification issues.
    */
   async readFromD1(query: string, ...params: any[]): Promise<any[]> {
     // Try D1 first for distributed reads
@@ -394,6 +398,8 @@ export class DataStore extends DurableObject {
         
         if (query.includes('FROM tasks') && !query.includes('room_id')) {
           // Use parameterized query to prevent SQL injection
+          // Note: This simple replacement works for standard SELECT queries
+          // but may not handle complex nested queries correctly
           if (query.toLowerCase().includes('where')) {
             modifiedQuery = query.replace(/WHERE/i, `WHERE room_id = ? AND`);
             roomIdParams.unshift(roomId); // Add roomId as first param
@@ -406,7 +412,7 @@ export class DataStore extends DurableObject {
           }
         }
         
-        // Properly chain bind() calls
+        // Properly chain bind() calls (each bind() returns a new statement)
         let stmt = this.env.READ_REPLICA.prepare(modifiedQuery);
         for (const param of roomIdParams) {
           stmt = stmt.bind(param);
@@ -500,6 +506,8 @@ export class DataStore extends DurableObject {
       lastSyncAge: Date.now() - this.syncEngine.lastSyncTime,
       totalSyncs: this.syncEngine.totalSyncs,
       syncErrors: this.syncEngine.syncErrors,
+      // Error rate as formatted string for display (e.g., "0.13%")
+      // Returned as string for convenience in UI/logging
       errorRate: this.syncEngine.totalSyncs > 0 
         ? (this.syncEngine.syncErrors / this.syncEngine.totalSyncs * 100).toFixed(2) + '%'
         : '0%',
@@ -854,6 +862,9 @@ export class DataStore extends DurableObject {
                             .map(m => m.id.split(':')[1]); // Extract taskId
                          
                          if (taskIds.length > 0) {
+                             // Safe parameterized query construction:
+                             // taskIds is an internal array of integers (not user input)
+                             // Each taskId maps to a '?' placeholder, preventing injection
                              const placeholders = taskIds.map(() => '?').join(',');
                              results = await this.readFromD1(`SELECT * FROM tasks WHERE id IN (${placeholders})`, ...taskIds);
                          }

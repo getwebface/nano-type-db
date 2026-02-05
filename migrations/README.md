@@ -121,5 +121,3 @@ wrangler d1 execute nanotype-read-replica --command="SELECT COUNT(*) FROM tasks"
 - [ ] Read replica health checks with automatic circuit breaker
 - [ ] Automatic failover strategies with retry logic
 - [ ] Metrics and monitoring dashboards for sync performance
-- [ ] Automatic failover strategies
-- [ ] Metrics and monitoring dashboards
