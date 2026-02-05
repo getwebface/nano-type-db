@@ -240,10 +240,13 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 }
             } else if (data.event === 'update') {
                 addToast(`Table '${data.table}' updated`);
-                // Pass diff data with the event
+                // Pass action-based update data with the event
                 window.dispatchEvent(new CustomEvent('db-update', { 
                     detail: { 
                         table: data.table,
+                        action: data.action, // 'added', 'modified', 'deleted'
+                        row: data.row,
+                        // Legacy support for old diff format (if needed)
                         diff: data.diff,
                         fullData: data.fullData
                     } 
@@ -467,10 +470,45 @@ export const useRealtimeQuery = (tableName: string) => {
         const handleUpdate = (e: Event) => {
             const customEvent = e as CustomEvent;
             if (customEvent.detail.table === tableName) {
-                const { diff, fullData } = customEvent.detail;
+                const { action, row, diff, fullData } = customEvent.detail;
                 
-                // If we have diff data, apply it instead of re-fetching
-                if (diff && (diff.added.length > 0 || diff.modified.length > 0 || diff.deleted.length > 0)) {
+                // Handle efficient action-based updates (new format)
+                if (action && row) {
+                    setData(currentData => {
+                        // Detect primary key field from data
+                        const sampleRow = currentData[0] || row;
+                        if (!sampleRow) return currentData;
+                        
+                        const pkField = Object.prototype.hasOwnProperty.call(sampleRow, 'id')
+                            ? 'id' 
+                            : Object.keys(sampleRow).find(k => k.toLowerCase().endsWith('id')) || 'id';
+                        
+                        if (!Object.prototype.hasOwnProperty.call(row, pkField)) {
+                            // If no PK field, just refresh
+                            return currentData;
+                        }
+                        
+                        const pkValue = row[pkField];
+                        
+                        if (action === 'added') {
+                            // Add new row if it doesn't exist
+                            const exists = currentData.some(item => item[pkField] === pkValue);
+                            return exists ? currentData : [...currentData, row];
+                        } else if (action === 'modified') {
+                            // Update existing row
+                            return currentData.map(item => 
+                                item[pkField] === pkValue ? row : item
+                            );
+                        } else if (action === 'deleted') {
+                            // Remove deleted row
+                            return currentData.filter(item => item[pkField] !== pkValue);
+                        }
+                        
+                        return currentData;
+                    });
+                }
+                // Legacy support: Handle diff-based updates (old format)
+                else if (diff && (diff.added.length > 0 || diff.modified.length > 0 || diff.deleted.length > 0)) {
                     setData(currentData => {
                         // Detect primary key field from first row (try 'id' first, then any field ending with 'id')
                         const sampleRow = currentData[0] || diff.added[0] || diff.modified[0] || diff.deleted[0];
@@ -515,15 +553,22 @@ export const useRealtimeQuery = (tableName: string) => {
                     // Fallback to full data if diff is not available or empty
                     setData(fullData);
                 } else {
-                    // Fallback to re-fetching if no diff or fullData
-                    runQuery(`SELECT * FROM ${tableName}`, tableName);
+                    // Fallback to re-fetching if no action, diff or fullData
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        if (tableName === 'tasks') {
+                            socket.send(JSON.stringify({ 
+                                action: 'rpc', 
+                                method: 'listTasks' 
+                            }));
+                        }
+                    }
                 }
             }
         };
 
         window.addEventListener('db-update', handleUpdate);
         return () => window.removeEventListener('db-update', handleUpdate);
-    }, [tableName, runQuery]);
+    }, [tableName, socket]);
 
     useEffect(() => {
         if (lastResult && lastResult.originalSql) {
