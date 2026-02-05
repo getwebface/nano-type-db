@@ -1,11 +1,16 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import { DatabaseContextType, QueryResult, UpdateEvent, ToastMessage, Schema, UsageStat, OptimisticUpdate } from '../types';
+import { authClient } from '../src/lib/auth-client';
 
 // Dynamic URL detection for production/dev
 const PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 const HOST = window.location.host; 
 const WORKER_URL = `${PROTOCOL}//${HOST}`; 
 const HTTP_URL = `${window.location.protocol}//${HOST}`;
+
+// In development with Vite proxy, use proxied WebSocket path
+const IS_DEV = import.meta.env.DEV;
+const WS_PATH_PREFIX = IS_DEV ? '/__ws' : '';
 
 // Configuration constants
 const OPTIMISTIC_UPDATE_TIMEOUT = 10000; // 10 seconds
@@ -65,7 +70,10 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
     }, [socket]);
 
-    const connect = useCallback((roomId: string) => {
+    // Note: connect is async to fetch session token, but we don't add it to
+    // the dependency array to avoid infinite loops. The socket dependency
+    // ensures we recreate the callback when needed.
+    const connect = useCallback(async (roomId: string) => {
         // Clear any pending reconnection attempts
         if (reconnectTimeoutRef.current) {
             clearTimeout(reconnectTimeoutRef.current);
@@ -98,8 +106,22 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         currentRoomIdRef.current = roomId;
         shouldReconnectRef.current = true;
         
-        // Construct WebSocket URL with explicit path
-        const wsUrl = `${WORKER_URL}/?room_id=${encodeURIComponent(roomId)}`;
+        // Get session token from Better Auth
+        let sessionToken = '';
+        try {
+            const session = await authClient.getSession();
+            if (session?.data?.session?.token) {
+                sessionToken = session.data.session.token;
+            }
+        } catch (e) {
+            console.warn('Failed to get session token, will try cookie-based auth', e);
+        }
+        
+        // Construct WebSocket URL with explicit path and session token for auth
+        let wsUrl = `${WORKER_URL}${WS_PATH_PREFIX}/?room_id=${encodeURIComponent(roomId)}`;
+        if (sessionToken) {
+            wsUrl += `&session_token=${encodeURIComponent(sessionToken)}`;
+        }
         console.log('Connecting to WebSocket:', wsUrl);
         
         // Browser automatically sends Cookies (Better Auth Session) with WebSocket
@@ -221,10 +243,13 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 }
             } else if (data.event === 'update') {
                 addToast(`Table '${data.table}' updated`);
-                // Pass diff data with the event
+                // Pass action-based update data with the event
                 window.dispatchEvent(new CustomEvent('db-update', { 
                     detail: { 
                         table: data.table,
+                        action: data.action, // 'added', 'modified', 'deleted'
+                        row: data.row,
+                        // Legacy support for old diff format (if needed)
                         diff: data.diff,
                         fullData: data.fullData
                     } 
@@ -280,38 +305,64 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const runQuery = useCallback((sql: string, tableContext?: string) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
         
-        const isInsertTask = /INSERT INTO tasks/i.test(sql);
+        // SECURITY: Instead of sending raw SQL, parse intent and use RPC methods
+        const sqlUpper = sql.trim().toUpperCase();
         
-        if (isInsertTask) {
-             const match = sql.match(/VALUES\s*\(\s*'([^']*)'/i);
-             const title = match ? match[1] : "New Task";
-             
-             socket.send(JSON.stringify({
-                 action: 'createTask',
-                 payload: { title }
-             }));
-             return;
-        }
-
-        const isMutation = /^(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)/i.test(sql.trim());
-        const isSchemaChange = /^(CREATE|ALTER|DROP)/i.test(sql.trim());
-
-        const payload = {
-            action: isMutation ? 'mutate' : 'query',
-            sql,
-            table: tableContext
-        };
-
-        socket.send(JSON.stringify(payload));
-
-        if (isSchemaChange) {
-            setTimeout(refreshSchema, 500);
+        // Handle SELECT queries on tasks table
+        if (sqlUpper.startsWith('SELECT') && sqlUpper.includes('FROM TASKS')) {
+            socket.send(JSON.stringify({
+                action: 'rpc',
+                method: 'listTasks'
+            }));
+            return;
         }
         
+        // Handle INSERT INTO tasks
+        if (sqlUpper.startsWith('INSERT INTO TASKS')) {
+            const match = sql.match(/VALUES\s*\(\s*'([^']*)'/i);
+            const title = match ? match[1] : "New Task";
+            
+            socket.send(JSON.stringify({
+                action: 'createTask',
+                payload: { title }
+            }));
+            return;
+        }
+        
+        // Handle UPDATE tasks
+        if (sqlUpper.startsWith('UPDATE TASKS') && sqlUpper.includes("SET STATUS = 'COMPLETED'")) {
+            const match = sql.match(/WHERE ID\s*=\s*(\d+)/i);
+            if (match) {
+                const id = parseInt(match[1], 10);
+                socket.send(JSON.stringify({
+                    action: 'completeTask',
+                    payload: { id }
+                }));
+            }
+            return;
+        }
+        
+        // Handle DELETE from tasks
+        if (sqlUpper.startsWith('DELETE FROM TASKS')) {
+            const match = sql.match(/WHERE ID\s*=\s*(\d+)/i);
+            if (match) {
+                const id = parseInt(match[1], 10);
+                socket.send(JSON.stringify({
+                    action: 'deleteTask',
+                    payload: { id }
+                }));
+            }
+            return;
+        }
+        
+        // Reject any other raw SQL for security
+        console.error('Rejected raw SQL query for security');
+        addToast('Raw SQL queries are disabled for security. Use RPC methods like listTasks, createTask, completeTask, or deleteTask instead.', 'error');
+
         // Refresh usage stats after queries (demo purpose)
         setTimeout(refreshUsage, 1000);
 
-    }, [socket, refreshSchema, refreshUsage]);
+    }, [socket, refreshUsage, addToast]);
 
     const performOptimisticAction = useCallback((action: string, payload: any, optimisticUpdate: () => void, rollback: () => void) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -385,7 +436,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, []); // Empty dependency array ensures this only runs on unmount
 
     return (
-        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction }}>
+        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, socket }}>
             {children}
         </DatabaseContext.Provider>
     );
@@ -398,32 +449,81 @@ export const useDatabase = () => {
 };
 
 export const useRealtimeQuery = (tableName: string) => {
-    const { runQuery, subscribe, lastResult, isConnected } = useDatabase();
+    const { runQuery, subscribe, lastResult, isConnected, socket } = useDatabase();
     const [data, setData] = useState<any[]>([]);
 
+    // Helper function to detect primary key field
+    const detectPrimaryKey = (sampleRow: any): string => {
+        if (!sampleRow) return 'id';
+        return Object.prototype.hasOwnProperty.call(sampleRow, 'id')
+            ? 'id' 
+            : Object.keys(sampleRow).find(k => k.toLowerCase().endsWith('id')) || 'id';
+    };
+
     useEffect(() => {
-        if (isConnected && tableName) {
+        if (isConnected && tableName && socket && socket.readyState === WebSocket.OPEN) {
             subscribe(tableName);
-            runQuery(`SELECT * FROM ${tableName}`, tableName);
+            
+            // Use RPC method instead of raw SQL
+            if (tableName === 'tasks') {
+                socket.send(JSON.stringify({ 
+                    action: 'rpc', 
+                    method: 'listTasks' 
+                }));
+            } else {
+                // For other tables, use a generic query (if needed in the future)
+                runQuery(`SELECT * FROM ${tableName}`, tableName);
+            }
         }
-    }, [isConnected, tableName, subscribe, runQuery]);
+    }, [isConnected, tableName, subscribe, socket]);
 
     useEffect(() => {
         const handleUpdate = (e: Event) => {
             const customEvent = e as CustomEvent;
             if (customEvent.detail.table === tableName) {
-                const { diff, fullData } = customEvent.detail;
+                const { action, row, diff, fullData } = customEvent.detail;
                 
-                // If we have diff data, apply it instead of re-fetching
-                if (diff && (diff.added.length > 0 || diff.modified.length > 0 || diff.deleted.length > 0)) {
+                // Handle efficient action-based updates (new format)
+                if (action && row) {
                     setData(currentData => {
-                        // Detect primary key field from first row (try 'id' first, then any field ending with 'id')
+                        // Detect primary key field from data
+                        const sampleRow = currentData[0] || row;
+                        if (!sampleRow) return currentData;
+                        
+                        const pkField = detectPrimaryKey(sampleRow);
+                        
+                        if (!Object.prototype.hasOwnProperty.call(row, pkField)) {
+                            // If no PK field, just refresh
+                            return currentData;
+                        }
+                        
+                        const pkValue = row[pkField];
+                        
+                        if (action === 'added') {
+                            // Add new row if it doesn't exist
+                            const exists = currentData.some(item => item[pkField] === pkValue);
+                            return exists ? currentData : [...currentData, row];
+                        } else if (action === 'modified') {
+                            // Update existing row
+                            return currentData.map(item => 
+                                item[pkField] === pkValue ? row : item
+                            );
+                        } else if (action === 'deleted') {
+                            // Remove deleted row
+                            return currentData.filter(item => item[pkField] !== pkValue);
+                        }
+                        
+                        return currentData;
+                    });
+                }
+                // Legacy support: Handle diff-based updates (old format)
+                else if (diff && (diff.added.length > 0 || diff.modified.length > 0 || diff.deleted.length > 0)) {
+                    setData(currentData => {
+                        // Detect primary key field from first row
                         const sampleRow = currentData[0] || diff.added[0] || diff.modified[0] || diff.deleted[0];
                         if (!sampleRow) return currentData;
                         
-                        const pkField = Object.prototype.hasOwnProperty.call(sampleRow, 'id')
-                            ? 'id' 
-                            : Object.keys(sampleRow).find(k => k.toLowerCase().endsWith('id')) || 'id';
+                        const pkField = detectPrimaryKey(sampleRow);
                         
                         // If rows don't have the detected PK field, fall back to full data
                         if (!Object.prototype.hasOwnProperty.call(sampleRow, pkField)) {
@@ -460,19 +560,32 @@ export const useRealtimeQuery = (tableName: string) => {
                     // Fallback to full data if diff is not available or empty
                     setData(fullData);
                 } else {
-                    // Fallback to re-fetching if no diff or fullData
-                    runQuery(`SELECT * FROM ${tableName}`, tableName);
+                    // Fallback to re-fetching if no action, diff or fullData
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        if (tableName === 'tasks') {
+                            socket.send(JSON.stringify({ 
+                                action: 'rpc', 
+                                method: 'listTasks' 
+                            }));
+                        }
+                    }
                 }
             }
         };
 
         window.addEventListener('db-update', handleUpdate);
         return () => window.removeEventListener('db-update', handleUpdate);
-    }, [tableName, runQuery]);
+    }, [tableName, socket, runQuery]);
 
     useEffect(() => {
-        if (lastResult && lastResult.originalSql && lastResult.originalSql.includes(tableName) && !lastResult.originalSql.toLowerCase().startsWith('insert')) {
-             setData(lastResult.data);
+        if (lastResult && lastResult.originalSql) {
+            // Match both the table name and the listTasks RPC method
+            const matchesTable = lastResult.originalSql.includes(tableName) || 
+                                (tableName === 'tasks' && lastResult.originalSql === 'listTasks');
+            
+            if (matchesTable && !lastResult.originalSql.toLowerCase().startsWith('insert')) {
+                 setData(lastResult.data);
+            }
         }
     }, [lastResult, tableName]);
 

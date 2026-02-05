@@ -4,6 +4,24 @@ import type { DurableObjectState } from "cloudflare:workers";
 // are only performed when running in a Node environment. In Workers
 // we skip file-based backups and rely on R2 or other mechanisms.
 
+/**
+ * SECURITY & ARCHITECTURE NOTES:
+ * 
+ * 1. SQL Injection Prevention: Raw SQL queries from clients are disabled.
+ *    All database operations go through RPC methods with input validation.
+ * 
+ * 2. Efficient Broadcasting: Uses action-based updates (added/modified/deleted)
+ *    instead of O(N) full table diffing for scalability.
+ * 
+ * 3. Vector Search Consistency: AI embeddings are async and best-effort.
+ *    If embedding fails, task exists in DB but may not be searchable until
+ *    a background re-indexing job runs. For production, use Cloudflare Queues
+ *    to ensure eventual consistency.
+ * 
+ * 4. Schema Management: Currently uses raw SQL in migrations. For better type
+ *    safety, consider migrating to Drizzle ORM for schema definition.
+ */
+
 interface WebSocketMessage {
   action: "subscribe" | "query" | "mutate" | "rpc" | "ping";
   table?: string;
@@ -19,6 +37,7 @@ const ACTIONS = {
   createTask: { params: ["title"] },
   completeTask: { params: ["id"] },
   deleteTask: { params: ["id"] },
+  listTasks: { params: [] },
   search: { params: ["query"] },
   getUsage: { params: [] },
   getAuditLog: { params: [] }
@@ -62,14 +81,12 @@ export class DataStore extends DurableObject {
   subscribers: Map<string, Set<WebSocket>>;
   env: Env;
   doId: string;
-  tableSnapshots: Map<string, any[]>; // Cache of last known table state
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.env = env;
     this.sql = ctx.storage.sql;
     this.subscribers = new Map();
-    this.tableSnapshots = new Map();
     this.doId = ctx.id.toString();
     
     this.runMigrations();
@@ -262,13 +279,12 @@ export class DataStore extends DurableObject {
         }
 
         if (data.action === "query" && data.sql) {
-          this.trackUsage('reads');
-          const results = this.sql.exec(data.sql).toArray();
+          // SECURITY: Disable raw SQL queries from client to prevent SQL injection
           webSocket.send(JSON.stringify({ 
-            type: "query_result", 
-            data: results,
-            originalSql: data.sql 
+            type: "query_error",
+            error: "Raw SQL queries are disabled for security. Please use RPC methods."
           }));
+          return;
         }
 
         if (data.action === "rpc" || (data.action as string) === "createTask") {
@@ -282,30 +298,47 @@ export class DataStore extends DurableObject {
                 case "createTask": {
                     try {
                         this.trackUsage('writes');
-                        this.logAction(method, data.payload);
-                        const title = data.payload?.title || "Untitled Task";
                         
-                        // 1. Insert into DB
-                        const result = this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending') RETURNING id", title).toArray();
-                        const newId = result[0]?.id;
+                        // Input validation
+                        const title = data.payload?.title;
+                        if (!title || typeof title !== 'string' || title.trim().length === 0) {
+                            throw new Error('Invalid title: must be a non-empty string');
+                        }
+                        const trimmedTitle = title.trim();
+                        if (trimmedTitle.length > 500) {
+                            throw new Error('Title too long: maximum 500 characters');
+                        }
+                        
+                        this.logAction(method, data.payload);
+                        
+                        // 1. Insert into DB (Primary operation - must succeed)
+                        const result = this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending') RETURNING *", trimmedTitle).toArray();
+                        const newTask = result[0];
 
-                        // 2. Generate Embedding (Async) & Store
-                        if (newId && this.env.AI && this.env.VECTOR_INDEX) {
-                            try {
-                                const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [title] });
-                                const values = embeddings.data[0];
-                                if (values) {
-                                    // Namespace ID with DO ID to prevent collision if index is shared
-                                    await this.env.VECTOR_INDEX.upsert([{ 
-                                        id: `${this.doId}:${newId}`, 
-                                        values,
-                                        metadata: { doId: this.doId, taskId: newId } 
-                                    }]);
-                                    this.trackUsage('ai_ops');
+                        // 2. Generate Embedding & Store (Secondary operation - best effort)
+                        // Note: This is async and may fail. Vector search may miss this task until
+                        // a background job re-indexes it. For production, use a queue system.
+                        if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
+                            // Use Promise for async operation without blocking the response
+                            (async () => {
+                                try {
+                                    const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [trimmedTitle] });
+                                    const values = embeddings.data[0];
+                                    if (values) {
+                                        await this.env.VECTOR_INDEX.upsert([{ 
+                                            id: `${this.doId}:${newTask.id}`, 
+                                            values,
+                                            metadata: { doId: this.doId, taskId: newTask.id } 
+                                        }]);
+                                        this.trackUsage('ai_ops');
+                                        console.log(`Vector indexed for task ${newTask.id}`);
+                                    }
+                                } catch (e: any) {
+                                    // Log error but don't fail the task creation
+                                    console.error(`AI Embedding failed for task ${newTask.id}:`, e.message);
+                                    // TODO: Add to a retry queue for production systems
                                 }
-                            } catch (e) {
-                                console.error("AI Embedding failed", e);
-                            }
+                            })();
                         }
 
                         webSocket.send(JSON.stringify({ 
@@ -313,7 +346,9 @@ export class DataStore extends DurableObject {
                             action: "createTask",
                             updateId: data.updateId
                         }));
-                        this.broadcastUpdate("tasks");
+                        
+                        // Efficient broadcast - only send the new row
+                        this.broadcastUpdate("tasks", "added", newTask);
                     } catch (e: any) {
                         webSocket.send(JSON.stringify({ 
                             type: "mutation_error", 
@@ -328,15 +363,29 @@ export class DataStore extends DurableObject {
                 case "completeTask":
                     try {
                         this.trackUsage('writes');
+                        
+                        // Input validation
+                        const completeId = data.payload?.id;
+                        if (!completeId || typeof completeId !== 'number' || !Number.isInteger(completeId) || completeId < 1) {
+                            throw new Error('Invalid id: must be a positive integer');
+                        }
+                        
                         this.logAction(method, data.payload);
-                        if (data.payload?.id) {
-                            this.sql.exec("UPDATE tasks SET status = 'completed' WHERE id = ?", data.payload.id);
-                            webSocket.send(JSON.stringify({ 
-                                type: "mutation_success", 
-                                action: "completeTask",
-                                updateId: data.updateId
-                            }));
-                            this.broadcastUpdate("tasks");
+                        
+                        this.sql.exec("UPDATE tasks SET status = 'completed' WHERE id = ?", completeId);
+                        
+                        // Fetch the updated row to broadcast
+                        const updated = this.sql.exec("SELECT * FROM tasks WHERE id = ?", completeId).toArray()[0];
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_success", 
+                            action: "completeTask",
+                            updateId: data.updateId
+                        }));
+                        
+                        // Efficient broadcast - only send the modified row
+                        if (updated) {
+                            this.broadcastUpdate("tasks", "modified", updated);
                         }
                     } catch (e: any) {
                         webSocket.send(JSON.stringify({ 
@@ -351,19 +400,33 @@ export class DataStore extends DurableObject {
                 case "deleteTask":
                     try {
                         this.trackUsage('writes');
+                        
+                        // Input validation
+                        const deleteId = data.payload?.id;
+                        if (!deleteId || typeof deleteId !== 'number' || !Number.isInteger(deleteId) || deleteId < 1) {
+                            throw new Error('Invalid id: must be a positive integer');
+                        }
+                        
                         this.logAction(method, data.payload);
-                        if (data.payload?.id) {
-                            this.sql.exec("DELETE FROM tasks WHERE id = ?", data.payload.id);
-                            // Also delete from Vector Index
-                            if (this.env.VECTOR_INDEX) {
-                                this.env.VECTOR_INDEX.deleteByIds([`${this.doId}:${data.payload.id}`]).catch(console.error);
-                            }
-                            webSocket.send(JSON.stringify({ 
-                                type: "mutation_success", 
-                                action: "deleteTask",
-                                updateId: data.updateId
-                            }));
-                            this.broadcastUpdate("tasks");
+                        
+                        // Fetch the row before deleting for broadcast
+                        const deleted = this.sql.exec("SELECT * FROM tasks WHERE id = ?", deleteId).toArray()[0];
+                        
+                        this.sql.exec("DELETE FROM tasks WHERE id = ?", deleteId);
+                        
+                        // Also delete from Vector Index
+                        if (this.env.VECTOR_INDEX) {
+                            this.env.VECTOR_INDEX.deleteByIds([`${this.doId}:${deleteId}`]).catch(console.error);
+                        }
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_success", 
+                            action: "deleteTask",
+                            updateId: data.updateId
+                        }));
+                        
+                        // Efficient broadcast - only send the deleted row
+                        if (deleted) {
+                            this.broadcastUpdate("tasks", "deleted", deleted);
                         }
                     } catch (e: any) {
                         webSocket.send(JSON.stringify({ 
@@ -378,8 +441,17 @@ export class DataStore extends DurableObject {
                 case "search": {
                     this.trackUsage('ai_ops'); // It's an AI op
                     const query = data.payload?.query;
-                    if (!query) {
+                    
+                    // Input validation
+                    if (!query || typeof query !== 'string') {
                         webSocket.send(JSON.stringify({ type: "query_result", data: [], originalSql: "search" }));
+                        break;
+                    }
+                    if (query.length > 500) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "query_error",
+                            error: "Search query too long: maximum 500 characters"
+                        }));
                         break;
                     }
                     
@@ -415,6 +487,12 @@ export class DataStore extends DurableObject {
                      this.trackUsage('reads');
                      const logs = this.sql.exec("SELECT * FROM _audit_log ORDER BY timestamp DESC LIMIT 50").toArray();
                      webSocket.send(JSON.stringify({ type: "query_result", data: logs, originalSql: "getAuditLog" }));
+                     break;
+
+                case "listTasks":
+                     this.trackUsage('reads');
+                     const tasks = this.sql.exec("SELECT * FROM tasks ORDER BY id").toArray();
+                     webSocket.send(JSON.stringify({ type: "query_result", data: tasks, originalSql: "listTasks" }));
                      break;
 
                 default:
@@ -465,56 +543,7 @@ export class DataStore extends DurableObject {
     }
   }
 
-  shallowEqual(obj1: any, obj2: any): boolean {
-    const keys1 = Object.keys(obj1);
-    const keys2 = Object.keys(obj2);
-    
-    if (keys1.length !== keys2.length) return false;
-    
-    for (const key of keys1) {
-      if (obj1[key] !== obj2[key]) return false;
-    }
-    
-    return true;
-  }
-
-  calculateDiff(oldData: any[], newData: any[], tableName: string): { added: any[], modified: any[], deleted: any[] } {
-    const pkField = this.getPrimaryKey(tableName);
-    
-    // Check if data has the primary key field
-    if (oldData.length > 0 && !Object.prototype.hasOwnProperty.call(oldData[0], pkField)) {
-      console.warn(`Table ${tableName} rows don't have field '${pkField}', falling back to full data`);
-      return { added: newData, modified: [], deleted: [] };
-    }
-    
-    const oldMap = new Map(oldData.map(row => [row[pkField], row]));
-    const newMap = new Map(newData.map(row => [row[pkField], row]));
-    
-    const added: any[] = [];
-    const modified: any[] = [];
-    const deleted: any[] = [];
-    
-    // Find added and modified
-    for (const [id, newRow] of newMap) {
-      const oldRow = oldMap.get(id);
-      if (!oldRow) {
-        added.push(newRow);
-      } else if (!this.shallowEqual(oldRow, newRow)) {
-        modified.push(newRow);
-      }
-    }
-    
-    // Find deleted
-    for (const [id, oldRow] of oldMap) {
-      if (!newMap.has(id)) {
-        deleted.push(oldRow);
-      }
-    }
-    
-    return { added, modified, deleted };
-  }
-
-  broadcastUpdate(table: string) {
+  broadcastUpdate(table: string, action: 'added' | 'modified' | 'deleted', row: any) {
     // Validate table name to prevent SQL injection
     if (!this.isValidTableName(table)) {
       console.error(`Invalid table name for broadcast: ${table}`);
@@ -524,25 +553,12 @@ export class DataStore extends DurableObject {
     if (this.subscribers.has(table)) {
       const sockets = this.subscribers.get(table)!;
       
-      // Fetch current table state
-      const currentData = this.sql.exec(`SELECT * FROM ${table}`).toArray();
-      const previousData = this.tableSnapshots.get(table) || [];
-      
-      // Calculate diff with table name for primary key detection
-      const diff = this.calculateDiff(previousData, currentData, table);
-      
-      // Update snapshot
-      this.tableSnapshots.set(table, currentData);
-      
-      // Only send fullData if this is the initial broadcast (no previous data)
-      const isInitial = previousData.length === 0;
-      
-      // Send diff to subscribers
+      // Send efficient action-based update instead of full table diff
       const message = JSON.stringify({ 
         event: "update", 
         table,
-        diff,
-        fullData: isInitial ? currentData : undefined // Only send full data on initial load
+        action,
+        row
       });
       
       for (const socket of sockets) {
