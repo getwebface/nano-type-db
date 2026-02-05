@@ -1,5 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import type { DurableObjectState } from "cloudflare:workers";
+import { 
+  SQLSanitizer, 
+  RateLimiter, 
+  InputValidator, 
+  QueryTimeout,
+  MemoryTracker 
+} from "./lib/security";
 // `node:fs` is not available in Cloudflare Workers; file-system backups
 // are only performed when running in a Node environment. In Workers
 // we skip file-based backups and rely on R2 or other mechanisms.
@@ -269,6 +276,10 @@ export class NanoStore extends DurableObject {
     totalSyncs: number;
     isHealthy: boolean;
   };
+  // SECURITY: Rate limiters for RPC methods (per user)
+  rateLimiters: Map<string, RateLimiter>;
+  // SECURITY: Memory tracker for debounced writes
+  memoryTracker: MemoryTracker;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -284,6 +295,12 @@ export class NanoStore extends DurableObject {
     // Initialize Psychic cache
     this.psychicSentCache = new WeakMap();
     
+    // SECURITY: Initialize rate limiters
+    this.rateLimiters = new Map();
+    
+    // SECURITY: Initialize memory tracker (10MB limit for debounced writes)
+    this.memoryTracker = new MemoryTracker(10 * 1024 * 1024);
+    
     // Initialize Debounced Writer (flushes every 1 second by default)
     this.debouncedWriter = new DebouncedWriter(1000, (updates) => {
       // Flush debounced writes to SQLite
@@ -293,6 +310,9 @@ export class NanoStore extends DurableObject {
             `INSERT OR REPLACE INTO _debounced_state (key, value, updated_at) VALUES (?, ?, datetime('now'))`,
             key, JSON.stringify(value)
           );
+          // Update memory tracker
+          const valueSize = JSON.stringify(value).length;
+          this.memoryTracker.remove(valueSize);
         } catch (e) {
           console.error(`Failed to flush debounced write for key ${key}:`, e);
         }
@@ -358,6 +378,38 @@ export class NanoStore extends DurableObject {
           payload, 
           timestamp: new Date().toISOString() 
       }));
+  }
+
+  /**
+   * SECURITY: Check rate limit for a specific user and method
+   * Returns true if request is allowed, false if rate limit exceeded
+   */
+  checkRateLimit(userId: string, method: string, maxRequests: number = 100, windowMs: number = 60000): boolean {
+    const key = `${userId}:${method}`;
+    
+    // Get or create rate limiter for this user+method combination
+    if (!this.rateLimiters.has(key)) {
+      this.rateLimiters.set(key, new RateLimiter(maxRequests, windowMs));
+    }
+    
+    const limiter = this.rateLimiters.get(key)!;
+    const allowed = limiter.allow(userId);
+    
+    // Periodically cleanup old rate limiters (every 100th request)
+    if (Math.random() < 0.01) {
+      this.cleanupRateLimiters();
+    }
+    
+    return allowed;
+  }
+
+  /**
+   * SECURITY: Cleanup old rate limiter entries to prevent memory leaks
+   */
+  cleanupRateLimiters(): void {
+    for (const [key, limiter] of this.rateLimiters.entries()) {
+      limiter.cleanup();
+    }
   }
 
   /**
@@ -427,6 +479,11 @@ export class NanoStore extends DurableObject {
    * Read from D1 replica with fallback to DO SQLite
    * This provides distributed read scaling while maintaining resilience
    * 
+   * SECURITY IMPROVEMENTS:
+   * - Uses SQLSanitizer for safe room_id injection
+   * - Validates query is read-only
+   * - Properly handles parameterized queries
+   * 
    * Note: Query modification is designed for simple SELECT queries.
    * Complex queries with subqueries, JOINs, or nested WHERE clauses
    * should pre-include room_id filtering to avoid modification issues.
@@ -435,32 +492,22 @@ export class NanoStore extends DurableObject {
     // Try D1 first for distributed reads
     if (this.env.READ_REPLICA) {
       try {
+        // SECURITY: Validate query is read-only
+        if (!SQLSanitizer.isReadOnly(query)) {
+          console.warn("Attempted non-read-only query on D1:", query);
+          throw new Error("Only SELECT queries are allowed on D1");
+        }
+        
         // Add room_id filter to ensure data isolation
         const roomId = this.doId;
         
-        // Modify query to include room_id filter if querying tasks
-        let modifiedQuery = query;
-        const roomIdParams = [...params]; // Copy params array
-        
-        if (query.includes('FROM tasks') && !query.includes('room_id')) {
-          // Use parameterized query to prevent SQL injection
-          // Note: This simple replacement works for standard SELECT queries
-          // but may not handle complex nested queries correctly
-          if (query.toLowerCase().includes('where')) {
-            modifiedQuery = query.replace(/WHERE/i, `WHERE room_id = ? AND`);
-            roomIdParams.unshift(roomId); // Add roomId as first param
-          } else if (query.toLowerCase().includes('order by')) {
-            modifiedQuery = query.replace(/ORDER BY/i, `WHERE room_id = ? ORDER BY`);
-            roomIdParams.unshift(roomId);
-          } else {
-            modifiedQuery = query.replace(/FROM tasks/i, `FROM tasks WHERE room_id = ?`);
-            roomIdParams.unshift(roomId);
-          }
-        }
+        // SECURITY: Use SQLSanitizer for safe query modification
+        const { query: modifiedQuery, params: newParams } = 
+          SQLSanitizer.injectRoomIdFilter(query, roomId, params);
         
         // Properly chain bind() calls (each bind() returns a new statement)
         let stmt = this.env.READ_REPLICA.prepare(modifiedQuery);
-        for (const param of roomIdParams) {
+        for (const param of newParams) {
           stmt = stmt.bind(param);
         }
         
@@ -749,23 +796,29 @@ export class NanoStore extends DurableObject {
             switch (method) {
                 case "createTask": {
                     try {
+                        // SECURITY: Rate limit check (100 creates per minute per user)
+                        const userId = request.headers.get("X-User-ID") || "anonymous";
+                        if (!this.checkRateLimit(userId, "createTask", 100, 60000)) {
+                            webSocket.send(JSON.stringify({ 
+                                type: "mutation_error", 
+                                action: "createTask",
+                                error: "Rate limit exceeded. Please slow down.",
+                                updateId: data.updateId
+                            }));
+                            break;
+                        }
+                        
                         this.trackUsage('writes');
                         
-                        // Input validation
-                        const title = data.payload?.title;
-                        if (!title || typeof title !== 'string' || title.trim().length === 0) {
-                            throw new Error('Invalid title: must be a non-empty string');
-                        }
-                        const trimmedTitle = title.trim();
-                        if (trimmedTitle.length > 500) {
-                            throw new Error('Title too long: maximum 500 characters');
-                        }
+                        // SECURITY: Input validation using InputValidator
+                        const titleRaw = data.payload?.title;
+                        const title = InputValidator.sanitizeString(titleRaw, 500, true);
                         
                         this.logAction(method, data.payload);
                         
                         // 1. Insert into DB (Primary operation - must succeed)
                         // Set vector_status to 'pending' initially (will be updated to 'indexed' or 'failed')
-                        const result = this.sql.exec("INSERT INTO tasks (title, status, vector_status) VALUES (?, 'pending', 'pending') RETURNING *", trimmedTitle).toArray();
+                        const result = this.sql.exec("INSERT INTO tasks (title, status, vector_status) VALUES (?, 'pending', 'pending') RETURNING *", title).toArray();
                         const newTask = result[0];
 
                         // 2. Replicate to D1 for distributed reads (async, non-blocking)
@@ -777,7 +830,7 @@ export class NanoStore extends DurableObject {
                             // Use ctx.waitUntil for async operation without blocking the response
                             this.ctx.waitUntil((async () => {
                                 try {
-                                    const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [trimmedTitle] });
+                                    const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [title] });
                                     const values = embeddings.data[0];
                                     if (values) {
                                         await this.env.VECTOR_INDEX.upsert([{ 
@@ -803,15 +856,23 @@ export class NanoStore extends DurableObject {
                                                         
                                                         // If similarity score exceeds threshold, send semantic match notification
                                                         if (similarity >= subscription.threshold) {
-                                                            // Check if socket is still open before sending
-                                                            if (subscription.socket.readyState === 1) { // WebSocket.OPEN
-                                                                subscription.socket.send(JSON.stringify({
-                                                                    type: "semantic_match",
-                                                                    topic: subscription.topic,
-                                                                    similarity: similarity,
-                                                                    row: newTask
-                                                                }));
-                                                                console.log(`Semantic match: task ${newTask.id} matched subscription "${subscription.topic}" (similarity: ${similarity.toFixed(3)})`);
+                                                            // SECURITY: Check if socket is still open and valid before sending
+                                                            if (subscription.socket?.readyState === 1) { // WebSocket.OPEN
+                                                                try {
+                                                                    subscription.socket.send(JSON.stringify({
+                                                                        type: "semantic_match",
+                                                                        topic: subscription.topic,
+                                                                        similarity: similarity,
+                                                                        row: newTask
+                                                                    }));
+                                                                    console.log(`Semantic match: task ${newTask.id} matched subscription "${subscription.topic}" (similarity: ${similarity.toFixed(3)})`);
+                                                                } catch (sendError: any) {
+                                                                    console.error(`Failed to send semantic match notification:`, sendError);
+                                                                    // Mark this subscription for cleanup if socket is dead
+                                                                    if (subscription.socket.readyState !== 1) {
+                                                                        this.memoryStore.delete(key);
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     } catch (e: any) {
