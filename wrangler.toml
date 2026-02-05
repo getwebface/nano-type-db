@@ -54,6 +54,8 @@ index_name = "nanotype-vectors"
 
 [ai]
 binding = "AI"
+# AI Gateway for caching and rate limiting
+gateway = "nano-type-ai-gateway"
 
 # Static Assets (React Frontend)
 [assets]

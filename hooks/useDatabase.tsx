@@ -450,6 +450,71 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             }
         }, OPTIMISTIC_UPDATE_TIMEOUT);
     }, [socket]);
+    
+    /**
+     * Built-in optimistic mutation helper - automatically handles common mutations
+     * with built-in optimistic updates and rollback
+     */
+    const performMutation = useCallback((method: string, payload: any) => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+            addToast("Not connected to database", "error");
+            return;
+        }
+        
+        // Define optimistic update and rollback logic
+        let previousState: any = null;
+        
+        const optimisticUpdate = () => {
+            // Save previous state for rollback
+            previousState = lastResult;
+            
+            switch (method) {
+                case 'createTask':
+                    // Optimistically add task to UI
+                    const tempTask = {
+                        id: `temp_${Date.now()}`,
+                        title: payload.title,
+                        status: 'pending',
+                        owner_id: payload.owner_id,
+                        _optimistic: true
+                    };
+                    setLastResult(prev => prev ? {
+                        ...prev,
+                        data: [...prev.data, tempTask]
+                    } : null);
+                    break;
+                    
+                case 'completeTask':
+                    // Optimistically mark task as completed
+                    setLastResult(prev => prev ? {
+                        ...prev,
+                        data: prev.data.map(task => 
+                            task.id === payload.id 
+                                ? { ...task, status: 'completed' }
+                                : task
+                        )
+                    } : null);
+                    break;
+                    
+                case 'deleteTask':
+                    // Optimistically remove task
+                    setLastResult(prev => prev ? {
+                        ...prev,
+                        data: prev.data.filter(task => task.id !== payload.id)
+                    } : null);
+                    break;
+            }
+        };
+        
+        const rollback = () => {
+            // Restore previous state
+            setLastResult(previousState);
+            addToast(`Failed to ${method}`, "error");
+        };
+        
+        // Use the existing performOptimisticAction with our optimistic logic
+        performOptimisticAction(method, payload, optimisticUpdate, rollback);
+    }, [socket, lastResult, performOptimisticAction, addToast]);
 
     const subscribe = useCallback((table: string) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -571,7 +636,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     }, []); // Empty dependency array ensures this only runs on unmount
 
     return (
-        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, socket, setCursor, setPresence, getPsychicData }}>
+        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, performMutation, socket, setCursor, setPresence, getPsychicData }}>
             {children}
         </DatabaseContext.Provider>
     );
