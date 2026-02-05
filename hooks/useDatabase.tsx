@@ -98,8 +98,8 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         currentRoomIdRef.current = roomId;
         shouldReconnectRef.current = true;
         
-        // Construct WebSocket URL
-        const wsUrl = `${WORKER_URL}?room_id=${encodeURIComponent(roomId)}`;
+        // Construct WebSocket URL with explicit path
+        const wsUrl = `${WORKER_URL}/?room_id=${encodeURIComponent(roomId)}`;
         console.log('Connecting to WebSocket:', wsUrl);
         
         // Browser automatically sends Cookies (Better Auth Session) with WebSocket
