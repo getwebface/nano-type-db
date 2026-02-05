@@ -22,7 +22,7 @@ const HEARTBEAT_TIMEOUT = 5000; // 5 seconds - expect pong response
 
 const DatabaseContext = createContext<DatabaseContextType | null>(null);
 
-export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: boolean }> = ({ children, psychic = false }) => {
     const [socket, setSocket] = useState<WebSocket | null>(null);
     const [status, setStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
     const [isConnected, setIsConnected] = useState(false);
@@ -41,6 +41,10 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const lastPongRef = useRef<number>(Date.now());
     
     const subscribedTablesRef = useRef<Set<string>>(new Set());
+    
+    // Psychic cache for pre-fetched data (ref to avoid re-renders)
+    const psychicCache = useRef<Map<string, any>>(new Map());
+    const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
     
     // Track current cursor and presence for re-announcing after reset
     const lastCursorRef = useRef<{ userId: string; position: any } | null>(null);
@@ -237,6 +241,19 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 if (heartbeatTimeoutRef.current) {
                     clearTimeout(heartbeatTimeoutRef.current);
                     heartbeatTimeoutRef.current = null;
+                }
+                return;
+            }
+
+            // Handle psychic_push message for pre-fetched data
+            if (data.type === 'psychic_push') {
+                console.log('🔮 Psychic Catch - Storing data in cache');
+                if (data.data && Array.isArray(data.data)) {
+                    data.data.forEach((record: any) => {
+                        if (record.id) {
+                            psychicCache.current.set(String(record.id), record);
+                        }
+                    });
                 }
                 return;
             }
@@ -456,6 +473,64 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }));
     }, [socket]);
 
+    const getPsychicData = useCallback((key: string): any => {
+        if (psychicCache.current.has(key)) {
+            console.log('🔮 Psychic Hit!', key);
+            return psychicCache.current.get(key);
+        }
+        return null;
+    }, []);
+
+    const streamIntent = useCallback((text: string) => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        
+        socket.send(JSON.stringify({
+            action: 'rpc',
+            method: 'streamIntent',
+            payload: { text }
+        }));
+    }, [socket]);
+
+    // Psychic Auto-Sensor: Global input listener
+    useEffect(() => {
+        if (!psychic || !socket || socket.readyState !== WebSocket.OPEN) return;
+
+        const handleGlobalInput = (event: Event) => {
+            const target = event.target as HTMLElement;
+            
+            // Filter for INPUT or TEXTAREA tags
+            if (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA') {
+                return;
+            }
+
+            const inputElement = target as HTMLInputElement | HTMLTextAreaElement;
+            const text = inputElement.value;
+
+            // Clear previous debounce timer
+            if (debounceTimerRef.current) {
+                clearTimeout(debounceTimerRef.current);
+            }
+
+            // Debounce: trigger after 175ms of typing inactivity
+            debounceTimerRef.current = setTimeout(() => {
+                if (text.length > 2) {
+                    console.log('🔮 Auto-sensing intent:', text);
+                    streamIntent(text);
+                }
+            }, 175);
+        };
+
+        // Add global event listener with capture phase
+        window.addEventListener('input', handleGlobalInput, { capture: true });
+
+        return () => {
+            window.removeEventListener('input', handleGlobalInput, { capture: true });
+            if (debounceTimerRef.current) {
+                clearTimeout(debounceTimerRef.current);
+            }
+        };
+    }, [psychic, socket, streamIntent]);
+
     // Cleanup on unmount
     useEffect(() => {
         return () => {
@@ -486,7 +561,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, []); // Empty dependency array ensures this only runs on unmount
 
     return (
-        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, socket, setCursor, setPresence }}>
+        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, socket, setCursor, setPresence, getPsychicData }}>
             {children}
         </DatabaseContext.Provider>
     );

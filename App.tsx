@@ -96,7 +96,7 @@ function App() {
     }
 
     return (
-        <DatabaseProvider>
+        <DatabaseProvider psychic={true}>
             <Toaster />
             <ConnectionScreen />
         </DatabaseProvider>

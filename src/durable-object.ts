@@ -193,7 +193,9 @@ const ACTIONS = {
   getSyncStatus: { params: [] },
   forceSyncAll: { params: [] },
   // Semantic Reflex - Killer Feature #1
-  subscribeSemantic: { params: ["topic", "description", "threshold"] }
+  subscribeSemantic: { params: ["topic", "description", "threshold"] },
+  // Psychic Data - Killer Feature #2
+  streamIntent: { params: ["text"] }
 };
 
 const MIGRATIONS = [
@@ -258,6 +260,8 @@ export class NanoStore extends DurableObject {
   // Hybrid State: In-memory stores for transient data
   memoryStore: MemoryStore;
   debouncedWriter: DebouncedWriter;
+  // Psychic cache: Track sent IDs per WebSocket
+  psychicSentCache: WeakMap<WebSocket, Set<string>>;
   // Sync Engine: Track sync status and health
   syncEngine: {
     lastSyncTime: number;
@@ -276,6 +280,9 @@ export class NanoStore extends DurableObject {
     
     // Initialize Memory Store for transient data
     this.memoryStore = new MemoryStore();
+    
+    // Initialize Psychic cache
+    this.psychicSentCache = new WeakMap();
     
     // Initialize Debounced Writer (flushes every 1 second by default)
     this.debouncedWriter = new DebouncedWriter(1000, (updates) => {
@@ -686,13 +693,10 @@ export class NanoStore extends DurableObject {
   }
 
   handleSession(webSocket: WebSocket) {
-    try {
-      // @ts-ignore: accept method exists on Cloudflare WebSocket
-      webSocket.accept();
-    } catch (error) {
-      console.error("Failed to accept WebSocket:", error);
-      return;
-    }
+    // ✅ NEW WAY: Register with the Durable Object system to use Hibernation API
+    // This connects the WebSocket to the webSocketMessage(), webSocketClose(), and 
+    // webSocketError() class methods defined below (lines 710, 1417, 1439)
+    this.ctx.acceptWebSocket(webSocket);
 
     // Send reset message when DO wakes up (handleSession starts)
     // This notifies clients to re-announce their cursor/presence
@@ -971,6 +975,94 @@ export class NanoStore extends DurableObject {
                     }
                     
                     webSocket.send(JSON.stringify({ type: "query_result", data: results, originalSql: "search" }));
+                    break;
+                }
+
+                case "streamIntent": {
+                    // Psychic Data: Predict user needs and pre-push data
+                    const text = data.payload?.text;
+                    if (!text || typeof text !== 'string') {
+                        break;
+                    }
+                    
+                    try {
+                        // Step 1: Generate embedding for the intent text
+                        if (!this.env.AI || !this.env.VECTOR_INDEX) {
+                            console.warn('AI or VECTOR_INDEX not available for streamIntent');
+                            break;
+                        }
+                        
+                        const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [text] });
+                        const values = embeddings.data[0];
+                        
+                        if (!values) {
+                            break;
+                        }
+                        
+                        // Step 2: Query vector index for top 3 matches
+                        const matches = await this.env.VECTOR_INDEX.query(values, { topK: 3 });
+                        
+                        // Step 3: Extract IDs from matches for this DO
+                        // Validate ID format: must be "doId:taskId" with exactly one colon
+                        const taskIds = matches.matches
+                            .filter(m => {
+                                if (!m.id.startsWith(this.doId) || !m.id.includes(':')) {
+                                    return false;
+                                }
+                                const parts = m.id.split(':');
+                                // Ensure exactly 2 parts and second part is a valid number
+                                return parts.length === 2 && /^\d+$/.test(parts[1]);
+                            })
+                            .map(m => m.id.split(':')[1]); // Safe to split after validation
+                        
+                        if (taskIds.length === 0) {
+                            break;
+                        }
+                        
+                        // Step 4: Check sentCache to avoid duplicate pushes
+                        // Use WeakMap with WebSocket as key
+                        let sentCache = this.psychicSentCache.get(webSocket);
+                        if (!sentCache) {
+                            sentCache = new Set<string>();
+                            this.psychicSentCache.set(webSocket, sentCache);
+                        }
+                        
+                        // Filter out already-sent IDs
+                        const newTaskIds = taskIds.filter(id => !sentCache.has(id));
+                        
+                        if (newTaskIds.length === 0) {
+                            break; // All matches already sent
+                        }
+                        
+                        // Step 5: Fetch full records from SQLite (primary source)
+                        // Validate that all IDs are numeric before query construction
+                        const validTaskIds = newTaskIds.filter(id => /^\d+$/.test(id));
+                        if (validTaskIds.length === 0) {
+                            break;
+                        }
+                        
+                        // Use explicit column selection for security
+                        const placeholders = validTaskIds.map(() => '?').join(',');
+                        const records = this.sql.exec(
+                            `SELECT id, title, status FROM tasks WHERE id IN (${placeholders})`,
+                            ...validTaskIds
+                        ).toArray();
+                        
+                        // Step 6: Push data to client silently (no state update on client)
+                        if (records.length > 0) {
+                            webSocket.send(JSON.stringify({
+                                type: 'psychic_push',
+                                data: records
+                            }));
+                            
+                            // Mark these IDs as sent
+                            validTaskIds.forEach(id => sentCache!.add(id));
+                            
+                            console.log(`🔮 Psychic push: ${records.length} records for intent "${text}"`);
+                        }
+                    } catch (e: any) {
+                        console.error('streamIntent error:', e.message);
+                    }
                     break;
                 }
 
