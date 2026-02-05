@@ -282,8 +282,7 @@ export class DataStore extends DurableObject {
           // SECURITY: Disable raw SQL queries from client to prevent SQL injection
           webSocket.send(JSON.stringify({ 
             type: "query_error",
-            error: "Raw SQL queries are disabled for security. Please use RPC methods.",
-            originalSql: data.sql 
+            error: "Raw SQL queries are disabled for security. Please use RPC methods."
           }));
           return;
         }

@@ -70,6 +70,9 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
     }, [socket]);
 
+    // Note: connect is async to fetch session token, but we don't add it to
+    // the dependency array to avoid infinite loops. The socket dependency
+    // ensures we recreate the callback when needed.
     const connect = useCallback(async (roomId: string) => {
         // Clear any pending reconnection attempts
         if (reconnectTimeoutRef.current) {
@@ -353,7 +356,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
         
         // Reject any other raw SQL for security
-        console.error('Rejected raw SQL query for security:', sql);
+        console.error('Rejected raw SQL query for security');
         addToast('Raw SQL queries are disabled for security. Use RPC methods like listTasks, createTask, completeTask, or deleteTask instead.', 'error');
 
         // Refresh usage stats after queries (demo purpose)
