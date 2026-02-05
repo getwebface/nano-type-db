@@ -25,11 +25,19 @@ export default {
       return auth.handler(request);
     }
 
-    // Look for room_id in query params
+    // Look for room_id in query params. Some simple public endpoints
+    // (root path and favicon) should not require a room_id so browsers
+    // requesting the worker URL directly don't get a 400.
     const roomId = url.searchParams.get("room_id");
 
     if (!roomId) {
-        return new Response("Missing room_id query parameter", { status: 400 });
+      if (url.pathname === "/") {
+        return new Response("Missing room_id query parameter. Use ?room_id=<name>&token=...", { status: 200, headers: { "Content-Type": "text/plain" } });
+      }
+      if (url.pathname === "/favicon.ico") {
+        return new Response(null, { status: 204 });
+      }
+      return new Response("Missing room_id query parameter", { status: 400 });
     }
 
     // 2. Protect Database Access
