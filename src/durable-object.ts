@@ -1003,8 +1003,12 @@ export class NanoStore extends DurableObject {
                         
                         // Step 3: Extract IDs from matches for this DO
                         const taskIds = matches.matches
-                            .filter(m => m.id.startsWith(this.doId))
-                            .map(m => m.id.split(':')[1]); // Extract taskId
+                            .filter(m => m.id.startsWith(this.doId) && m.id.includes(':'))
+                            .map(m => {
+                                const parts = m.id.split(':');
+                                return parts.length >= 2 ? parts[1] : null;
+                            })
+                            .filter((id): id is string => id !== null); // Filter out invalid IDs
                         
                         if (taskIds.length === 0) {
                             break;

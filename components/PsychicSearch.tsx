@@ -7,12 +7,16 @@ export const PsychicSearch: React.FC = () => {
     const [results, setResults] = useState<any[]>([]);
     const [loadTime, setLoadTime] = useState<number | null>(null);
     const messageHandlerRef = useRef<((event: MessageEvent) => void) | null>(null);
+    const timeoutIdRef = useRef<NodeJS.Timeout | null>(null);
 
     // Cleanup message handler on unmount
     useEffect(() => {
         return () => {
             if (messageHandlerRef.current && socket) {
                 socket.removeEventListener('message', messageHandlerRef.current);
+            }
+            if (timeoutIdRef.current) {
+                clearTimeout(timeoutIdRef.current);
             }
         };
     }, [socket]);
@@ -23,15 +27,11 @@ export const PsychicSearch: React.FC = () => {
         // First, try to get data from psychic cache
         const psychicResults: any[] = [];
         
-        // Iterate through all cached items instead of hardcoded range
-        const psychicData = getPsychicData('__all__');
-        if (!psychicData) {
-            // Try individual IDs - check a reasonable range
-            for (let id = 1; id <= 100; id++) {
-                const cached = getPsychicData(String(id));
-                if (cached && cached.title?.toLowerCase().includes(searchText.toLowerCase())) {
-                    psychicResults.push(cached);
-                }
+        // Iterate through cached items - check a reasonable range
+        for (let id = 1; id <= 100; id++) {
+            const cached = getPsychicData(String(id));
+            if (cached && cached.title?.toLowerCase().includes(searchText.toLowerCase())) {
+                psychicResults.push(cached);
             }
         }
         
@@ -51,6 +51,11 @@ export const PsychicSearch: React.FC = () => {
                     socket.removeEventListener('message', messageHandlerRef.current);
                 }
                 
+                // Clear previous timeout if it exists
+                if (timeoutIdRef.current) {
+                    clearTimeout(timeoutIdRef.current);
+                }
+                
                 // Create new handler
                 const handleMessage = (event: MessageEvent) => {
                     const data = JSON.parse(event.data);
@@ -62,6 +67,12 @@ export const PsychicSearch: React.FC = () => {
                         setLoadTime(networkDuration);
                         socket.removeEventListener('message', handleMessage);
                         messageHandlerRef.current = null;
+                        
+                        // Clear the timeout since we got a response
+                        if (timeoutIdRef.current) {
+                            clearTimeout(timeoutIdRef.current);
+                            timeoutIdRef.current = null;
+                        }
                     }
                 };
                 
@@ -69,12 +80,13 @@ export const PsychicSearch: React.FC = () => {
                 socket.addEventListener('message', handleMessage);
                 
                 // Set timeout to cleanup listener if no response
-                setTimeout(() => {
-                    if (messageHandlerRef.current) {
+                timeoutIdRef.current = setTimeout(() => {
+                    if (messageHandlerRef.current && socket) {
                         socket.removeEventListener('message', messageHandlerRef.current);
                         messageHandlerRef.current = null;
                         console.warn('Search request timed out');
                     }
+                    timeoutIdRef.current = null;
                 }, 10000); // 10 second timeout
                 
                 socket.send(JSON.stringify({
