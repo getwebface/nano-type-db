@@ -410,9 +410,42 @@ export class DataStore extends DurableObject {
     });
   }
 
-  calculateDiff(oldData: any[], newData: any[]): { added: any[], modified: any[], deleted: any[] } {
-    const oldMap = new Map(oldData.map(row => [row.id, row]));
-    const newMap = new Map(newData.map(row => [row.id, row]));
+  getPrimaryKey(tableName: string): string {
+    // Get primary key column from table schema
+    try {
+      const columns = this.sql.exec(`PRAGMA table_info("${tableName}")`).toArray();
+      const pkColumn = columns.find((col: any) => col.pk === 1);
+      return pkColumn ? pkColumn.name : 'id'; // Default to 'id' if no PK found
+    } catch (e) {
+      console.warn(`Failed to get primary key for ${tableName}, defaulting to 'id'`);
+      return 'id';
+    }
+  }
+
+  shallowEqual(obj1: any, obj2: any): boolean {
+    const keys1 = Object.keys(obj1);
+    const keys2 = Object.keys(obj2);
+    
+    if (keys1.length !== keys2.length) return false;
+    
+    for (const key of keys1) {
+      if (obj1[key] !== obj2[key]) return false;
+    }
+    
+    return true;
+  }
+
+  calculateDiff(oldData: any[], newData: any[], tableName: string): { added: any[], modified: any[], deleted: any[] } {
+    const pkField = this.getPrimaryKey(tableName);
+    
+    // Check if data has the primary key field
+    if (oldData.length > 0 && !oldData[0].hasOwnProperty(pkField)) {
+      console.warn(`Table ${tableName} rows don't have field '${pkField}', falling back to full data`);
+      return { added: newData, modified: [], deleted: [] };
+    }
+    
+    const oldMap = new Map(oldData.map(row => [row[pkField], row]));
+    const newMap = new Map(newData.map(row => [row[pkField], row]));
     
     const added: any[] = [];
     const modified: any[] = [];
@@ -423,7 +456,7 @@ export class DataStore extends DurableObject {
       const oldRow = oldMap.get(id);
       if (!oldRow) {
         added.push(newRow);
-      } else if (JSON.stringify(oldRow) !== JSON.stringify(newRow)) {
+      } else if (!this.shallowEqual(oldRow, newRow)) {
         modified.push(newRow);
       }
     }
@@ -446,8 +479,8 @@ export class DataStore extends DurableObject {
       const currentData = this.sql.exec(`SELECT * FROM ${table}`).toArray();
       const previousData = this.tableSnapshots.get(table) || [];
       
-      // Calculate diff
-      const diff = this.calculateDiff(previousData, currentData);
+      // Calculate diff with table name for primary key detection
+      const diff = this.calculateDiff(previousData, currentData, table);
       
       // Update snapshot
       this.tableSnapshots.set(table, currentData);
