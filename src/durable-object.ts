@@ -210,7 +210,7 @@ const MIGRATIONS = [
   }
 ];
 
-export class DataStore extends DurableObject {
+export class NanoStore extends DurableObject {
   sql: any; 
   subscribers: Map<string, Set<WebSocket>>;
   env: Env;

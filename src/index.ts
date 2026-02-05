@@ -1,8 +1,8 @@
-import { DataStore } from "./durable-object";
+import { NanoStore } from "./durable-object";
 import { createAuth } from "./lib/auth";
 import type { ExecutionContext, ScheduledController } from "cloudflare:workers";
 
-export { DataStore };
+export { NanoStore };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
