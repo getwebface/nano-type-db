@@ -6,12 +6,12 @@ compatibility_flags = ["nodejs_compat"]
 # Define the Durable Object binding
 [[durable_objects.bindings]]
 name = "DATA_STORE"
-class_name = "DataStore"
+class_name = "NanoStore" # Changed from DataStore to force SQLite creation
 
 # Database migrations
 [[migrations]]
 tag = "v1"
-new_classes = ["DataStore"]
+new_sqlite_classes = ["NanoStore"] # Must use new_sqlite_classes for SQL support
 
 # Backups
 [[r2_buckets]]
@@ -24,7 +24,7 @@ binding = "AUTH_DB"
 database_name = "nanotype-auth"
 database_id = "d1b3a27b-a1de-43ab-ba7f-5ebda88b9807"
 
-# Observability Configuration (Fixed TOML Syntax)
+# Observability Configuration
 [observability]
 enabled = false
 head_sampling_rate = 1
