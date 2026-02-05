@@ -1,11 +1,16 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import { DatabaseContextType, QueryResult, UpdateEvent, ToastMessage, Schema, UsageStat, OptimisticUpdate } from '../types';
+import { authClient } from '../src/lib/auth-client';
 
 // Dynamic URL detection for production/dev
 const PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 const HOST = window.location.host; 
 const WORKER_URL = `${PROTOCOL}//${HOST}`; 
 const HTTP_URL = `${window.location.protocol}//${HOST}`;
+
+// In development with Vite proxy, use proxied WebSocket path
+const IS_DEV = import.meta.env.DEV;
+const WS_PATH_PREFIX = IS_DEV ? '/__ws' : '';
 
 // Configuration constants
 const OPTIMISTIC_UPDATE_TIMEOUT = 10000; // 10 seconds
@@ -65,7 +70,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
     }, [socket]);
 
-    const connect = useCallback((roomId: string) => {
+    const connect = useCallback(async (roomId: string) => {
         // Clear any pending reconnection attempts
         if (reconnectTimeoutRef.current) {
             clearTimeout(reconnectTimeoutRef.current);
@@ -98,8 +103,22 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         currentRoomIdRef.current = roomId;
         shouldReconnectRef.current = true;
         
-        // Construct WebSocket URL with explicit path
-        const wsUrl = `${WORKER_URL}/?room_id=${encodeURIComponent(roomId)}`;
+        // Get session token from Better Auth
+        let sessionToken = '';
+        try {
+            const session = await authClient.getSession();
+            if (session?.data?.session?.token) {
+                sessionToken = session.data.session.token;
+            }
+        } catch (e) {
+            console.warn('Failed to get session token, will try cookie-based auth', e);
+        }
+        
+        // Construct WebSocket URL with explicit path and session token for auth
+        let wsUrl = `${WORKER_URL}${WS_PATH_PREFIX}/?room_id=${encodeURIComponent(roomId)}`;
+        if (sessionToken) {
+            wsUrl += `&session_token=${encodeURIComponent(sessionToken)}`;
+        }
         console.log('Connecting to WebSocket:', wsUrl);
         
         // Browser automatically sends Cookies (Better Auth Session) with WebSocket
@@ -280,38 +299,64 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const runQuery = useCallback((sql: string, tableContext?: string) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
         
-        const isInsertTask = /INSERT INTO tasks/i.test(sql);
+        // SECURITY: Instead of sending raw SQL, parse intent and use RPC methods
+        const sqlUpper = sql.trim().toUpperCase();
         
-        if (isInsertTask) {
-             const match = sql.match(/VALUES\s*\(\s*'([^']*)'/i);
-             const title = match ? match[1] : "New Task";
-             
-             socket.send(JSON.stringify({
-                 action: 'createTask',
-                 payload: { title }
-             }));
-             return;
-        }
-
-        const isMutation = /^(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)/i.test(sql.trim());
-        const isSchemaChange = /^(CREATE|ALTER|DROP)/i.test(sql.trim());
-
-        const payload = {
-            action: isMutation ? 'mutate' : 'query',
-            sql,
-            table: tableContext
-        };
-
-        socket.send(JSON.stringify(payload));
-
-        if (isSchemaChange) {
-            setTimeout(refreshSchema, 500);
+        // Handle SELECT queries on tasks table
+        if (sqlUpper.startsWith('SELECT') && sqlUpper.includes('FROM TASKS')) {
+            socket.send(JSON.stringify({
+                action: 'rpc',
+                method: 'listTasks'
+            }));
+            return;
         }
         
+        // Handle INSERT INTO tasks
+        if (sqlUpper.startsWith('INSERT INTO TASKS')) {
+            const match = sql.match(/VALUES\s*\(\s*'([^']*)'/i);
+            const title = match ? match[1] : "New Task";
+            
+            socket.send(JSON.stringify({
+                action: 'createTask',
+                payload: { title }
+            }));
+            return;
+        }
+        
+        // Handle UPDATE tasks
+        if (sqlUpper.startsWith('UPDATE TASKS') && sqlUpper.includes("SET STATUS = 'COMPLETED'")) {
+            const match = sql.match(/WHERE ID\s*=\s*(\d+)/i);
+            if (match) {
+                const id = parseInt(match[1]);
+                socket.send(JSON.stringify({
+                    action: 'completeTask',
+                    payload: { id }
+                }));
+            }
+            return;
+        }
+        
+        // Handle DELETE from tasks
+        if (sqlUpper.startsWith('DELETE FROM TASKS')) {
+            const match = sql.match(/WHERE ID\s*=\s*(\d+)/i);
+            if (match) {
+                const id = parseInt(match[1]);
+                socket.send(JSON.stringify({
+                    action: 'deleteTask',
+                    payload: { id }
+                }));
+            }
+            return;
+        }
+        
+        // Reject any other raw SQL for security
+        console.error('Rejected raw SQL query for security:', sql);
+        addToast('Raw SQL queries are disabled. Please use the provided methods.', 'error');
+
         // Refresh usage stats after queries (demo purpose)
         setTimeout(refreshUsage, 1000);
 
-    }, [socket, refreshSchema, refreshUsage]);
+    }, [socket, refreshUsage]);
 
     const performOptimisticAction = useCallback((action: string, payload: any, optimisticUpdate: () => void, rollback: () => void) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -385,7 +430,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, []); // Empty dependency array ensures this only runs on unmount
 
     return (
-        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction }}>
+        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, socket }}>
             {children}
         </DatabaseContext.Provider>
     );
@@ -398,15 +443,25 @@ export const useDatabase = () => {
 };
 
 export const useRealtimeQuery = (tableName: string) => {
-    const { runQuery, subscribe, lastResult, isConnected } = useDatabase();
+    const { runQuery, subscribe, lastResult, isConnected, socket } = useDatabase();
     const [data, setData] = useState<any[]>([]);
 
     useEffect(() => {
-        if (isConnected && tableName) {
+        if (isConnected && tableName && socket && socket.readyState === WebSocket.OPEN) {
             subscribe(tableName);
-            runQuery(`SELECT * FROM ${tableName}`, tableName);
+            
+            // Use RPC method instead of raw SQL
+            if (tableName === 'tasks') {
+                socket.send(JSON.stringify({ 
+                    action: 'rpc', 
+                    method: 'listTasks' 
+                }));
+            } else {
+                // For other tables, use a generic query (if needed in the future)
+                runQuery(`SELECT * FROM ${tableName}`, tableName);
+            }
         }
-    }, [isConnected, tableName, subscribe, runQuery]);
+    }, [isConnected, tableName, subscribe, socket]);
 
     useEffect(() => {
         const handleUpdate = (e: Event) => {
@@ -471,8 +526,14 @@ export const useRealtimeQuery = (tableName: string) => {
     }, [tableName, runQuery]);
 
     useEffect(() => {
-        if (lastResult && lastResult.originalSql && lastResult.originalSql.includes(tableName) && !lastResult.originalSql.toLowerCase().startsWith('insert')) {
-             setData(lastResult.data);
+        if (lastResult && lastResult.originalSql) {
+            // Match both the table name and the listTasks RPC method
+            const matchesTable = lastResult.originalSql.includes(tableName) || 
+                                (tableName === 'tasks' && lastResult.originalSql === 'listTasks');
+            
+            if (matchesTable && !lastResult.originalSql.toLowerCase().startsWith('insert')) {
+                 setData(lastResult.data);
+            }
         }
     }, [lastResult, tableName]);
 

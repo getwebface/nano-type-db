@@ -8,6 +8,20 @@ export default defineConfig(({ mode }) => {
       server: {
         port: 3000,
         host: '0.0.0.0',
+        // Proxy WebSocket and API requests to worker to avoid cross-port cookie issues
+        proxy: {
+          '/api': {
+            target: 'http://localhost:8787',
+            changeOrigin: true,
+          },
+          // WebSocket proxy
+          '/__ws': {
+            target: 'ws://localhost:8787',
+            ws: true,
+            changeOrigin: true,
+            rewrite: (path) => path.replace(/^\/__ws/, ''),
+          }
+        }
       },
       plugins: [react()],
       define: {

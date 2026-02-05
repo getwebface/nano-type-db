@@ -137,9 +137,23 @@ export default {
     
     let session;
     try {
-        session = await auth.api.getSession({ 
-            headers: request.headers
-        });
+        // For WebSocket connections, try to get session token from query params first
+        // This solves the cross-port cookie issue in development
+        const sessionToken = url.searchParams.get("session_token");
+        
+        if (sessionToken) {
+            // Verify session token directly
+            session = await auth.api.getSession({ 
+                headers: new Headers({
+                    'Cookie': `better-auth.session_token=${sessionToken}`
+                })
+            });
+        } else {
+            // Fall back to standard cookie-based auth
+            session = await auth.api.getSession({ 
+                headers: request.headers
+            });
+        }
     } catch (e: any) {
         console.error("Critical Auth Error:", e);
         return new Response(`Auth Error: ${e.message}`, { status: 500 });
@@ -149,6 +163,7 @@ export default {
     if (!session) {
          console.log("Auth failed: No session found");
          console.log("Cookies present:", request.headers.get("Cookie"));
+         console.log("Session token param:", url.searchParams.get("session_token"));
          console.log("Origin:", request.headers.get("Origin"));
          
          return new Response("Unauthorized. Please log in.", { status: 401 });

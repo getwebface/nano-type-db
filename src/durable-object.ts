@@ -19,6 +19,7 @@ const ACTIONS = {
   createTask: { params: ["title"] },
   completeTask: { params: ["id"] },
   deleteTask: { params: ["id"] },
+  listTasks: { params: [] },
   search: { params: ["query"] },
   getUsage: { params: [] },
   getAuditLog: { params: [] }
@@ -262,13 +263,13 @@ export class DataStore extends DurableObject {
         }
 
         if (data.action === "query" && data.sql) {
-          this.trackUsage('reads');
-          const results = this.sql.exec(data.sql).toArray();
+          // SECURITY: Disable raw SQL queries from client to prevent SQL injection
           webSocket.send(JSON.stringify({ 
-            type: "query_result", 
-            data: results,
+            type: "query_error",
+            error: "Raw SQL queries are disabled for security. Please use RPC methods.",
             originalSql: data.sql 
           }));
+          return;
         }
 
         if (data.action === "rpc" || (data.action as string) === "createTask") {
@@ -415,6 +416,12 @@ export class DataStore extends DurableObject {
                      this.trackUsage('reads');
                      const logs = this.sql.exec("SELECT * FROM _audit_log ORDER BY timestamp DESC LIMIT 50").toArray();
                      webSocket.send(JSON.stringify({ type: "query_result", data: logs, originalSql: "getAuditLog" }));
+                     break;
+
+                case "listTasks":
+                     this.trackUsage('reads');
+                     const tasks = this.sql.exec("SELECT * FROM tasks ORDER BY id").toArray();
+                     webSocket.send(JSON.stringify({ type: "query_result", data: tasks, originalSql: "listTasks" }));
                      break;
 
                 default:

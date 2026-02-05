@@ -49,6 +49,7 @@ export interface DatabaseContextType {
     usageStats: UsageStat[];
     refreshUsage: () => void;
     performOptimisticAction: (action: string, payload: any, optimisticUpdate: () => void, rollback: () => void) => void;
+    socket: WebSocket | null;
 }
 
 export interface ToastMessage {
