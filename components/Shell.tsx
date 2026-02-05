@@ -5,6 +5,7 @@ import { SqlConsole } from './SqlConsole';
 import { PsychicSearch } from './PsychicSearch';
 import { ApiKeys } from './ApiKeys';
 import { Snapshots } from './Snapshots';
+import { Analytics } from './Analytics';
 import { Layout, Table2, HardDrive, Circle, Plus, Loader2, Activity, Settings, Database } from 'lucide-react';
 
 export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
@@ -183,11 +184,7 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                         <div className="flex-1 overflow-auto p-8 bg-slate-900">
                             {settingsTab === 'api-keys' && <ApiKeys />}
                             {settingsTab === 'snapshots' && <Snapshots />}
-                            {settingsTab === 'analytics' && (
-                                <div className="text-center py-12 text-slate-400">
-                                    Analytics dashboard coming soon...
-                                </div>
-                            )}
+                            {settingsTab === 'analytics' && <Analytics />}
                         </div>
                     </>
                 ) : (

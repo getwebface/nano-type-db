@@ -368,6 +368,17 @@ export class NanoStore extends DurableObject {
              ON CONFLICT(date) DO UPDATE SET ${type} = ${type} + 1`,
             today
         );
+        
+        // Log to Cloudflare Analytics Engine for real-time observability
+        if (this.env.ANALYTICS) {
+            this.ctx.waitUntil(
+                this.env.ANALYTICS.writeDataPoint({
+                    blobs: [this.doId, type],
+                    doubles: [1], // count
+                    indexes: [`${type}_${today}`]
+                })
+            );
+        }
       } catch (e) {
           console.error("Usage tracking failed", e);
       }
@@ -864,6 +875,37 @@ export class NanoStore extends DurableObject {
             
         } catch (error: any) {
             console.error("Failed to restore backup:", error);
+            return Response.json({ error: error.message }, { status: 500 });
+        }
+    }
+
+    // Analytics endpoint - fetch usage data from _usage table
+    if (url.pathname === "/analytics") {
+        try {
+            // Get last 30 days of usage data
+            const usageData = this.sql.exec(
+                "SELECT * FROM _usage ORDER BY date DESC LIMIT 30"
+            ).toArray();
+            
+            // Calculate totals
+            const totals = {
+                reads: 0,
+                writes: 0,
+                ai_ops: 0
+            };
+            
+            usageData.forEach((row: any) => {
+                totals.reads += row.reads || 0;
+                totals.writes += row.writes || 0;
+                totals.ai_ops += row.ai_ops || 0;
+            });
+            
+            return Response.json({
+                daily: usageData.reverse(), // oldest to newest for charts
+                totals
+            });
+        } catch (error: any) {
+            console.error("Failed to fetch analytics:", error);
             return Response.json({ error: error.message }, { status: 500 });
         }
     }
