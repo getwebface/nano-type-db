@@ -260,6 +260,8 @@ export class NanoStore extends DurableObject {
   // Hybrid State: In-memory stores for transient data
   memoryStore: MemoryStore;
   debouncedWriter: DebouncedWriter;
+  // Psychic cache: Track sent IDs per WebSocket
+  psychicSentCache: WeakMap<WebSocket, Set<string>>;
   // Sync Engine: Track sync status and health
   syncEngine: {
     lastSyncTime: number;
@@ -278,6 +280,9 @@ export class NanoStore extends DurableObject {
     
     // Initialize Memory Store for transient data
     this.memoryStore = new MemoryStore();
+    
+    // Initialize Psychic cache
+    this.psychicSentCache = new WeakMap();
     
     // Initialize Debounced Writer (flushes every 1 second by default)
     this.debouncedWriter = new DebouncedWriter(1000, (updates) => {
@@ -688,13 +693,9 @@ export class NanoStore extends DurableObject {
   }
 
   handleSession(webSocket: WebSocket) {
-    try {
-      // @ts-ignore: accept method exists on Cloudflare WebSocket
-      webSocket.accept();
-    } catch (error) {
-      console.error("Failed to accept WebSocket:", error);
-      return;
-    }
+    // ✅ NEW WAY: Register with the Durable Object system to use webSocketMessage()
+    // This connects the WebSocket to the webSocketMessage, webSocketClose, and webSocketError handlers
+    this.ctx.acceptWebSocket(webSocket);
 
     // Send reset message when DO wakes up (handleSession starts)
     // This notifies clients to re-announce their cursor/presence
@@ -1010,12 +1011,11 @@ export class NanoStore extends DurableObject {
                         }
                         
                         // Step 4: Check sentCache to avoid duplicate pushes
-                        // Use a cache key per WebSocket connection
-                        const wsKey = `psychic_sent:${webSocket.toString()}`;
-                        let sentCache = this.memoryStore.get(wsKey);
+                        // Use WeakMap with WebSocket as key
+                        let sentCache = this.psychicSentCache.get(webSocket);
                         if (!sentCache) {
                             sentCache = new Set<string>();
-                            this.memoryStore.set(wsKey, sentCache, 300000); // 5 min TTL
+                            this.psychicSentCache.set(webSocket, sentCache);
                         }
                         
                         // Filter out already-sent IDs
@@ -1026,9 +1026,10 @@ export class NanoStore extends DurableObject {
                         }
                         
                         // Step 5: Fetch full records from SQLite (primary source)
+                        // Use explicit column selection for security
                         const placeholders = newTaskIds.map(() => '?').join(',');
                         const records = this.sql.exec(
-                            `SELECT * FROM tasks WHERE id IN (${placeholders})`,
+                            `SELECT id, title, status FROM tasks WHERE id IN (${placeholders})`,
                             ...newTaskIds
                         ).toArray();
                         
@@ -1040,8 +1041,7 @@ export class NanoStore extends DurableObject {
                             }));
                             
                             // Mark these IDs as sent
-                            newTaskIds.forEach(id => sentCache.add(id));
-                            this.memoryStore.set(wsKey, sentCache, 300000);
+                            newTaskIds.forEach(id => sentCache!.add(id));
                             
                             console.log(`🔮 Psychic push: ${records.length} records for intent "${text}"`);
                         }

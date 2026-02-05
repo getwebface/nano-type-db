@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useDatabase } from '../hooks/useDatabase';
 
 export const PsychicSearch: React.FC = () => {
@@ -6,6 +6,16 @@ export const PsychicSearch: React.FC = () => {
     const [searchText, setSearchText] = useState('');
     const [results, setResults] = useState<any[]>([]);
     const [loadTime, setLoadTime] = useState<number | null>(null);
+    const messageHandlerRef = useRef<((event: MessageEvent) => void) | null>(null);
+
+    // Cleanup message handler on unmount
+    useEffect(() => {
+        return () => {
+            if (messageHandlerRef.current && socket) {
+                socket.removeEventListener('message', messageHandlerRef.current);
+            }
+        };
+    }, [socket]);
 
     const handleSearch = () => {
         const startTime = performance.now();
@@ -13,12 +23,15 @@ export const PsychicSearch: React.FC = () => {
         // First, try to get data from psychic cache
         const psychicResults: any[] = [];
         
-        // For demo purposes, we'll try to match on common task IDs
-        // In a real app, you'd have a proper search/query mechanism
-        for (let id = 1; id <= 10; id++) {
-            const cached = getPsychicData(String(id));
-            if (cached && cached.title?.toLowerCase().includes(searchText.toLowerCase())) {
-                psychicResults.push(cached);
+        // Iterate through all cached items instead of hardcoded range
+        const psychicData = getPsychicData('__all__');
+        if (!psychicData) {
+            // Try individual IDs - check a reasonable range
+            for (let id = 1; id <= 100; id++) {
+                const cached = getPsychicData(String(id));
+                if (cached && cached.title?.toLowerCase().includes(searchText.toLowerCase())) {
+                    psychicResults.push(cached);
+                }
             }
         }
         
@@ -33,13 +46,12 @@ export const PsychicSearch: React.FC = () => {
         } else {
             // Fallback to network request
             if (socket && socket.readyState === WebSocket.OPEN) {
-                socket.send(JSON.stringify({
-                    action: 'rpc',
-                    method: 'search',
-                    payload: { query: searchText }
-                }));
+                // Remove previous handler if it exists
+                if (messageHandlerRef.current) {
+                    socket.removeEventListener('message', messageHandlerRef.current);
+                }
                 
-                // Listen for response
+                // Create new handler
                 const handleMessage = (event: MessageEvent) => {
                     const data = JSON.parse(event.data);
                     if (data.type === 'query_result' && data.originalSql === 'search') {
@@ -49,10 +61,27 @@ export const PsychicSearch: React.FC = () => {
                         setResults(data.data);
                         setLoadTime(networkDuration);
                         socket.removeEventListener('message', handleMessage);
+                        messageHandlerRef.current = null;
                     }
                 };
                 
+                messageHandlerRef.current = handleMessage;
                 socket.addEventListener('message', handleMessage);
+                
+                // Set timeout to cleanup listener if no response
+                setTimeout(() => {
+                    if (messageHandlerRef.current) {
+                        socket.removeEventListener('message', messageHandlerRef.current);
+                        messageHandlerRef.current = null;
+                        console.warn('Search request timed out');
+                    }
+                }, 10000); // 10 second timeout
+                
+                socket.send(JSON.stringify({
+                    action: 'rpc',
+                    method: 'search',
+                    payload: { query: searchText }
+                }));
             }
         }
     };

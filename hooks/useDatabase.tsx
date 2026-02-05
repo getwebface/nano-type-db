@@ -511,13 +511,13 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                 clearTimeout(debounceTimerRef.current);
             }
 
-            // Debounce: wait 150-200ms after typing stops
+            // Debounce: wait 175ms after typing stops
             debounceTimerRef.current = setTimeout(() => {
                 if (text.length > 2) {
                     console.log('🔮 Auto-sensing intent:', text);
                     streamIntent(text);
                 }
-            }, 175); // 175ms is in the middle of 150-200ms range
+            }, 175);
         };
 
         // Add global event listener with capture phase
