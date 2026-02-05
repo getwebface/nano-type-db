@@ -4,6 +4,24 @@ import type { DurableObjectState } from "cloudflare:workers";
 // are only performed when running in a Node environment. In Workers
 // we skip file-based backups and rely on R2 or other mechanisms.
 
+/**
+ * SECURITY & ARCHITECTURE NOTES:
+ * 
+ * 1. SQL Injection Prevention: Raw SQL queries from clients are disabled.
+ *    All database operations go through RPC methods with input validation.
+ * 
+ * 2. Efficient Broadcasting: Uses action-based updates (added/modified/deleted)
+ *    instead of O(N) full table diffing for scalability.
+ * 
+ * 3. Vector Search Consistency: AI embeddings are async and best-effort.
+ *    If embedding fails, task exists in DB but may not be searchable until
+ *    a background re-indexing job runs. For production, use Cloudflare Queues
+ *    to ensure eventual consistency.
+ * 
+ * 4. Schema Management: Currently uses raw SQL in migrations. For better type
+ *    safety, consider migrating to Drizzle ORM for schema definition.
+ */
+
 interface WebSocketMessage {
   action: "subscribe" | "query" | "mutate" | "rpc" | "ping";
   table?: string;
@@ -293,27 +311,34 @@ export class DataStore extends DurableObject {
                         
                         this.logAction(method, data.payload);
                         
-                        // 1. Insert into DB
+                        // 1. Insert into DB (Primary operation - must succeed)
                         const result = this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending') RETURNING *", title.trim()).toArray();
                         const newTask = result[0];
 
-                        // 2. Generate Embedding (Async) & Store
+                        // 2. Generate Embedding & Store (Secondary operation - best effort)
+                        // Note: This is async and may fail. Vector search may miss this task until
+                        // a background job re-indexes it. For production, use a queue system.
                         if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
-                            try {
-                                const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [title] });
-                                const values = embeddings.data[0];
-                                if (values) {
-                                    // Namespace ID with DO ID to prevent collision if index is shared
-                                    await this.env.VECTOR_INDEX.upsert([{ 
-                                        id: `${this.doId}:${newTask.id}`, 
-                                        values,
-                                        metadata: { doId: this.doId, taskId: newTask.id } 
-                                    }]);
-                                    this.trackUsage('ai_ops');
+                            // Use Promise for async operation without blocking the response
+                            (async () => {
+                                try {
+                                    const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [title] });
+                                    const values = embeddings.data[0];
+                                    if (values) {
+                                        await this.env.VECTOR_INDEX.upsert([{ 
+                                            id: `${this.doId}:${newTask.id}`, 
+                                            values,
+                                            metadata: { doId: this.doId, taskId: newTask.id } 
+                                        }]);
+                                        this.trackUsage('ai_ops');
+                                        console.log(`Vector indexed for task ${newTask.id}`);
+                                    }
+                                } catch (e: any) {
+                                    // Log error but don't fail the task creation
+                                    console.error(`AI Embedding failed for task ${newTask.id}:`, e.message);
+                                    // TODO: Add to a retry queue for production systems
                                 }
-                            } catch (e) {
-                                console.error("AI Embedding failed", e);
-                            }
+                            })();
                         }
 
                         webSocket.send(JSON.stringify({ 
