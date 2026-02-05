@@ -35,24 +35,6 @@ binding = "READ_REPLICA"
 database_name = "nanotype-read-replica"
 database_id = "placeholder-read-replica-id"
 
-{
-  "observability": {
-    "enabled": false,
-    "head_sampling_rate": 1,
-    "logs": {
-      "enabled": true,
-      "head_sampling_rate": 1,
-      "persist": true,
-      "invocation_logs": true
-    },
-    "traces": {
-      "enabled": false,
-      "persist": true,
-      "head_sampling_rate": 1
-    }
-  }
-}
-
 # Vector Index & AI
 [[vectorize]]
 binding = "VECTOR_INDEX"
