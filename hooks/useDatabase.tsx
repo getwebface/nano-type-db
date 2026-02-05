@@ -22,7 +22,7 @@ const HEARTBEAT_TIMEOUT = 5000; // 5 seconds - expect pong response
 
 const DatabaseContext = createContext<DatabaseContextType | null>(null);
 
-export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: boolean }> = ({ children, psychic = false }) => {
+export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: boolean; apiKey?: string }> = ({ children, psychic = false, apiKey }) => {
     const [socket, setSocket] = useState<WebSocket | null>(null);
     const [status, setStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
     const [isConnected, setIsConnected] = useState(false);
@@ -61,8 +61,13 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     const refreshSchema = useCallback(async () => {
         if (!currentRoomIdRef.current) return;
         try {
+            // Append API key if provided
+            let schemaUrl = `${HTTP_URL}/schema?room_id=${currentRoomIdRef.current}`;
+            if (apiKey) {
+                schemaUrl += `&api_key=${encodeURIComponent(apiKey)}`;
+            }
             // Browser automatically sends Cookies (Better Auth Session)
-            const res = await fetch(`${HTTP_URL}/schema?room_id=${currentRoomIdRef.current}`);
+            const res = await fetch(schemaUrl);
             if (res.ok) {
                 const data = await res.json();
                 setSchema(data);
@@ -70,7 +75,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         } catch (e) {
             console.error("Failed to fetch schema", e);
         }
-    }, []);
+    }, [apiKey]);
 
     const refreshUsage = useCallback(() => {
         if (socket && socket.readyState === WebSocket.OPEN) {
@@ -127,7 +132,11 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         
         // Construct WebSocket URL with explicit path and session token for auth
         let wsUrl = `${WORKER_URL}${WS_PATH_PREFIX}/?room_id=${encodeURIComponent(roomId)}`;
-        if (sessionToken) {
+        
+        // Append API key if provided (takes precedence over session token)
+        if (apiKey) {
+            wsUrl += `&api_key=${encodeURIComponent(apiKey)}`;
+        } else if (sessionToken) {
             wsUrl += `&session_token=${encodeURIComponent(sessionToken)}`;
         }
         console.log('Connecting to WebSocket:', wsUrl);
