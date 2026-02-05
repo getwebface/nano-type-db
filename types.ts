@@ -20,6 +20,20 @@ export interface QueryResult {
 export interface UpdateEvent {
     event: "update";
     table: string;
+    diff?: {
+        added: any[];
+        modified: any[];
+        deleted: any[];
+    };
+    fullData?: any[]; // Fallback for initial load
+}
+
+export interface OptimisticUpdate {
+    id: string;
+    action: string;
+    payload: any;
+    rollback: () => void;
+    timestamp: number;
 }
 
 export interface DatabaseContextType {
@@ -34,12 +48,13 @@ export interface DatabaseContextType {
     refreshSchema: () => void;
     usageStats: UsageStat[];
     refreshUsage: () => void;
+    performOptimisticAction: (action: string, payload: any, optimisticUpdate: () => void, rollback: () => void) => void;
 }
 
 export interface ToastMessage {
     id: string;
     message: string;
-    type: 'success' | 'info';
+    type: 'success' | 'info' | 'error';
 }
 
 export interface UsageStat {

@@ -10,6 +10,7 @@ interface WebSocketMessage {
   sql?: string;
   method?: string; 
   payload?: any;
+  updateId?: string; // For optimistic updates
 }
 
 // 1. Define the Manifest explicitly
@@ -61,12 +62,14 @@ export class DataStore extends DurableObject {
   subscribers: Map<string, Set<WebSocket>>;
   env: Env;
   doId: string;
+  tableSnapshots: Map<string, any[]>; // Cache of last known table state
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.env = env;
     this.sql = ctx.storage.sql;
     this.subscribers = new Map();
+    this.tableSnapshots = new Map();
     this.doId = ctx.id.toString();
     
     this.runMigrations();
@@ -124,6 +127,12 @@ export class DataStore extends DurableObject {
     return schema;
   }
 
+  isValidTableName(tableName: string): boolean {
+    // Validate table name against schema
+    const schema = this.getSchema();
+    return schema.hasOwnProperty(tableName);
+  }
+
     async backupToR2() {
       try {
         // If running in Node (local dev), allow file-based backup. In the
@@ -157,6 +166,21 @@ export class DataStore extends DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+
+    // QUERY ENDPOINT for global queries
+    if (url.pathname === "/query") {
+      this.trackUsage('reads');
+      const sql = url.searchParams.get("sql");
+      if (!sql) {
+        return new Response("Missing sql parameter", { status: 400 });
+      }
+      try {
+        const results = this.sql.exec(sql).toArray();
+        return Response.json(results);
+      } catch (e: any) {
+        return Response.json({ error: e.message }, { status: 500 });
+      }
+    }
 
     // MANIFEST ENDPOINT
     if (url.pathname === "/manifest") {
@@ -236,59 +260,98 @@ export class DataStore extends DurableObject {
             
             switch (method) {
                 case "createTask": {
-                    this.trackUsage('writes');
-                    this.logAction(method, data.payload);
-                    const title = data.payload?.title || "Untitled Task";
-                    
-                    // 1. Insert into DB
-                    const result = this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending') RETURNING id", title).toArray();
-                    const newId = result[0]?.id;
+                    try {
+                        this.trackUsage('writes');
+                        this.logAction(method, data.payload);
+                        const title = data.payload?.title || "Untitled Task";
+                        
+                        // 1. Insert into DB
+                        const result = this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending') RETURNING id", title).toArray();
+                        const newId = result[0]?.id;
 
-                    // 2. Generate Embedding (Async) & Store
-                    if (newId && this.env.AI && this.env.VECTOR_INDEX) {
-                        try {
-                            const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [title] });
-                            const values = embeddings.data[0];
-                            if (values) {
-                                // Namespace ID with DO ID to prevent collision if index is shared
-                                await this.env.VECTOR_INDEX.upsert([{ 
-                                    id: `${this.doId}:${newId}`, 
-                                    values,
-                                    metadata: { doId: this.doId, taskId: newId } 
-                                }]);
-                                this.trackUsage('ai_ops');
+                        // 2. Generate Embedding (Async) & Store
+                        if (newId && this.env.AI && this.env.VECTOR_INDEX) {
+                            try {
+                                const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [title] });
+                                const values = embeddings.data[0];
+                                if (values) {
+                                    // Namespace ID with DO ID to prevent collision if index is shared
+                                    await this.env.VECTOR_INDEX.upsert([{ 
+                                        id: `${this.doId}:${newId}`, 
+                                        values,
+                                        metadata: { doId: this.doId, taskId: newId } 
+                                    }]);
+                                    this.trackUsage('ai_ops');
+                                }
+                            } catch (e) {
+                                console.error("AI Embedding failed", e);
                             }
-                        } catch (e) {
-                            console.error("AI Embedding failed", e);
                         }
-                    }
 
-                    webSocket.send(JSON.stringify({ type: "mutation_success", action: "createTask" }));
-                    this.broadcastUpdate("tasks");
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_success", 
+                            action: "createTask",
+                            updateId: data.updateId
+                        }));
+                        this.broadcastUpdate("tasks");
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_error", 
+                            action: "createTask",
+                            error: e.message,
+                            updateId: data.updateId
+                        }));
+                    }
                     break;
                 }
 
                 case "completeTask":
-                    this.trackUsage('writes');
-                    this.logAction(method, data.payload);
-                    if (data.payload?.id) {
-                        this.sql.exec("UPDATE tasks SET status = 'completed' WHERE id = ?", data.payload.id);
-                        webSocket.send(JSON.stringify({ type: "mutation_success", action: "completeTask" }));
-                        this.broadcastUpdate("tasks");
+                    try {
+                        this.trackUsage('writes');
+                        this.logAction(method, data.payload);
+                        if (data.payload?.id) {
+                            this.sql.exec("UPDATE tasks SET status = 'completed' WHERE id = ?", data.payload.id);
+                            webSocket.send(JSON.stringify({ 
+                                type: "mutation_success", 
+                                action: "completeTask",
+                                updateId: data.updateId
+                            }));
+                            this.broadcastUpdate("tasks");
+                        }
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_error", 
+                            action: "completeTask",
+                            error: e.message,
+                            updateId: data.updateId
+                        }));
                     }
                     break;
 
                 case "deleteTask":
-                    this.trackUsage('writes');
-                    this.logAction(method, data.payload);
-                    if (data.payload?.id) {
-                        this.sql.exec("DELETE FROM tasks WHERE id = ?", data.payload.id);
-                        // Also delete from Vector Index
-                        if (this.env.VECTOR_INDEX) {
-                            this.env.VECTOR_INDEX.deleteByIds([`${this.doId}:${data.payload.id}`]).catch(console.error);
+                    try {
+                        this.trackUsage('writes');
+                        this.logAction(method, data.payload);
+                        if (data.payload?.id) {
+                            this.sql.exec("DELETE FROM tasks WHERE id = ?", data.payload.id);
+                            // Also delete from Vector Index
+                            if (this.env.VECTOR_INDEX) {
+                                this.env.VECTOR_INDEX.deleteByIds([`${this.doId}:${data.payload.id}`]).catch(console.error);
+                            }
+                            webSocket.send(JSON.stringify({ 
+                                type: "mutation_success", 
+                                action: "deleteTask",
+                                updateId: data.updateId
+                            }));
+                            this.broadcastUpdate("tasks");
                         }
-                        webSocket.send(JSON.stringify({ type: "mutation_success", action: "deleteTask" }));
-                        this.broadcastUpdate("tasks");
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_error", 
+                            action: "deleteTask",
+                            error: e.message,
+                            updateId: data.updateId
+                        }));
                     }
                     break;
                 
@@ -353,10 +416,103 @@ export class DataStore extends DurableObject {
     });
   }
 
+  getPrimaryKey(tableName: string): string {
+    // Validate table name first
+    if (!this.isValidTableName(tableName)) {
+      console.warn(`Invalid table name: ${tableName}`);
+      return 'id';
+    }
+    
+    // Get primary key column from table schema
+    try {
+      const columns = this.sql.exec(`PRAGMA table_info("${tableName}")`).toArray();
+      const pkColumn = columns.find((col: any) => col.pk === 1);
+      return pkColumn ? pkColumn.name : 'id'; // Default to 'id' if no PK found
+    } catch (e) {
+      console.warn(`Failed to get primary key for ${tableName}, defaulting to 'id'`);
+      return 'id';
+    }
+  }
+
+  shallowEqual(obj1: any, obj2: any): boolean {
+    const keys1 = Object.keys(obj1);
+    const keys2 = Object.keys(obj2);
+    
+    if (keys1.length !== keys2.length) return false;
+    
+    for (const key of keys1) {
+      if (obj1[key] !== obj2[key]) return false;
+    }
+    
+    return true;
+  }
+
+  calculateDiff(oldData: any[], newData: any[], tableName: string): { added: any[], modified: any[], deleted: any[] } {
+    const pkField = this.getPrimaryKey(tableName);
+    
+    // Check if data has the primary key field
+    if (oldData.length > 0 && !Object.prototype.hasOwnProperty.call(oldData[0], pkField)) {
+      console.warn(`Table ${tableName} rows don't have field '${pkField}', falling back to full data`);
+      return { added: newData, modified: [], deleted: [] };
+    }
+    
+    const oldMap = new Map(oldData.map(row => [row[pkField], row]));
+    const newMap = new Map(newData.map(row => [row[pkField], row]));
+    
+    const added: any[] = [];
+    const modified: any[] = [];
+    const deleted: any[] = [];
+    
+    // Find added and modified
+    for (const [id, newRow] of newMap) {
+      const oldRow = oldMap.get(id);
+      if (!oldRow) {
+        added.push(newRow);
+      } else if (!this.shallowEqual(oldRow, newRow)) {
+        modified.push(newRow);
+      }
+    }
+    
+    // Find deleted
+    for (const [id, oldRow] of oldMap) {
+      if (!newMap.has(id)) {
+        deleted.push(oldRow);
+      }
+    }
+    
+    return { added, modified, deleted };
+  }
+
   broadcastUpdate(table: string) {
+    // Validate table name to prevent SQL injection
+    if (!this.isValidTableName(table)) {
+      console.error(`Invalid table name for broadcast: ${table}`);
+      return;
+    }
+    
     if (this.subscribers.has(table)) {
       const sockets = this.subscribers.get(table)!;
-      const message = JSON.stringify({ event: "update", table });
+      
+      // Fetch current table state
+      const currentData = this.sql.exec(`SELECT * FROM ${table}`).toArray();
+      const previousData = this.tableSnapshots.get(table) || [];
+      
+      // Calculate diff with table name for primary key detection
+      const diff = this.calculateDiff(previousData, currentData, table);
+      
+      // Update snapshot
+      this.tableSnapshots.set(table, currentData);
+      
+      // Only send fullData if this is the initial broadcast (no previous data)
+      const isInitial = previousData.length === 0;
+      
+      // Send diff to subscribers
+      const message = JSON.stringify({ 
+        event: "update", 
+        table,
+        diff,
+        fullData: isInitial ? currentData : undefined // Only send full data on initial load
+      });
       
       for (const socket of sockets) {
         try {

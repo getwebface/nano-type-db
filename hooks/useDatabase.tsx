@@ -1,11 +1,14 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
-import { DatabaseContextType, QueryResult, UpdateEvent, ToastMessage, Schema, UsageStat } from '../types';
+import { DatabaseContextType, QueryResult, UpdateEvent, ToastMessage, Schema, UsageStat, OptimisticUpdate } from '../types';
 
 // Dynamic URL detection for production/dev
 const PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 const HOST = window.location.host; 
 const WORKER_URL = `${PROTOCOL}//${HOST}`; 
 const HTTP_URL = `${window.location.protocol}//${HOST}`;
+
+// Configuration constants
+const OPTIMISTIC_UPDATE_TIMEOUT = 10000; // 10 seconds
 
 const DatabaseContext = createContext<DatabaseContextType | null>(null);
 
@@ -18,12 +21,13 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const [schema, setSchema] = useState<Schema | null>(null);
     const [usageStats, setUsageStats] = useState<UsageStat[]>([]);
     const currentRoomIdRef = useRef<string>("");
+    const pendingOptimisticUpdates = useRef<Map<string, OptimisticUpdate>>(new Map());
     
     const subscribedTablesRef = useRef<Set<string>>(new Set());
 
-    const addToast = (message: string) => {
+    const addToast = (message: string, type: 'success' | 'info' | 'error' = 'info') => {
         const id = Math.random().toString(36).substring(7);
-        setToasts(prev => [...prev, { id, message, type: 'info' }]);
+        setToasts(prev => [...prev, { id, message, type }]);
         setTimeout(() => {
             setToasts(prev => prev.filter(t => t.id !== id));
         }, 3000);
@@ -83,11 +87,34 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 } else {
                     setLastResult(data);
                 }
+            } else if (data.type === 'mutation_success') {
+                // Remove optimistic update from pending queue on success
+                const updateId = data.updateId;
+                if (updateId && pendingOptimisticUpdates.current.has(updateId)) {
+                    pendingOptimisticUpdates.current.delete(updateId);
+                }
+                addToast(`Action '${data.action}' completed`, 'success');
+            } else if (data.type === 'mutation_error') {
+                // Rollback optimistic update on error
+                const updateId = data.updateId;
+                if (updateId && pendingOptimisticUpdates.current.has(updateId)) {
+                    const update = pendingOptimisticUpdates.current.get(updateId)!;
+                    update.rollback();
+                    pendingOptimisticUpdates.current.delete(updateId);
+                    addToast(`Action '${data.action}' failed - rolled back`, 'error');
+                }
             } else if (data.event === 'update') {
                 addToast(`Table '${data.table}' updated`);
-                window.dispatchEvent(new CustomEvent('db-update', { detail: { table: data.table } }));
+                // Pass diff data with the event
+                window.dispatchEvent(new CustomEvent('db-update', { 
+                    detail: { 
+                        table: data.table,
+                        diff: data.diff,
+                        fullData: data.fullData
+                    } 
+                }));
             } else if (data.error) {
-                addToast(`Error: ${data.error}`);
+                addToast(`Error: ${data.error}`, 'error');
             }
         };
 
@@ -137,6 +164,42 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     }, [socket, refreshSchema, refreshUsage]);
 
+    const performOptimisticAction = useCallback((action: string, payload: any, optimisticUpdate: () => void, rollback: () => void) => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        
+        // Generate unique ID for this update using crypto API
+        const updateId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).substring(7)}`;
+        
+        // Apply optimistic update immediately
+        optimisticUpdate();
+        
+        // Store rollback function
+        pendingOptimisticUpdates.current.set(updateId, {
+            id: updateId,
+            action,
+            payload,
+            rollback,
+            timestamp: Date.now()
+        });
+        
+        // Send to server with updateId
+        socket.send(JSON.stringify({
+            action,
+            payload,
+            updateId
+        }));
+        
+        // Auto-rollback after timeout if no response
+        setTimeout(() => {
+            if (pendingOptimisticUpdates.current.has(updateId)) {
+                const update = pendingOptimisticUpdates.current.get(updateId)!;
+                update.rollback();
+                pendingOptimisticUpdates.current.delete(updateId);
+                addToast(`Action '${action}' timed out - rolled back`, 'error');
+            }
+        }, OPTIMISTIC_UPDATE_TIMEOUT);
+    }, [socket]);
+
     const subscribe = useCallback((table: string) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
         subscribedTablesRef.current.add(table);
@@ -144,7 +207,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, [socket]);
 
     return (
-        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage }}>
+        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction }}>
             {children}
         </DatabaseContext.Provider>
     );
@@ -171,7 +234,57 @@ export const useRealtimeQuery = (tableName: string) => {
         const handleUpdate = (e: Event) => {
             const customEvent = e as CustomEvent;
             if (customEvent.detail.table === tableName) {
-                runQuery(`SELECT * FROM ${tableName}`, tableName);
+                const { diff, fullData } = customEvent.detail;
+                
+                // If we have diff data, apply it instead of re-fetching
+                if (diff && (diff.added.length > 0 || diff.modified.length > 0 || diff.deleted.length > 0)) {
+                    setData(currentData => {
+                        // Detect primary key field from first row (try 'id' first, then any field ending with 'id')
+                        const sampleRow = currentData[0] || diff.added[0] || diff.modified[0] || diff.deleted[0];
+                        if (!sampleRow) return currentData;
+                        
+                        const pkField = Object.prototype.hasOwnProperty.call(sampleRow, 'id')
+                            ? 'id' 
+                            : Object.keys(sampleRow).find(k => k.toLowerCase().endsWith('id')) || 'id';
+                        
+                        // If rows don't have the detected PK field, fall back to full data
+                        if (!Object.prototype.hasOwnProperty.call(sampleRow, pkField)) {
+                            return fullData || currentData;
+                        }
+                        
+                        // Create a map for fast lookups
+                        const dataMap = new Map(currentData.map(row => [row[pkField], row]));
+                        
+                        // Remove deleted items
+                        diff.deleted.forEach((item: any) => {
+                            if (item[pkField] !== undefined) {
+                                dataMap.delete(item[pkField]);
+                            }
+                        });
+                        
+                        // Add/update modified items
+                        diff.modified.forEach((item: any) => {
+                            if (item[pkField] !== undefined) {
+                                dataMap.set(item[pkField], item);
+                            }
+                        });
+                        
+                        // Add new items
+                        diff.added.forEach((item: any) => {
+                            if (item[pkField] !== undefined) {
+                                dataMap.set(item[pkField], item);
+                            }
+                        });
+                        
+                        return Array.from(dataMap.values());
+                    });
+                } else if (fullData) {
+                    // Fallback to full data if diff is not available or empty
+                    setData(fullData);
+                } else {
+                    // Fallback to re-fetching if no diff or fullData
+                    runQuery(`SELECT * FROM ${tableName}`, tableName);
+                }
             }
         };
 
