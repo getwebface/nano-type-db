@@ -302,17 +302,18 @@ export class DataStore extends DurableObject {
                         
                         // Input validation
                         const title = data.payload?.title;
-                        if (!title || typeof title !== 'string') {
+                        if (!title || typeof title !== 'string' || title.trim().length === 0) {
                             throw new Error('Invalid title: must be a non-empty string');
                         }
-                        if (title.length > 500) {
+                        const trimmedTitle = title.trim();
+                        if (trimmedTitle.length > 500) {
                             throw new Error('Title too long: maximum 500 characters');
                         }
                         
                         this.logAction(method, data.payload);
                         
                         // 1. Insert into DB (Primary operation - must succeed)
-                        const result = this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending') RETURNING *", title.trim()).toArray();
+                        const result = this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending') RETURNING *", trimmedTitle).toArray();
                         const newTask = result[0];
 
                         // 2. Generate Embedding & Store (Secondary operation - best effort)
@@ -366,7 +367,7 @@ export class DataStore extends DurableObject {
                         
                         // Input validation
                         const completeId = data.payload?.id;
-                        if (!completeId || typeof completeId !== 'number' || completeId < 1) {
+                        if (!completeId || typeof completeId !== 'number' || !Number.isInteger(completeId) || completeId < 1) {
                             throw new Error('Invalid id: must be a positive integer');
                         }
                         
@@ -403,7 +404,7 @@ export class DataStore extends DurableObject {
                         
                         // Input validation
                         const deleteId = data.payload?.id;
-                        if (!deleteId || typeof deleteId !== 'number' || deleteId < 1) {
+                        if (!deleteId || typeof deleteId !== 'number' || !Number.isInteger(deleteId) || deleteId < 1) {
                             throw new Error('Invalid id: must be a positive integer');
                         }
                         

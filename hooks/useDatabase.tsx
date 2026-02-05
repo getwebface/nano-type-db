@@ -330,7 +330,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         if (sqlUpper.startsWith('UPDATE TASKS') && sqlUpper.includes("SET STATUS = 'COMPLETED'")) {
             const match = sql.match(/WHERE ID\s*=\s*(\d+)/i);
             if (match) {
-                const id = parseInt(match[1]);
+                const id = parseInt(match[1], 10);
                 socket.send(JSON.stringify({
                     action: 'completeTask',
                     payload: { id }
@@ -343,7 +343,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         if (sqlUpper.startsWith('DELETE FROM TASKS')) {
             const match = sql.match(/WHERE ID\s*=\s*(\d+)/i);
             if (match) {
-                const id = parseInt(match[1]);
+                const id = parseInt(match[1], 10);
                 socket.send(JSON.stringify({
                     action: 'deleteTask',
                     payload: { id }
@@ -354,7 +354,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         
         // Reject any other raw SQL for security
         console.error('Rejected raw SQL query for security:', sql);
-        addToast('Raw SQL queries are disabled. Please use the provided methods.', 'error');
+        addToast('Raw SQL queries are disabled for security. Use RPC methods like listTasks, createTask, completeTask, or deleteTask instead.', 'error');
 
         // Refresh usage stats after queries (demo purpose)
         setTimeout(refreshUsage, 1000);
@@ -449,6 +449,14 @@ export const useRealtimeQuery = (tableName: string) => {
     const { runQuery, subscribe, lastResult, isConnected, socket } = useDatabase();
     const [data, setData] = useState<any[]>([]);
 
+    // Helper function to detect primary key field
+    const detectPrimaryKey = (sampleRow: any): string => {
+        if (!sampleRow) return 'id';
+        return Object.prototype.hasOwnProperty.call(sampleRow, 'id')
+            ? 'id' 
+            : Object.keys(sampleRow).find(k => k.toLowerCase().endsWith('id')) || 'id';
+    };
+
     useEffect(() => {
         if (isConnected && tableName && socket && socket.readyState === WebSocket.OPEN) {
             subscribe(tableName);
@@ -479,9 +487,7 @@ export const useRealtimeQuery = (tableName: string) => {
                         const sampleRow = currentData[0] || row;
                         if (!sampleRow) return currentData;
                         
-                        const pkField = Object.prototype.hasOwnProperty.call(sampleRow, 'id')
-                            ? 'id' 
-                            : Object.keys(sampleRow).find(k => k.toLowerCase().endsWith('id')) || 'id';
+                        const pkField = detectPrimaryKey(sampleRow);
                         
                         if (!Object.prototype.hasOwnProperty.call(row, pkField)) {
                             // If no PK field, just refresh
@@ -510,13 +516,11 @@ export const useRealtimeQuery = (tableName: string) => {
                 // Legacy support: Handle diff-based updates (old format)
                 else if (diff && (diff.added.length > 0 || diff.modified.length > 0 || diff.deleted.length > 0)) {
                     setData(currentData => {
-                        // Detect primary key field from first row (try 'id' first, then any field ending with 'id')
+                        // Detect primary key field from first row
                         const sampleRow = currentData[0] || diff.added[0] || diff.modified[0] || diff.deleted[0];
                         if (!sampleRow) return currentData;
                         
-                        const pkField = Object.prototype.hasOwnProperty.call(sampleRow, 'id')
-                            ? 'id' 
-                            : Object.keys(sampleRow).find(k => k.toLowerCase().endsWith('id')) || 'id';
+                        const pkField = detectPrimaryKey(sampleRow);
                         
                         // If rows don't have the detected PK field, fall back to full data
                         if (!Object.prototype.hasOwnProperty.call(sampleRow, pkField)) {
