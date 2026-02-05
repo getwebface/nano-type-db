@@ -323,7 +323,7 @@ export class DataStore extends DurableObject {
                             // Use Promise for async operation without blocking the response
                             (async () => {
                                 try {
-                                    const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [title] });
+                                    const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [trimmedTitle] });
                                     const values = embeddings.data[0];
                                     if (values) {
                                         await this.env.VECTOR_INDEX.upsert([{ 

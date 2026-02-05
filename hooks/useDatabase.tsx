@@ -359,7 +359,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         // Refresh usage stats after queries (demo purpose)
         setTimeout(refreshUsage, 1000);
 
-    }, [socket, refreshUsage]);
+    }, [socket, refreshUsage, addToast]);
 
     const performOptimisticAction = useCallback((action: string, payload: any, optimisticUpdate: () => void, rollback: () => void) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -572,7 +572,7 @@ export const useRealtimeQuery = (tableName: string) => {
 
         window.addEventListener('db-update', handleUpdate);
         return () => window.removeEventListener('db-update', handleUpdate);
-    }, [tableName, socket]);
+    }, [tableName, socket, runQuery]);
 
     useEffect(() => {
         if (lastResult && lastResult.originalSql) {
