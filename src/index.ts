@@ -72,6 +72,59 @@ export default {
 
     // --- Backend Logic Starts Here ---
     
+    // Handle Global Query endpoint (before room-specific logic)
+    if (url.pathname === "/global-query") {
+        // Verify authentication
+        let session;
+        try {
+            session = await auth.api.getSession({ headers: request.headers });
+        } catch (e: any) {
+            return new Response(`Auth Error: ${e.message}`, { status: 500 });
+        }
+        
+        if (!session) {
+            return new Response("Unauthorized. Please log in.", { status: 401 });
+        }
+        
+        // Parse query parameters
+        const queryType = url.searchParams.get("type");
+        const roomPattern = url.searchParams.get("room_pattern") || "*";
+        
+        if (request.method === "POST") {
+            const body = await request.json() as { sql: string; rooms?: string[] };
+            
+            // Execute query across multiple rooms
+            const rooms = body.rooms || []; // List of room IDs to query
+            const results = await Promise.all(
+                rooms.map(async (roomId: string) => {
+                    try {
+                        const id = env.DATA_STORE.idFromName(roomId);
+                        const stub = env.DATA_STORE.get(id);
+                        const response = await stub.fetch(new Request(`http://do/query?sql=${encodeURIComponent(body.sql)}`));
+                        const data = await response.json();
+                        return { roomId, data, success: true };
+                    } catch (error: any) {
+                        return { roomId, error: error.message, success: false };
+                    }
+                })
+            );
+            
+            // Aggregate results
+            const aggregated = results
+                .filter(r => r.success)
+                .flatMap(r => (r as any).data);
+            
+            return Response.json({
+                total: aggregated.length,
+                rooms: results.length,
+                data: aggregated,
+                errors: results.filter(r => !r.success)
+            });
+        }
+        
+        return new Response("Method not allowed", { status: 405 });
+    }
+    
     // Look for room_id in query params.
     const roomId = url.searchParams.get("room_id");
 
