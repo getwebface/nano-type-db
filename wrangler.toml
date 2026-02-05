@@ -10,7 +10,7 @@ class_name = "NanoStore" # Changed from DataStore to force SQLite creation
 
 # Database migrations
 [[migrations]]
-tag = "v1"
+tag = "v2"
 new_sqlite_classes = ["NanoStore"] # Must use new_sqlite_classes for SQL support
 
 # Backups
