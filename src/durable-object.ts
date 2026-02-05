@@ -213,6 +213,19 @@ const MIGRATIONS = [
           // Debounced state table for local aggregation
           sql.exec(`CREATE TABLE IF NOT EXISTS _debounced_state (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)`);
       }
+  },
+  {
+      version: 5,
+      up: (sql: any) => {
+          // Add vector_status column to tasks table for vector consistency tracking
+          // Values: 'pending' | 'indexed' | 'failed'
+          try {
+              sql.exec("ALTER TABLE tasks ADD COLUMN vector_status TEXT DEFAULT 'pending'");
+          } catch (e) {
+              // Column might already exist
+              console.warn("Migration v5 warning:", e);
+          }
+      }
   }
 ];
 
@@ -310,14 +323,14 @@ export class NanoStore extends DurableObject {
   }
 
   logAction(action: string, payload: any) {
-      try {
-          this.sql.exec(
-              `INSERT INTO _audit_log (action, payload, timestamp) VALUES (?, ?, datetime('now'))`,
-              action, JSON.stringify(payload)
-          );
-      } catch (e) {
-          console.error("Audit logging failed", e);
-      }
+      // Log Streaming Strategy: Use Cloudflare Observability instead of filling up storage
+      // This prevents storage limits by streaming logs to Cloudflare's logging infrastructure
+      console.log(JSON.stringify({ 
+          type: 'audit_log',
+          action, 
+          payload, 
+          timestamp: new Date().toISOString() 
+      }));
   }
 
   /**
@@ -350,8 +363,8 @@ export class NanoStore extends DurableObject {
           // For tasks table, replicate with room_id for multi-tenancy
           if (table === 'tasks') {
             await this.env.READ_REPLICA.prepare(
-              `INSERT OR REPLACE INTO tasks (id, title, status, room_id) VALUES (?, ?, ?, ?)`
-            ).bind(data.id, data.title, data.status, roomId).run();
+              `INSERT OR REPLACE INTO tasks (id, title, status, room_id, vector_status) VALUES (?, ?, ?, ?, ?)`
+            ).bind(data.id, data.title, data.status, roomId, data.vector_status || 'pending').run();
           }
           break;
 
@@ -505,8 +518,8 @@ export class NanoStore extends DurableObject {
       // Use D1 batch API for better performance
       const statements = tasks.map(task => 
         this.env.READ_REPLICA.prepare(
-          `INSERT OR REPLACE INTO tasks (id, title, status, room_id) VALUES (?, ?, ?, ?)`
-        ).bind(task.id, task.title, task.status, roomId)
+          `INSERT OR REPLACE INTO tasks (id, title, status, room_id, vector_status) VALUES (?, ?, ?, ?, ?)`
+        ).bind(task.id, task.title, task.status, roomId, task.vector_status || 'pending')
       );
 
       // Execute all statements in a batch
@@ -668,38 +681,41 @@ export class NanoStore extends DurableObject {
     } catch (e) {
       console.error("Failed to send reset message:", e);
     }
+  }
 
-    webSocket.addEventListener("message", async (event) => {
-      try {
-        const data = JSON.parse(event.data as string) as WebSocketMessage;
+  // Native Cloudflare Hibernation API: Class-based WebSocket handlers
+  // These allow the DO to fully sleep between messages instead of staying in memory
+  async webSocketMessage(webSocket: WebSocket, message: string | ArrayBuffer) {
+    try {
+      const data = JSON.parse(message as string) as WebSocketMessage;
 
-        // Handle ping/pong for heartbeat
-        if (data.action === "ping") {
-          try {
-            webSocket.send(JSON.stringify({ type: "pong" }));
-          } catch (e) {
-            console.error("Failed to send pong:", e);
-          }
-          return;
+      // Handle ping/pong for heartbeat
+      if (data.action === "ping") {
+        try {
+          webSocket.send(JSON.stringify({ type: "pong" }));
+        } catch (e) {
+          console.error("Failed to send pong:", e);
         }
+        return;
+      }
 
-        if (data.action === "subscribe" && data.table) {
-          if (!this.subscribers.has(data.table)) {
-            this.subscribers.set(data.table, new Set());
-          }
-          this.subscribers.get(data.table)!.add(webSocket);
+      if (data.action === "subscribe" && data.table) {
+        if (!this.subscribers.has(data.table)) {
+          this.subscribers.set(data.table, new Set());
         }
+        this.subscribers.get(data.table)!.add(webSocket);
+      }
 
-        if (data.action === "query" && data.sql) {
-          // SECURITY: Disable raw SQL queries from client to prevent SQL injection
-          webSocket.send(JSON.stringify({ 
-            type: "query_error",
-            error: "Raw SQL queries are disabled for security. Please use RPC methods."
-          }));
-          return;
-        }
+      if (data.action === "query" && data.sql) {
+        // SECURITY: Disable raw SQL queries from client to prevent SQL injection
+        webSocket.send(JSON.stringify({ 
+          type: "query_error",
+          error: "Raw SQL queries are disabled for security. Please use RPC methods."
+        }));
+        return;
+      }
 
-        if (data.action === "rpc" || (data.action as string) === "createTask") {
+      if (data.action === "rpc" || (data.action as string) === "createTask") {
             const method = data.method || data.action;
             
             // Log the attempt
@@ -724,18 +740,18 @@ export class NanoStore extends DurableObject {
                         this.logAction(method, data.payload);
                         
                         // 1. Insert into DB (Primary operation - must succeed)
-                        const result = this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending') RETURNING *", trimmedTitle).toArray();
+                        // Set vector_status to 'pending' initially (will be updated to 'indexed' or 'failed')
+                        const result = this.sql.exec("INSERT INTO tasks (title, status, vector_status) VALUES (?, 'pending', 'pending') RETURNING *", trimmedTitle).toArray();
                         const newTask = result[0];
 
                         // 2. Replicate to D1 for distributed reads (async, non-blocking)
                         this.ctx.waitUntil(this.replicateToD1('tasks', 'insert', newTask));
 
                         // 3. Generate Embedding & Store (Secondary operation - best effort)
-                        // Note: This is async and may fail. Vector search may miss this task until
-                        // a background job re-indexes it. For production, use a queue system.
+                        // Vector Consistency: Track status in database to allow retry jobs
                         if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
-                            // Use Promise for async operation without blocking the response
-                            (async () => {
+                            // Use ctx.waitUntil for async operation without blocking the response
+                            this.ctx.waitUntil((async () => {
                                 try {
                                     const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [trimmedTitle] });
                                     const values = embeddings.data[0];
@@ -746,14 +762,16 @@ export class NanoStore extends DurableObject {
                                             metadata: { doId: this.doId, taskId: newTask.id } 
                                         }]);
                                         this.trackUsage('ai_ops');
+                                        // Update status to 'indexed' on success
+                                        this.sql.exec("UPDATE tasks SET vector_status = 'indexed' WHERE id = ?", newTask.id);
                                         console.log(`Vector indexed for task ${newTask.id}`);
                                     }
                                 } catch (e: any) {
-                                    // Log error but don't fail the task creation
+                                    // Update status to 'failed' on error (allows future retry)
+                                    this.sql.exec("UPDATE tasks SET vector_status = 'failed' WHERE id = ?", newTask.id);
                                     console.error(`AI Embedding failed for task ${newTask.id}:`, e.message);
-                                    // TODO: Add to a retry queue for production systems
                                 }
-                            })();
+                            })());
                         }
 
                         webSocket.send(JSON.stringify({ 
@@ -912,8 +930,14 @@ export class NanoStore extends DurableObject {
 
                 case "getAuditLog":
                      this.trackUsage('reads');
-                     const logs = this.sql.exec("SELECT * FROM _audit_log ORDER BY timestamp DESC LIMIT 50").toArray();
-                     webSocket.send(JSON.stringify({ type: "query_result", data: logs, originalSql: "getAuditLog" }));
+                     // Audit logs are now streamed to Cloudflare Observability via console.log
+                     // Return empty array with info message
+                     webSocket.send(JSON.stringify({ 
+                         type: "query_result", 
+                         data: [], 
+                         originalSql: "getAuditLog",
+                         info: "Audit logs are now streamed to Cloudflare Observability. Use Cloudflare Dashboard to view logs."
+                     }));
                      break;
 
                 case "listTasks": {
@@ -1158,30 +1182,29 @@ export class NanoStore extends DurableObject {
                     webSocket.send(JSON.stringify({ error: `Unknown RPC method: ${method}` }));
             }
         }
-        
-        if (data.action === "mutate") {
-             webSocket.send(JSON.stringify({ error: "Raw mutations are disabled. Use RPC actions." }));
-        }
-
-      } catch (err: any) {
-        console.error("WebSocket message error:", err);
-        try {
-          webSocket.send(JSON.stringify({ error: err.message }));
-        } catch (sendError) {
-          console.error("Failed to send error message:", sendError);
-        }
+      
+      if (data.action === "mutate") {
+           webSocket.send(JSON.stringify({ error: "Raw mutations are disabled. Use RPC actions." }));
       }
-    });
 
-    webSocket.addEventListener("close", (event) => {
-      console.log("WebSocket closed:", event.code, event.reason);
-      this.subscribers.forEach((set) => set.delete(webSocket));
-    });
+    } catch (err: any) {
+      console.error("WebSocket message error:", err);
+      try {
+        webSocket.send(JSON.stringify({ error: err.message }));
+      } catch (sendError) {
+        console.error("Failed to send error message:", sendError);
+      }
+    }
+  }
 
-    webSocket.addEventListener("error", (event) => {
-      console.error("WebSocket error:", event);
-      this.subscribers.forEach((set) => set.delete(webSocket));
-    });
+  webSocketClose(webSocket: WebSocket, code: number, reason: string, wasClean: boolean) {
+    console.log("WebSocket closed:", code, reason);
+    this.subscribers.forEach((set) => set.delete(webSocket));
+  }
+
+  webSocketError(webSocket: WebSocket, error: unknown) {
+    console.error("WebSocket error:", error);
+    this.subscribers.forEach((set) => set.delete(webSocket));
   }
 
   getPrimaryKey(tableName: string): string {
