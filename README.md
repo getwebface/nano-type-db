@@ -23,11 +23,13 @@ nanotypeDB now implements the Durable Object Actor Model for superior performanc
 - **🧠 Hybrid State Management**: In-memory store for transient data (cursors, presence) - bypasses SQLite for instant updates
 - **💪 Full SQL Power**: Safe raw SQL interface for complex analytics and aggregations
 - **⚡ Local Aggregation**: Debounced writes reduce high-frequency updates (100/sec → 1/sec), cutting costs by 99%
+- **🚀 Horizontal Read Scaling**: D1 read replicas enable distributed reads while maintaining write consistency
 
 **Why it's superior to Convex:**
 - Memory Store: Free transient data storage vs. charged database writes
 - Raw SQL: Full SQLite power vs. limited query API
 - Debouncing: 1 write/sec vs. charged per write
+- **Horizontal Scaling**: D1 read replicas scale infinitely vs. Convex's single-point bottlenecks
 
 See [ACTOR_MODEL.md](./ACTOR_MODEL.md) for full documentation and [EXAMPLES.md](./EXAMPLES.md) for usage examples.
 

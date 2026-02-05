@@ -24,6 +24,16 @@ binding = "AUTH_DB"
 database_name = "nanotype-auth"
 database_id = "d1b3a27b-a1de-43ab-ba7f-5ebda88b9807"
 
+<<<<<<< copilot/offload-read-queries
+# Read Replica Database (D1) - For distributed read operations
+# IMPORTANT: Replace 'placeholder-read-replica-id' with your actual database ID
+# Run: wrangler d1 create nanotype-read-replica
+# Then copy the database_id from the output
+[[d1_databases]]
+binding = "READ_REPLICA"
+database_name = "nanotype-read-replica"
+database_id = "placeholder-read-replica-id"
+=======
 # Observability Configuration
 [observability]
 enabled = false
@@ -37,6 +47,7 @@ invocation_logs = true
 [observability.traces]
 enabled = false
 head_sampling_rate = 1
+>>>>>>> main
 
 # Vector Index & AI
 [[vectorize]]

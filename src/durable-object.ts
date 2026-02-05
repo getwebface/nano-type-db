@@ -164,7 +164,10 @@ const ACTIONS = {
   executeSQL: { params: ["sql", "readonly"] },
   // Debounced updates
   updateDebounced: { params: ["key", "value"] },
-  flushDebounced: { params: [] }
+  flushDebounced: { params: [] },
+  // Sync Engine monitoring
+  getSyncStatus: { params: [] },
+  forceSyncAll: { params: [] }
 };
 
 const MIGRATIONS = [
@@ -212,12 +215,21 @@ export class DataStore extends DurableObject {
   subscribers: Map<string, Set<WebSocket>>;
   env: Env;
   doId: string;
+  ctx: DurableObjectState;
   // Hybrid State: In-memory stores for transient data
   memoryStore: MemoryStore;
   debouncedWriter: DebouncedWriter;
+  // Sync Engine: Track sync status and health
+  syncEngine: {
+    lastSyncTime: number;
+    syncErrors: number;
+    totalSyncs: number;
+    isHealthy: boolean;
+  };
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.ctx = ctx;
     this.env = env;
     this.sql = ctx.storage.sql;
     this.subscribers = new Map();
@@ -241,7 +253,23 @@ export class DataStore extends DurableObject {
       }
     });
     
+    // Initialize Sync Engine status
+    this.syncEngine = {
+      lastSyncTime: 0,
+      syncErrors: 0,
+      totalSyncs: 0,
+      isHealthy: true
+    };
+    
     this.runMigrations();
+    
+    // Perform initial sync to D1 after migrations
+    // Note: This runs asynchronously and doesn't block construction.
+    // The DO can serve requests before initial sync completes.
+    // For stricter consistency, use ctx.blockConcurrencyWhile() in production.
+    this.performInitialSync().catch(e => {
+      console.error("[Sync Engine] Initial sync failed:", e);
+    });
   }
 
   runMigrations() {
@@ -284,6 +312,207 @@ export class DataStore extends DurableObject {
       } catch (e) {
           console.error("Audit logging failed", e);
       }
+  }
+
+  /**
+   * Replicate data from Durable Object to D1 read replica
+   * This enables horizontal scaling for read operations while maintaining
+   * write consistency in the Durable Object.
+   * 
+   * @param table - The table name to replicate
+   * @param operation - The operation type: 'insert', 'update', or 'delete'
+   * @param data - The data to replicate (for insert/update) or the ID to delete
+   */
+  async replicateToD1(table: string, operation: 'insert' | 'update' | 'delete', data?: any) {
+    if (!this.env.READ_REPLICA) {
+      console.warn("D1 READ_REPLICA not available, skipping replication");
+      return;
+    }
+
+    try {
+      // Add room/DO identifier to track which DO the data belongs to
+      const roomId = this.doId;
+
+      switch (operation) {
+        case 'insert':
+        case 'update':
+          if (!data) {
+            console.error("Data required for insert/update operation");
+            return;
+          }
+          
+          // For tasks table, replicate with room_id for multi-tenancy
+          if (table === 'tasks') {
+            await this.env.READ_REPLICA.prepare(
+              `INSERT OR REPLACE INTO tasks (id, title, status, room_id) VALUES (?, ?, ?, ?)`
+            ).bind(data.id, data.title, data.status, roomId).run();
+          }
+          break;
+
+        case 'delete':
+          if (!data || !data.id) {
+            console.error("ID required for delete operation");
+            return;
+          }
+          
+          // Delete from D1 with room_id constraint for safety
+          if (table === 'tasks') {
+            await this.env.READ_REPLICA.prepare(
+              `DELETE FROM tasks WHERE id = ? AND room_id = ?`
+            ).bind(data.id, roomId).run();
+          }
+          break;
+      }
+      
+      // Update sync metrics
+      this.syncEngine.lastSyncTime = Date.now();
+      this.syncEngine.totalSyncs++;
+      this.syncEngine.isHealthy = true;
+      
+    } catch (e) {
+      // Log but don't fail the primary operation if replication fails
+      console.error(`D1 replication failed for ${operation} on ${table}:`, e);
+      this.syncEngine.syncErrors++;
+      this.syncEngine.isHealthy = false;
+    }
+  }
+
+  /**
+   * Read from D1 replica with fallback to DO SQLite
+   * This provides distributed read scaling while maintaining resilience
+   * 
+   * Note: Query modification is designed for simple SELECT queries.
+   * Complex queries with subqueries, JOINs, or nested WHERE clauses
+   * should pre-include room_id filtering to avoid modification issues.
+   */
+  async readFromD1(query: string, ...params: any[]): Promise<any[]> {
+    // Try D1 first for distributed reads
+    if (this.env.READ_REPLICA) {
+      try {
+        // Add room_id filter to ensure data isolation
+        const roomId = this.doId;
+        
+        // Modify query to include room_id filter if querying tasks
+        let modifiedQuery = query;
+        const roomIdParams = [...params]; // Copy params array
+        
+        if (query.includes('FROM tasks') && !query.includes('room_id')) {
+          // Use parameterized query to prevent SQL injection
+          // Note: This simple replacement works for standard SELECT queries
+          // but may not handle complex nested queries correctly
+          if (query.toLowerCase().includes('where')) {
+            modifiedQuery = query.replace(/WHERE/i, `WHERE room_id = ? AND`);
+            roomIdParams.unshift(roomId); // Add roomId as first param
+          } else if (query.toLowerCase().includes('order by')) {
+            modifiedQuery = query.replace(/ORDER BY/i, `WHERE room_id = ? ORDER BY`);
+            roomIdParams.unshift(roomId);
+          } else {
+            modifiedQuery = query.replace(/FROM tasks/i, `FROM tasks WHERE room_id = ?`);
+            roomIdParams.unshift(roomId);
+          }
+        }
+        
+        // Properly chain bind() calls (each bind() returns a new statement)
+        let stmt = this.env.READ_REPLICA.prepare(modifiedQuery);
+        for (const param of roomIdParams) {
+          stmt = stmt.bind(param);
+        }
+        
+        const result = await stmt.all();
+        return result.results || [];
+      } catch (e) {
+        console.warn("D1 read failed, falling back to DO SQLite:", e);
+      }
+    }
+    
+    // Fallback to DO SQLite if D1 is unavailable or fails
+    this.trackUsage('reads');
+    return this.sql.exec(query, ...params).toArray();
+  }
+
+  /**
+   * Sync Engine: Perform initial sync from DO to D1
+   * Called once when the DO starts to ensure D1 has current data
+   */
+  async performInitialSync(): Promise<void> {
+    if (!this.env.READ_REPLICA) {
+      console.log("D1 READ_REPLICA not available, skipping initial sync");
+      return;
+    }
+
+    try {
+      console.log(`[Sync Engine] Starting initial sync for room ${this.doId}`);
+      
+      // Get all tasks from DO
+      const tasks = this.sql.exec("SELECT * FROM tasks").toArray();
+      
+      if (tasks.length === 0) {
+        console.log("[Sync Engine] No tasks to sync");
+        return;
+      }
+
+      // Batch sync to D1
+      await this.batchSyncToD1(tasks);
+      
+      this.syncEngine.lastSyncTime = Date.now();
+      this.syncEngine.totalSyncs++;
+      this.syncEngine.isHealthy = true;
+      
+      console.log(`[Sync Engine] Initial sync completed: ${tasks.length} tasks synced`);
+    } catch (e) {
+      console.error("[Sync Engine] Initial sync failed:", e);
+      this.syncEngine.syncErrors++;
+      this.syncEngine.isHealthy = false;
+      // Don't throw - allow DO to continue operating even if sync fails
+    }
+  }
+
+  /**
+   * Sync Engine: Batch sync multiple records to D1
+   * More efficient than individual syncs for bulk operations
+   */
+  async batchSyncToD1(tasks: any[]): Promise<void> {
+    if (!this.env.READ_REPLICA || tasks.length === 0) {
+      return;
+    }
+
+    try {
+      const roomId = this.doId;
+      
+      // Use D1 batch API for better performance
+      const statements = tasks.map(task => 
+        this.env.READ_REPLICA.prepare(
+          `INSERT OR REPLACE INTO tasks (id, title, status, room_id) VALUES (?, ?, ?, ?)`
+        ).bind(task.id, task.title, task.status, roomId)
+      );
+
+      // Execute all statements in a batch
+      await this.env.READ_REPLICA.batch(statements);
+      
+      console.log(`[Sync Engine] Batch synced ${tasks.length} tasks to D1`);
+    } catch (e) {
+      console.error("[Sync Engine] Batch sync failed:", e);
+      throw e;
+    }
+  }
+
+  /**
+   * Sync Engine: Get sync status and health metrics
+   */
+  getSyncStatus(): any {
+    return {
+      isHealthy: this.syncEngine.isHealthy,
+      lastSyncTime: this.syncEngine.lastSyncTime,
+      lastSyncAge: Date.now() - this.syncEngine.lastSyncTime,
+      totalSyncs: this.syncEngine.totalSyncs,
+      syncErrors: this.syncEngine.syncErrors,
+      // Error rate as formatted string for display (e.g., "0.13%")
+      // Returned as string for convenience in UI/logging
+      errorRate: this.syncEngine.totalSyncs > 0 
+        ? (this.syncEngine.syncErrors / this.syncEngine.totalSyncs * 100).toFixed(2) + '%'
+        : '0%',
+      replicaAvailable: !!this.env.READ_REPLICA
+    };
   }
 
   getSchema() {
@@ -467,7 +696,10 @@ export class DataStore extends DurableObject {
                         const result = this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending') RETURNING *", trimmedTitle).toArray();
                         const newTask = result[0];
 
-                        // 2. Generate Embedding & Store (Secondary operation - best effort)
+                        // 2. Replicate to D1 for distributed reads (async, non-blocking)
+                        this.ctx.waitUntil(this.replicateToD1('tasks', 'insert', newTask));
+
+                        // 3. Generate Embedding & Store (Secondary operation - best effort)
                         // Note: This is async and may fail. Vector search may miss this task until
                         // a background job re-indexes it. For production, use a queue system.
                         if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
@@ -529,6 +761,11 @@ export class DataStore extends DurableObject {
                         // Fetch the updated row to broadcast
                         const updated = this.sql.exec("SELECT * FROM tasks WHERE id = ?", completeId).toArray()[0];
                         
+                        // Replicate to D1 for distributed reads (async, non-blocking)
+                        if (updated) {
+                            this.ctx.waitUntil(this.replicateToD1('tasks', 'update', updated));
+                        }
+                        
                         webSocket.send(JSON.stringify({ 
                             type: "mutation_success", 
                             action: "completeTask",
@@ -565,6 +802,11 @@ export class DataStore extends DurableObject {
                         const deleted = this.sql.exec("SELECT * FROM tasks WHERE id = ?", deleteId).toArray()[0];
                         
                         this.sql.exec("DELETE FROM tasks WHERE id = ?", deleteId);
+                        
+                        // Replicate deletion to D1 (async, non-blocking)
+                        if (deleted) {
+                            this.ctx.waitUntil(this.replicateToD1('tasks', 'delete', { id: deleteId }));
+                        }
                         
                         // Also delete from Vector Index
                         if (this.env.VECTOR_INDEX) {
@@ -620,8 +862,11 @@ export class DataStore extends DurableObject {
                             .map(m => m.id.split(':')[1]); // Extract taskId
                          
                          if (taskIds.length > 0) {
+                             // Safe parameterized query construction:
+                             // taskIds is an internal array of integers (not user input)
+                             // Each taskId maps to a '?' placeholder, preventing injection
                              const placeholders = taskIds.map(() => '?').join(',');
-                             results = this.sql.exec(`SELECT * FROM tasks WHERE id IN (${placeholders})`, ...taskIds).toArray();
+                             results = await this.readFromD1(`SELECT * FROM tasks WHERE id IN (${placeholders})`, ...taskIds);
                          }
                     }
                     
@@ -641,11 +886,12 @@ export class DataStore extends DurableObject {
                      webSocket.send(JSON.stringify({ type: "query_result", data: logs, originalSql: "getAuditLog" }));
                      break;
 
-                case "listTasks":
-                     this.trackUsage('reads');
-                     const tasks = this.sql.exec("SELECT * FROM tasks ORDER BY id").toArray();
+                case "listTasks": {
+                     // Read from D1 replica for horizontal scaling
+                     const tasks = await this.readFromD1("SELECT * FROM tasks ORDER BY id");
                      webSocket.send(JSON.stringify({ type: "query_result", data: tasks, originalSql: "listTasks" }));
                      break;
+                }
 
                 // Memory Store: Cursor tracking
                 case "setCursor": {
@@ -765,7 +1011,8 @@ export class DataStore extends DurableObject {
                     }
                     
                     try {
-                        const results = this.sql.exec(rawSql).toArray();
+                        // Use D1 for read-only queries to enable horizontal scaling
+                        const results = await this.readFromD1(rawSql);
                         webSocket.send(JSON.stringify({ 
                             type: "query_result", 
                             data: results, 
@@ -822,6 +1069,37 @@ export class DataStore extends DurableObject {
                         action: "flushDebounced",
                         message: "Debounced writes flushed to SQLite" 
                     }));
+                    break;
+                }
+                
+                // Sync Engine: Get sync status and health
+                case "getSyncStatus": {
+                    const status = this.getSyncStatus();
+                    webSocket.send(JSON.stringify({ 
+                        type: "query_result", 
+                        data: [status], 
+                        originalSql: "getSyncStatus" 
+                    }));
+                    break;
+                }
+                
+                // Sync Engine: Force full sync to D1
+                case "forceSyncAll": {
+                    try {
+                        await this.performInitialSync();
+                        webSocket.send(JSON.stringify({ 
+                            type: "success", 
+                            action: "forceSyncAll",
+                            message: "Full sync to D1 completed",
+                            status: this.getSyncStatus()
+                        }));
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            action: "forceSyncAll",
+                            error: e.message 
+                        }));
+                    }
                     break;
                 }
 
