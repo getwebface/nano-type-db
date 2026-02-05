@@ -286,6 +286,101 @@ export class DataStore extends DurableObject {
       }
   }
 
+  /**
+   * Replicate data from Durable Object to D1 read replica
+   * This enables horizontal scaling for read operations while maintaining
+   * write consistency in the Durable Object.
+   * 
+   * @param table - The table name to replicate
+   * @param operation - The operation type: 'insert', 'update', or 'delete'
+   * @param data - The data to replicate (for insert/update) or the ID to delete
+   */
+  async replicateToD1(table: string, operation: 'insert' | 'update' | 'delete', data?: any) {
+    if (!this.env.READ_REPLICA) {
+      console.warn("D1 READ_REPLICA not available, skipping replication");
+      return;
+    }
+
+    try {
+      // Add room/DO identifier to track which DO the data belongs to
+      const roomId = this.doId;
+
+      switch (operation) {
+        case 'insert':
+        case 'update':
+          if (!data) {
+            console.error("Data required for insert/update operation");
+            return;
+          }
+          
+          // For tasks table, replicate with room_id for multi-tenancy
+          if (table === 'tasks') {
+            await this.env.READ_REPLICA.prepare(
+              `INSERT OR REPLACE INTO tasks (id, title, status, room_id) VALUES (?, ?, ?, ?)`
+            ).bind(data.id, data.title, data.status, roomId).run();
+          }
+          break;
+
+        case 'delete':
+          if (!data || !data.id) {
+            console.error("ID required for delete operation");
+            return;
+          }
+          
+          // Delete from D1 with room_id constraint for safety
+          if (table === 'tasks') {
+            await this.env.READ_REPLICA.prepare(
+              `DELETE FROM tasks WHERE id = ? AND room_id = ?`
+            ).bind(data.id, roomId).run();
+          }
+          break;
+      }
+    } catch (e) {
+      // Log but don't fail the primary operation if replication fails
+      console.error(`D1 replication failed for ${operation} on ${table}:`, e);
+    }
+  }
+
+  /**
+   * Read from D1 replica with fallback to DO SQLite
+   * This provides distributed read scaling while maintaining resilience
+   */
+  async readFromD1(query: string, ...params: any[]): Promise<any[]> {
+    // Try D1 first for distributed reads
+    if (this.env.READ_REPLICA) {
+      try {
+        // Add room_id filter to ensure data isolation
+        const roomId = this.doId;
+        
+        // Modify query to include room_id filter if querying tasks
+        let modifiedQuery = query;
+        if (query.includes('FROM tasks') && !query.includes('room_id')) {
+          // Simple query modification - add WHERE or AND clause
+          if (query.toLowerCase().includes('where')) {
+            modifiedQuery = query.replace(/WHERE/i, `WHERE room_id = '${roomId}' AND`);
+          } else if (query.toLowerCase().includes('order by')) {
+            modifiedQuery = query.replace(/ORDER BY/i, `WHERE room_id = '${roomId}' ORDER BY`);
+          } else {
+            modifiedQuery = query.replace(/FROM tasks/i, `FROM tasks WHERE room_id = '${roomId}'`);
+          }
+        }
+        
+        const stmt = this.env.READ_REPLICA.prepare(modifiedQuery);
+        if (params.length > 0) {
+          params.forEach((param, i) => stmt.bind(param));
+        }
+        const result = await stmt.all();
+        return result.results || [];
+      } catch (e) {
+        console.warn("D1 read failed, falling back to DO SQLite:", e);
+      }
+    }
+    
+    // Fallback to DO SQLite if D1 is unavailable or fails
+    this.trackUsage('reads');
+    return this.sql.exec(query, ...params).toArray();
+  }
+
   getSchema() {
     const tables = this.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_%' ESCAPE '\\' AND name != 'sqlite_sequence'").toArray();
     const schema: Record<string, any[]> = {};
@@ -467,7 +562,10 @@ export class DataStore extends DurableObject {
                         const result = this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending') RETURNING *", trimmedTitle).toArray();
                         const newTask = result[0];
 
-                        // 2. Generate Embedding & Store (Secondary operation - best effort)
+                        // 2. Replicate to D1 for distributed reads
+                        await this.replicateToD1('tasks', 'insert', newTask);
+
+                        // 3. Generate Embedding & Store (Secondary operation - best effort)
                         // Note: This is async and may fail. Vector search may miss this task until
                         // a background job re-indexes it. For production, use a queue system.
                         if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
@@ -529,6 +627,11 @@ export class DataStore extends DurableObject {
                         // Fetch the updated row to broadcast
                         const updated = this.sql.exec("SELECT * FROM tasks WHERE id = ?", completeId).toArray()[0];
                         
+                        // Replicate to D1 for distributed reads
+                        if (updated) {
+                            await this.replicateToD1('tasks', 'update', updated);
+                        }
+                        
                         webSocket.send(JSON.stringify({ 
                             type: "mutation_success", 
                             action: "completeTask",
@@ -565,6 +668,11 @@ export class DataStore extends DurableObject {
                         const deleted = this.sql.exec("SELECT * FROM tasks WHERE id = ?", deleteId).toArray()[0];
                         
                         this.sql.exec("DELETE FROM tasks WHERE id = ?", deleteId);
+                        
+                        // Replicate deletion to D1
+                        if (deleted) {
+                            await this.replicateToD1('tasks', 'delete', { id: deleteId });
+                        }
                         
                         // Also delete from Vector Index
                         if (this.env.VECTOR_INDEX) {
@@ -621,7 +729,7 @@ export class DataStore extends DurableObject {
                          
                          if (taskIds.length > 0) {
                              const placeholders = taskIds.map(() => '?').join(',');
-                             results = this.sql.exec(`SELECT * FROM tasks WHERE id IN (${placeholders})`, ...taskIds).toArray();
+                             results = await this.readFromD1(`SELECT * FROM tasks WHERE id IN (${placeholders})`, ...taskIds);
                          }
                     }
                     
@@ -641,11 +749,12 @@ export class DataStore extends DurableObject {
                      webSocket.send(JSON.stringify({ type: "query_result", data: logs, originalSql: "getAuditLog" }));
                      break;
 
-                case "listTasks":
-                     this.trackUsage('reads');
-                     const tasks = this.sql.exec("SELECT * FROM tasks ORDER BY id").toArray();
+                case "listTasks": {
+                     // Read from D1 replica for horizontal scaling
+                     const tasks = await this.readFromD1("SELECT * FROM tasks ORDER BY id");
                      webSocket.send(JSON.stringify({ type: "query_result", data: tasks, originalSql: "listTasks" }));
                      break;
+                }
 
                 // Memory Store: Cursor tracking
                 case "setCursor": {
@@ -765,7 +874,8 @@ export class DataStore extends DurableObject {
                     }
                     
                     try {
-                        const results = this.sql.exec(rawSql).toArray();
+                        // Use D1 for read-only queries to enable horizontal scaling
+                        const results = await this.readFromD1(rawSql);
                         webSocket.send(JSON.stringify({ 
                             type: "query_result", 
                             data: results, 

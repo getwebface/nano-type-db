@@ -29,6 +29,12 @@ binding = "AUTH_DB"
 database_name = "nanotype-auth"
 database_id = "d1b3a27b-a1de-43ab-ba7f-5ebda88b9807"
 
+# Read Replica Database (D1) - For distributed read operations
+[[d1_databases]]
+binding = "READ_REPLICA"
+database_name = "nanotype-read-replica"
+database_id = "placeholder-read-replica-id"
+
 {
   "observability": {
     "enabled": false,
