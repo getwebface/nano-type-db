@@ -16,6 +16,30 @@ View your app in AI Studio: https://ai.studio/apps/drive/1Z_rvYIuwSty1XkzeKDuY_v
 - **Visual Status Indicators**: Real-time connection status display
 - **Better Auth Integration**: Secure authentication with Better Auth
 
+### ⚡ NEW: Semantic Reflex (Killer Feature #1)
+
+**Push data based on meaning, not just ID.** Subscribe to events using natural language descriptions and get instant notifications when new content matches semantically.
+
+```javascript
+// Subscribe to "Angry Customers" with natural language
+subscribeSemantic({
+  topic: "angry_customers",
+  description: "Customers who are frustrated, upset, or complaining about poor service",
+  threshold: 0.7
+})
+
+// Automatically receive notifications when matching tasks are created
+// No polling, no queries - instant semantic matching in RAM
+```
+
+**Key Benefits:**
+- 🎯 **Semantic Matching**: AI-powered similarity detection
+- ⚡ **Instant Alerts**: Millisecond latency, no database queries
+- 💰 **Zero Cost**: Runs in RAM, not database
+- 🚀 **Real-time**: WebSocket notifications as events happen
+
+See [SEMANTIC_REFLEX.md](./SEMANTIC_REFLEX.md) for full documentation and examples.
+
 ### 🚀 NEW: Actor Model Enhancements
 
 nanotypeDB now implements the Durable Object Actor Model for superior performance:
