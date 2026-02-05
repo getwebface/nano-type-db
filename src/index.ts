@@ -66,6 +66,77 @@ export default {
 
     // --- Backend Logic ---
 
+    // Handle API Key Management Endpoints
+    if (url.pathname === "/api/keys/generate") {
+        let session;
+        try {
+            session = await auth.api.getSession({ headers: request.headers });
+        } catch (e: any) {
+            return new Response(`Auth Error: ${e.message}`, { status: 500 });
+        }
+        
+        if (!session) {
+            return new Response("Unauthorized. Please log in.", { status: 401 });
+        }
+
+        if (request.method !== "POST") {
+            return new Response("Method not allowed", { status: 405 });
+        }
+
+        const body = await request.json() as { name?: string };
+        const keyId = `nk_live_${crypto.randomUUID().replace(/-/g, '')}`;
+        
+        await env.AUTH_DB.prepare(
+            "INSERT INTO api_keys (id, user_id, name, created_at) VALUES (?, ?, ?, ?)"
+        ).bind(keyId, session.user.id, body.name || "Unnamed Key", Date.now()).run();
+
+        return Response.json({ id: keyId, name: body.name || "Unnamed Key", created_at: Date.now() });
+    }
+
+    if (url.pathname === "/api/keys/list") {
+        let session;
+        try {
+            session = await auth.api.getSession({ headers: request.headers });
+        } catch (e: any) {
+            return new Response(`Auth Error: ${e.message}`, { status: 500 });
+        }
+        
+        if (!session) {
+            return new Response("Unauthorized. Please log in.", { status: 401 });
+        }
+
+        const result = await env.AUTH_DB.prepare(
+            "SELECT id, name, created_at, last_used_at, scopes FROM api_keys WHERE user_id = ?"
+        ).bind(session.user.id).all();
+
+        return Response.json(result.results || []);
+    }
+
+    if (url.pathname === "/api/keys/delete") {
+        let session;
+        try {
+            session = await auth.api.getSession({ headers: request.headers });
+        } catch (e: any) {
+            return new Response(`Auth Error: ${e.message}`, { status: 500 });
+        }
+        
+        if (!session) {
+            return new Response("Unauthorized. Please log in.", { status: 401 });
+        }
+
+        if (request.method !== "POST") {
+            return new Response("Method not allowed", { status: 405 });
+        }
+
+        const body = await request.json() as { id: string };
+        
+        await env.AUTH_DB.prepare(
+            "DELETE FROM api_keys WHERE id = ? AND user_id = ?"
+        ).bind(body.id, session.user.id).run();
+
+        return Response.json({ success: true });
+    }
+
     // Handle Global Query
     if (url.pathname === "/global-query") {
         let session;
@@ -119,34 +190,61 @@ export default {
     console.log(`Checking auth for roomId: ${roomId}, path: ${url.pathname}`);
     
     let session;
-    try {
-        // PRIORITY 1: Browser Cookies (Production/Same-Domain)
-        session = await auth.api.getSession({ 
-            headers: request.headers
-        });
-
-        // PRIORITY 2: URL Token (Dev/Cross-Origin fallback)
-        if (!session) {
-            const sessionToken = url.searchParams.get("session_token");
-            if (sessionToken) {
-                session = await auth.api.getSession({ 
-                    headers: new Headers({
-                        'Cookie': `better-auth.session_token=${sessionToken}`
-                    })
-                });
+    let isApiKey = false;
+    
+    // PRIORITY 1: Check for API Key Header (for external apps)
+    const apiKey = request.headers.get("X-Nano-Key") || url.searchParams.get("api_key");
+    
+    if (apiKey?.startsWith("nk_")) {
+        // Validate API Key against D1
+        try {
+            const keyRecord = await env.AUTH_DB.prepare("SELECT * FROM api_keys WHERE id = ?").bind(apiKey).first();
+            if (keyRecord) {
+                isApiKey = true;
+                // Mock a session for the DO
+                session = { user: { id: keyRecord.user_id, role: "developer" } };
+                // Update last_used_at asynchronously
+                // @ts-ignore - waitUntil may not be available in all contexts
+                if (typeof ctx !== 'undefined') {
+                    ctx.waitUntil(env.AUTH_DB.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").bind(Date.now(), apiKey).run());
+                }
             }
+        } catch (e: any) {
+            console.error("API Key validation error:", e);
         }
-    } catch (e: any) {
-        console.error("Critical Auth Error:", e);
-        return new Response(`Auth Error: ${e.message}`, { status: 500 });
+    }
+    
+    // PRIORITY 2: Browser Cookies (Production/Same-Domain)
+    if (!session) {
+        try {
+            session = await auth.api.getSession({ 
+                headers: request.headers
+            });
+
+            // PRIORITY 3: URL Token (Dev/Cross-Origin fallback)
+            if (!session) {
+                const sessionToken = url.searchParams.get("session_token");
+                if (sessionToken) {
+                    session = await auth.api.getSession({ 
+                        headers: new Headers({
+                            'Cookie': `better-auth.session_token=${sessionToken}`
+                        })
+                    });
+                }
+            }
+        } catch (e: any) {
+            console.error("Critical Auth Error:", e);
+            return new Response(`Auth Error: ${e.message}`, { status: 500 });
+        }
     }
     
     if (!session) {
          console.log("Auth failed: No session found");
-         return new Response("Unauthorized. Please log in.", { status: 401 });
+         return new Response("Unauthorized: Invalid API Key or Session", { status: 401 });
     }
 
-    console.log(`Auth success: User ${session.user.id}`);
+    console.log(`Auth success: User ${session.user.id}${isApiKey ? ' (API Key)' : ''}`);
+
 
     // --- CRITICAL FIX START ---
     // Instead of modifying the immutable 'request', we create a new Mutable request

@@ -3,11 +3,13 @@ import { useRealtimeQuery, useDatabase } from '../hooks/useDatabase';
 import { DataGrid } from './DataGrid';
 import { SqlConsole } from './SqlConsole';
 import { PsychicSearch } from './PsychicSearch';
-import { Layout, Table2, HardDrive, Circle, Plus, Loader2, Activity } from 'lucide-react';
+import { ApiKeys } from './ApiKeys';
+import { Layout, Table2, HardDrive, Circle, Plus, Loader2, Activity, Settings } from 'lucide-react';
 
 export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
     const { schema, usageStats, status } = useDatabase();
     const [selectedTable, setSelectedTable] = useState<string>('tasks');
+    const [activeView, setActiveView] = useState<'tables' | 'settings'>('tables');
     
     useEffect(() => {
         if (schema) {
@@ -71,9 +73,12 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                         tableList.map(table => (
                             <button
                                 key={table}
-                                onClick={() => setSelectedTable(table)}
+                                onClick={() => {
+                                    setSelectedTable(table);
+                                    setActiveView('tables');
+                                }}
                                 className={`w-full flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md transition-all ${
-                                    selectedTable === table 
+                                    selectedTable === table && activeView === 'tables'
                                         ? 'bg-slate-800 text-green-400' 
                                         : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
                                 }`}
@@ -83,6 +88,20 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                             </button>
                         ))
                     )}
+
+                    <div className="pt-4 mt-4 border-t border-slate-800">
+                        <button
+                            onClick={() => setActiveView('settings')}
+                            className={`w-full flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md transition-all ${
+                                activeView === 'settings'
+                                    ? 'bg-slate-800 text-green-400'
+                                    : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
+                            }`}
+                        >
+                            <Settings size={18} />
+                            Settings
+                        </button>
+                    </div>
                 </nav>
 
                 {/* Usage Meter */}
@@ -116,34 +135,50 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
 
             {/* Main Content */}
             <main className="flex-1 flex flex-col min-w-0">
-                <header className="px-8 py-6 border-b border-slate-800 bg-slate-900 flex justify-between items-center">
-                    <h2 className="text-2xl font-bold text-white capitalize flex items-center gap-2">
-                        {selectedTable}
-                        <span className="text-sm font-normal text-slate-500 ml-2 border border-slate-700 px-2 py-0.5 rounded-full">
-                            {data ? data.length : 0} records
-                        </span>
-                    </h2>
-                    
-                    {/* Schema Info Badge */}
-                    <div className="hidden md:flex gap-2">
-                        {schema && schema[selectedTable] && schema[selectedTable].map(col => (
-                            <span key={col.name} className="text-xs font-mono text-slate-500 bg-slate-800 px-2 py-1 rounded">
-                                {col.name}: {col.type}
-                            </span>
-                        ))}
-                    </div>
-                </header>
+                {activeView === 'settings' ? (
+                    <>
+                        <header className="px-8 py-6 border-b border-slate-800 bg-slate-900 flex justify-between items-center">
+                            <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                                <Settings size={24} />
+                                Settings
+                            </h2>
+                        </header>
+                        <div className="flex-1 overflow-auto p-8 bg-slate-900">
+                            <ApiKeys />
+                        </div>
+                    </>
+                ) : (
+                    <>
+                        <header className="px-8 py-6 border-b border-slate-800 bg-slate-900 flex justify-between items-center">
+                            <h2 className="text-2xl font-bold text-white capitalize flex items-center gap-2">
+                                {selectedTable}
+                                <span className="text-sm font-normal text-slate-500 ml-2 border border-slate-700 px-2 py-0.5 rounded-full">
+                                    {data ? data.length : 0} records
+                                </span>
+                            </h2>
+                            
+                            {/* Schema Info Badge */}
+                            <div className="hidden md:flex gap-2">
+                                {schema && schema[selectedTable] && schema[selectedTable].map(col => (
+                                    <span key={col.name} className="text-xs font-mono text-slate-500 bg-slate-800 px-2 py-1 rounded">
+                                        {col.name}: {col.type}
+                                    </span>
+                                ))}
+                            </div>
+                        </header>
 
-                <div className="flex-1 overflow-auto p-8 bg-slate-900">
-                    {/* Psychic Search Demo */}
-                    <PsychicSearch />
-                    
-                    <DataGrid data={data} />
-                </div>
+                        <div className="flex-1 overflow-auto p-8 bg-slate-900">
+                            {/* Psychic Search Demo */}
+                            <PsychicSearch />
+                            
+                            <DataGrid data={data} />
+                        </div>
 
-                <div className="h-auto">
-                    <SqlConsole currentTable={selectedTable} />
-                </div>
+                        <div className="h-auto">
+                            <SqlConsole currentTable={selectedTable} />
+                        </div>
+                    </>
+                )}
             </main>
         </div>
     );
