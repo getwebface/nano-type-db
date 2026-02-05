@@ -7,6 +7,7 @@ import {
   QueryTimeout,
   MemoryTracker 
 } from "./lib/security";
+import { generateTypeSafeClient } from "./client-generator";
 // `node:fs` is not available in Cloudflare Workers; file-system backups
 // are only performed when running in a Node environment. In Workers
 // we skip file-based backups and rely on R2 or other mechanisms.
@@ -741,6 +742,18 @@ export class NanoStore extends DurableObject {
       return Response.json({
         actions: ACTIONS,
         tables: this.getSchema() 
+      });
+    }
+
+    // DOWNLOAD CLIENT ENDPOINT - Generate and serve type-safe TypeScript client
+    if (url.pathname === "/download-client") {
+      this.trackUsage('reads');
+      const clientCode = generateTypeSafeClient(ACTIONS, this.getSchema());
+      return new Response(clientCode, {
+        headers: {
+          "Content-Type": "application/typescript",
+          "Content-Disposition": 'attachment; filename="nanotype-client.ts"'
+        }
       });
     }
 
