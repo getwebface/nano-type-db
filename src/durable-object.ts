@@ -11,8 +11,14 @@ import type { DurableObjectState } from "cloudflare:workers";
  *    The executeSQL RPC method provides controlled read-only access for analytics.
  *    All mutations go through validated RPC methods with input sanitization.
  * 
- * 2. Efficient Broadcasting: Uses action-based updates (added/modified/deleted)
- *    instead of O(N) full table diffing for scalability.
+ * 2. Efficient Broadcasting - O(1) Delta Updates: Uses action-based updates (added/modified/deleted)
+ *    instead of O(N) full table diffing for scalability. Key optimizations:
+ *    - INSERT operations use RETURNING * to get new row without extra SELECT
+ *    - UPDATE operations use UPDATE...RETURNING * to get modified row in single query
+ *    - DELETE operations fetch row before deletion (SQLite limitation - no DELETE...RETURNING)
+ *    - broadcastUpdate only sends the single modified row (~1KB) not entire table (~10MB+)
+ *    - Sync engine uses pagination (LIMIT/OFFSET) to avoid loading all rows at once
+ *    Performance: O(1) per operation instead of O(N) where N = total database size
  * 
  * 3. Vector Search Consistency: AI embeddings are async and best-effort.
  *    If embedding fails, task exists in DB but may not be searchable until
@@ -151,7 +157,7 @@ const ACTIONS = {
   createTask: { params: ["title"] },
   completeTask: { params: ["id"] },
   deleteTask: { params: ["id"] },
-  listTasks: { params: [] },
+  listTasks: { params: ["limit?", "offset?"] }, // Optional pagination (default: limit=100, offset=0, max limit=1000)
   search: { params: ["query"] },
   getUsage: { params: [] },
   getAuditLog: { params: [] },
@@ -443,22 +449,39 @@ export class NanoStore extends DurableObject {
     try {
       console.log(`[Sync Engine] Starting initial sync for room ${this.doId}`);
       
-      // Get all tasks from DO
-      const tasks = this.sql.exec("SELECT * FROM tasks").toArray();
+      // Use pagination to avoid loading all tasks at once (prevents OOM at scale)
+      const BATCH_SIZE = 100;
+      let offset = 0;
+      let totalSynced = 0;
       
-      if (tasks.length === 0) {
-        console.log("[Sync Engine] No tasks to sync");
-        return;
-      }
+      while (true) {
+        const tasks = this.sql.exec(
+          `SELECT * FROM tasks LIMIT ? OFFSET ?`, 
+          BATCH_SIZE, 
+          offset
+        ).toArray();
+        
+        if (tasks.length === 0) {
+          break; // No more tasks to sync
+        }
 
-      // Batch sync to D1
-      await this.batchSyncToD1(tasks);
+        // Batch sync to D1
+        await this.batchSyncToD1(tasks);
+        
+        totalSynced += tasks.length;
+        offset += BATCH_SIZE;
+        
+        // If we got fewer results than BATCH_SIZE, we're done
+        if (tasks.length < BATCH_SIZE) {
+          break;
+        }
+      }
       
       this.syncEngine.lastSyncTime = Date.now();
       this.syncEngine.totalSyncs++;
       this.syncEngine.isHealthy = true;
       
-      console.log(`[Sync Engine] Initial sync completed: ${tasks.length} tasks synced`);
+      console.log(`[Sync Engine] Initial sync completed: ${totalSynced} tasks synced`);
     } catch (e) {
       console.error("[Sync Engine] Initial sync failed:", e);
       this.syncEngine.syncErrors++;
@@ -756,10 +779,8 @@ export class NanoStore extends DurableObject {
                         
                         this.logAction(method, data.payload);
                         
-                        this.sql.exec("UPDATE tasks SET status = 'completed' WHERE id = ?", completeId);
-                        
-                        // Fetch the updated row to broadcast
-                        const updated = this.sql.exec("SELECT * FROM tasks WHERE id = ?", completeId).toArray()[0];
+                        // Use RETURNING * to get updated row in a single query (O(1) vs O(N))
+                        const updated = this.sql.exec("UPDATE tasks SET status = 'completed' WHERE id = ? RETURNING *", completeId).toArray()[0];
                         
                         // Replicate to D1 for distributed reads (async, non-blocking)
                         if (updated) {
@@ -798,7 +819,8 @@ export class NanoStore extends DurableObject {
                         
                         this.logAction(method, data.payload);
                         
-                        // Fetch the row before deleting for broadcast
+                        // Fetch row before deleting for broadcast (SQLite doesn't support DELETE...RETURNING)
+                        // This is a targeted O(1) query by primary key, not a full table scan
                         const deleted = this.sql.exec("SELECT * FROM tasks WHERE id = ?", deleteId).toArray()[0];
                         
                         this.sql.exec("DELETE FROM tasks WHERE id = ?", deleteId);
@@ -888,8 +910,29 @@ export class NanoStore extends DurableObject {
 
                 case "listTasks": {
                      // Read from D1 replica for horizontal scaling
-                     const tasks = await this.readFromD1("SELECT * FROM tasks ORDER BY id");
-                     webSocket.send(JSON.stringify({ type: "query_result", data: tasks, originalSql: "listTasks" }));
+                     // Support pagination to avoid loading large datasets (max 1000 per page)
+                     const limitRaw = data.payload?.limit;
+                     const offsetRaw = data.payload?.offset;
+                     
+                     // Parse and validate pagination parameters (could be strings from payload)
+                     const limit = limitRaw ? parseInt(String(limitRaw), 10) : 100; // Default 100 rows
+                     const offset = offsetRaw ? parseInt(String(offsetRaw), 10) : 0;
+                     
+                     // Validate pagination parameters
+                     const safeLimit = Math.min(Math.max(1, limit), 1000); // Between 1-1000
+                     const safeOffset = Math.max(0, offset); // Non-negative
+                     
+                     const tasks = await this.readFromD1(
+                         "SELECT * FROM tasks ORDER BY id LIMIT ? OFFSET ?", 
+                         safeLimit, 
+                         safeOffset
+                     );
+                     webSocket.send(JSON.stringify({ 
+                         type: "query_result", 
+                         data: tasks, 
+                         originalSql: "listTasks",
+                         pagination: { limit: safeLimit, offset: safeOffset }
+                     }));
                      break;
                 }
 
