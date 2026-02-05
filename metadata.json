@@ -1,0 +1,5 @@
+{
+  "name": "nanotypeDB",
+  "description": "A realtime database using Cloudflare Durable Objects, SQLite, and React.",
+  "requestFramePermissions": []
+}
