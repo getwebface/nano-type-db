@@ -165,10 +165,17 @@ export default {
 
     // Route websocket upgrades
     if (request.headers.get("Upgrade") === "websocket") {
-       const newUrl = new URL(request.url);
-       newUrl.pathname = "/connect";
-       const newRequest = new Request(newUrl.toString(), request);
-       return stub.fetch(newRequest);
+       console.log("WebSocket upgrade requested for room:", roomId);
+       
+       try {
+         const newUrl = new URL(request.url);
+         newUrl.pathname = "/connect";
+         const newRequest = new Request(newUrl.toString(), request);
+         return stub.fetch(newRequest);
+       } catch (error: any) {
+         console.error("WebSocket upgrade failed:", error);
+         return new Response(`WebSocket upgrade failed: ${error.message}`, { status: 500 });
+       }
     }
 
     // Route Schema Introspection & Manifest

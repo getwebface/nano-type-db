@@ -14,3 +14,5 @@ declare global {
         AI: Ai;
 		// Static Assets Binding
 		ASSETS: Fetcher;
+	}
+}

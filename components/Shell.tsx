@@ -5,7 +5,7 @@ import { SqlConsole } from './SqlConsole';
 import { Layout, Table2, HardDrive, Circle, Plus, Loader2, Activity } from 'lucide-react';
 
 export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
-    const { schema, usageStats } = useDatabase();
+    const { schema, usageStats, status } = useDatabase();
     const [selectedTable, setSelectedTable] = useState<string>('tasks');
     
     useEffect(() => {
@@ -34,8 +34,26 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                         <h1 className="font-bold text-lg tracking-tight">nanotypeDB</h1>
                     </div>
                     <div className="flex items-center gap-2 text-xs text-slate-500 mt-2">
-                        <Circle size={8} className="text-green-500 fill-current" />
+                        <Circle 
+                            size={8} 
+                            className={`${
+                                status === 'connected' 
+                                    ? 'text-green-500 fill-current' 
+                                    : status === 'connecting'
+                                    ? 'text-yellow-500 fill-current animate-pulse'
+                                    : 'text-red-500 fill-current'
+                            }`} 
+                        />
                         <span className="font-mono">{roomId}</span>
+                        <span className={`ml-auto text-xs ${
+                            status === 'connected' 
+                                ? 'text-green-500' 
+                                : status === 'connecting'
+                                ? 'text-yellow-500'
+                                : 'text-red-500'
+                        }`}>
+                            {status}
+                        </span>
                     </div>
                 </div>
 
