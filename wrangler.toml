@@ -13,11 +13,6 @@ class_name = "DataStore"
 tag = "v1"
 new_classes = ["DataStore"]
 
-# Rules for SQLite storage
-# Durable object binding is defined above using the
-# `[[durable_objects.bindings]]` array; the alternate `[durable_objects]`
-# table form was removed to avoid redefinition errors.
-
 # Backups
 [[r2_buckets]]
 binding = "BACKUP_BUCKET"
@@ -29,23 +24,19 @@ binding = "AUTH_DB"
 database_name = "nanotype-auth"
 database_id = "d1b3a27b-a1de-43ab-ba7f-5ebda88b9807"
 
-{
-  "observability": {
-    "enabled": false,
-    "head_sampling_rate": 1,
-    "logs": {
-      "enabled": true,
-      "head_sampling_rate": 1,
-      "persist": true,
-      "invocation_logs": true
-    },
-    "traces": {
-      "enabled": false,
-      "persist": true,
-      "head_sampling_rate": 1
-    }
-  }
-}
+# Observability Configuration
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+head_sampling_rate = 1
 
 # Vector Index & AI
 [[vectorize]]
