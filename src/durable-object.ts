@@ -281,11 +281,20 @@ export class DataStore extends DurableObject {
                 case "createTask": {
                     try {
                         this.trackUsage('writes');
+                        
+                        // Input validation
+                        const title = data.payload?.title;
+                        if (!title || typeof title !== 'string') {
+                            throw new Error('Invalid title: must be a non-empty string');
+                        }
+                        if (title.length > 500) {
+                            throw new Error('Title too long: maximum 500 characters');
+                        }
+                        
                         this.logAction(method, data.payload);
-                        const title = data.payload?.title || "Untitled Task";
                         
                         // 1. Insert into DB
-                        const result = this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending') RETURNING *", title).toArray();
+                        const result = this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending') RETURNING *", title.trim()).toArray();
                         const newTask = result[0];
 
                         // 2. Generate Embedding (Async) & Store
@@ -329,23 +338,29 @@ export class DataStore extends DurableObject {
                 case "completeTask":
                     try {
                         this.trackUsage('writes');
+                        
+                        // Input validation
+                        const completeId = data.payload?.id;
+                        if (!completeId || typeof completeId !== 'number' || completeId < 1) {
+                            throw new Error('Invalid id: must be a positive integer');
+                        }
+                        
                         this.logAction(method, data.payload);
-                        if (data.payload?.id) {
-                            this.sql.exec("UPDATE tasks SET status = 'completed' WHERE id = ?", data.payload.id);
-                            
-                            // Fetch the updated row to broadcast
-                            const updated = this.sql.exec("SELECT * FROM tasks WHERE id = ?", data.payload.id).toArray()[0];
-                            
-                            webSocket.send(JSON.stringify({ 
-                                type: "mutation_success", 
-                                action: "completeTask",
-                                updateId: data.updateId
-                            }));
-                            
-                            // Efficient broadcast - only send the modified row
-                            if (updated) {
-                                this.broadcastUpdate("tasks", "modified", updated);
-                            }
+                        
+                        this.sql.exec("UPDATE tasks SET status = 'completed' WHERE id = ?", completeId);
+                        
+                        // Fetch the updated row to broadcast
+                        const updated = this.sql.exec("SELECT * FROM tasks WHERE id = ?", completeId).toArray()[0];
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_success", 
+                            action: "completeTask",
+                            updateId: data.updateId
+                        }));
+                        
+                        // Efficient broadcast - only send the modified row
+                        if (updated) {
+                            this.broadcastUpdate("tasks", "modified", updated);
                         }
                     } catch (e: any) {
                         webSocket.send(JSON.stringify({ 
@@ -360,27 +375,33 @@ export class DataStore extends DurableObject {
                 case "deleteTask":
                     try {
                         this.trackUsage('writes');
+                        
+                        // Input validation
+                        const deleteId = data.payload?.id;
+                        if (!deleteId || typeof deleteId !== 'number' || deleteId < 1) {
+                            throw new Error('Invalid id: must be a positive integer');
+                        }
+                        
                         this.logAction(method, data.payload);
-                        if (data.payload?.id) {
-                            // Fetch the row before deleting for broadcast
-                            const deleted = this.sql.exec("SELECT * FROM tasks WHERE id = ?", data.payload.id).toArray()[0];
-                            
-                            this.sql.exec("DELETE FROM tasks WHERE id = ?", data.payload.id);
-                            
-                            // Also delete from Vector Index
-                            if (this.env.VECTOR_INDEX) {
-                                this.env.VECTOR_INDEX.deleteByIds([`${this.doId}:${data.payload.id}`]).catch(console.error);
-                            }
-                            webSocket.send(JSON.stringify({ 
-                                type: "mutation_success", 
-                                action: "deleteTask",
-                                updateId: data.updateId
-                            }));
-                            
-                            // Efficient broadcast - only send the deleted row
-                            if (deleted) {
-                                this.broadcastUpdate("tasks", "deleted", deleted);
-                            }
+                        
+                        // Fetch the row before deleting for broadcast
+                        const deleted = this.sql.exec("SELECT * FROM tasks WHERE id = ?", deleteId).toArray()[0];
+                        
+                        this.sql.exec("DELETE FROM tasks WHERE id = ?", deleteId);
+                        
+                        // Also delete from Vector Index
+                        if (this.env.VECTOR_INDEX) {
+                            this.env.VECTOR_INDEX.deleteByIds([`${this.doId}:${deleteId}`]).catch(console.error);
+                        }
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_success", 
+                            action: "deleteTask",
+                            updateId: data.updateId
+                        }));
+                        
+                        // Efficient broadcast - only send the deleted row
+                        if (deleted) {
+                            this.broadcastUpdate("tasks", "deleted", deleted);
                         }
                     } catch (e: any) {
                         webSocket.send(JSON.stringify({ 
@@ -395,8 +416,17 @@ export class DataStore extends DurableObject {
                 case "search": {
                     this.trackUsage('ai_ops'); // It's an AI op
                     const query = data.payload?.query;
-                    if (!query) {
+                    
+                    // Input validation
+                    if (!query || typeof query !== 'string') {
                         webSocket.send(JSON.stringify({ type: "query_result", data: [], originalSql: "search" }));
+                        break;
+                    }
+                    if (query.length > 500) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "query_error",
+                            error: "Search query too long: maximum 500 characters"
+                        }));
                         break;
                     }
                     
