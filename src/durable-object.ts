@@ -1,5 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import type { DurableObjectState } from "cloudflare:workers";
+import { 
+  SQLSanitizer, 
+  RateLimiter, 
+  InputValidator, 
+  QueryTimeout,
+  MemoryTracker 
+} from "./lib/security";
 // `node:fs` is not available in Cloudflare Workers; file-system backups
 // are only performed when running in a Node environment. In Workers
 // we skip file-based backups and rely on R2 or other mechanisms.
@@ -269,6 +276,14 @@ export class NanoStore extends DurableObject {
     totalSyncs: number;
     isHealthy: boolean;
   };
+  // SECURITY: Rate limiters for RPC methods (per user)
+  rateLimiters: Map<string, RateLimiter>;
+  // SECURITY: Memory tracker for debounced writes
+  memoryTracker: MemoryTracker;
+  
+  // SECURITY: Configuration constants
+  private static readonly MAX_SUBSCRIBERS_PER_TABLE = 10000;
+  private static readonly SEMANTIC_SUBSCRIPTION_TTL_MS = 60 * 60 * 1000; // 1 hour
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -284,6 +299,12 @@ export class NanoStore extends DurableObject {
     // Initialize Psychic cache
     this.psychicSentCache = new WeakMap();
     
+    // SECURITY: Initialize rate limiters
+    this.rateLimiters = new Map();
+    
+    // SECURITY: Initialize memory tracker (10MB limit for debounced writes)
+    this.memoryTracker = new MemoryTracker(10 * 1024 * 1024);
+    
     // Initialize Debounced Writer (flushes every 1 second by default)
     this.debouncedWriter = new DebouncedWriter(1000, (updates) => {
       // Flush debounced writes to SQLite
@@ -293,6 +314,9 @@ export class NanoStore extends DurableObject {
             `INSERT OR REPLACE INTO _debounced_state (key, value, updated_at) VALUES (?, ?, datetime('now'))`,
             key, JSON.stringify(value)
           );
+          // Update memory tracker
+          const valueSize = JSON.stringify(value).length;
+          this.memoryTracker.remove(valueSize);
         } catch (e) {
           console.error(`Failed to flush debounced write for key ${key}:`, e);
         }
@@ -358,6 +382,38 @@ export class NanoStore extends DurableObject {
           payload, 
           timestamp: new Date().toISOString() 
       }));
+  }
+
+  /**
+   * SECURITY: Check rate limit for a specific user and method
+   * Returns true if request is allowed, false if rate limit exceeded
+   */
+  checkRateLimit(userId: string, method: string, maxRequests: number = 100, windowMs: number = 60000): boolean {
+    const key = `${userId}:${method}`;
+    
+    // Get or create rate limiter for this user+method combination
+    if (!this.rateLimiters.has(key)) {
+      this.rateLimiters.set(key, new RateLimiter(maxRequests, windowMs));
+    }
+    
+    const limiter = this.rateLimiters.get(key)!;
+    const allowed = limiter.allow(userId);
+    
+    // Periodically cleanup old rate limiters (every 100th request)
+    if (Math.random() < 0.01) {
+      this.cleanupRateLimiters();
+    }
+    
+    return allowed;
+  }
+
+  /**
+   * SECURITY: Cleanup old rate limiter entries to prevent memory leaks
+   */
+  cleanupRateLimiters(): void {
+    for (const [key, limiter] of this.rateLimiters.entries()) {
+      limiter.cleanup();
+    }
   }
 
   /**
@@ -427,6 +483,11 @@ export class NanoStore extends DurableObject {
    * Read from D1 replica with fallback to DO SQLite
    * This provides distributed read scaling while maintaining resilience
    * 
+   * SECURITY IMPROVEMENTS:
+   * - Uses SQLSanitizer for safe room_id injection
+   * - Validates query is read-only
+   * - Properly handles parameterized queries
+   * 
    * Note: Query modification is designed for simple SELECT queries.
    * Complex queries with subqueries, JOINs, or nested WHERE clauses
    * should pre-include room_id filtering to avoid modification issues.
@@ -435,32 +496,22 @@ export class NanoStore extends DurableObject {
     // Try D1 first for distributed reads
     if (this.env.READ_REPLICA) {
       try {
+        // SECURITY: Validate query is read-only
+        if (!SQLSanitizer.isReadOnly(query)) {
+          console.warn("Attempted non-read-only query on D1:", query);
+          throw new Error("Only SELECT queries are allowed on D1");
+        }
+        
         // Add room_id filter to ensure data isolation
         const roomId = this.doId;
         
-        // Modify query to include room_id filter if querying tasks
-        let modifiedQuery = query;
-        const roomIdParams = [...params]; // Copy params array
-        
-        if (query.includes('FROM tasks') && !query.includes('room_id')) {
-          // Use parameterized query to prevent SQL injection
-          // Note: This simple replacement works for standard SELECT queries
-          // but may not handle complex nested queries correctly
-          if (query.toLowerCase().includes('where')) {
-            modifiedQuery = query.replace(/WHERE/i, `WHERE room_id = ? AND`);
-            roomIdParams.unshift(roomId); // Add roomId as first param
-          } else if (query.toLowerCase().includes('order by')) {
-            modifiedQuery = query.replace(/ORDER BY/i, `WHERE room_id = ? ORDER BY`);
-            roomIdParams.unshift(roomId);
-          } else {
-            modifiedQuery = query.replace(/FROM tasks/i, `FROM tasks WHERE room_id = ?`);
-            roomIdParams.unshift(roomId);
-          }
-        }
+        // SECURITY: Use SQLSanitizer for safe query modification
+        const { query: modifiedQuery, params: newParams } = 
+          SQLSanitizer.injectRoomIdFilter(query, roomId, params);
         
         // Properly chain bind() calls (each bind() returns a new statement)
         let stmt = this.env.READ_REPLICA.prepare(modifiedQuery);
-        for (const param of roomIdParams) {
+        for (const param of newParams) {
           stmt = stmt.bind(param);
         }
         
@@ -628,6 +679,47 @@ export class NanoStore extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
+    // HEALTH CHECK ENDPOINT
+    if (url.pathname === "/health") {
+      try {
+        // Perform basic health checks
+        const health = {
+          status: "healthy",
+          timestamp: new Date().toISOString(),
+          doId: this.doId,
+          syncEngine: {
+            isHealthy: this.syncEngine.isHealthy,
+            lastSyncTime: this.syncEngine.lastSyncTime,
+            syncErrors: this.syncEngine.syncErrors,
+            totalSyncs: this.syncEngine.totalSyncs,
+          },
+          memory: {
+            debouncedWritesSize: this.memoryTracker.getCurrentSize(),
+            debouncedWritesLimit: this.memoryTracker.getRemaining() + this.memoryTracker.getCurrentSize(),
+            debouncedWritesRemaining: this.memoryTracker.getRemaining(),
+          },
+          subscribers: {
+            totalTables: this.subscribers.size,
+            tables: Array.from(this.subscribers.entries()).map(([table, subs]) => ({
+              table,
+              count: subs.size
+            }))
+          },
+          rateLimiters: {
+            activeKeys: this.rateLimiters.size
+          }
+        };
+        
+        return Response.json(health);
+      } catch (e: any) {
+        return Response.json({
+          status: "unhealthy",
+          error: e.message,
+          timestamp: new Date().toISOString()
+        }, { status: 500 });
+      }
+    }
+
     // QUERY ENDPOINT for global queries
     if (url.pathname === "/query") {
       this.trackUsage('reads');
@@ -724,10 +816,26 @@ export class NanoStore extends DurableObject {
       }
 
       if (data.action === "subscribe" && data.table) {
+        // SECURITY: Limit number of subscribers per table to prevent DoS
         if (!this.subscribers.has(data.table)) {
           this.subscribers.set(data.table, new Set());
         }
-        this.subscribers.get(data.table)!.add(webSocket);
+        
+        const tableSubscribers = this.subscribers.get(data.table)!;
+        
+        if (tableSubscribers.size >= NanoStore.MAX_SUBSCRIBERS_PER_TABLE) {
+          try {
+            webSocket.send(JSON.stringify({
+              type: "error",
+              error: `Table '${data.table}' subscription limit reached (${NanoStore.MAX_SUBSCRIBERS_PER_TABLE} max). Please try again later.`
+            }));
+          } catch (e) {
+            console.error("Failed to send subscription limit error:", e);
+          }
+          return;
+        }
+        
+        tableSubscribers.add(webSocket);
       }
 
       if (data.action === "query" && data.sql) {
@@ -749,23 +857,35 @@ export class NanoStore extends DurableObject {
             switch (method) {
                 case "createTask": {
                     try {
+                        // SECURITY: Get userId from authenticated session
+                        // X-User-ID is set by the edge worker (src/index.ts) AFTER successful
+                        // authentication. The client cannot set this header - it's added by the
+                        // worker which validates the session/API key before forwarding to DO.
+                        // This ensures rate limits are per actual user, not spoofable.
+                        const userId = request.headers.get("X-User-ID") || "anonymous";
+                        
+                        // SECURITY: Rate limit check (100 creates per minute per user)
+                        if (!this.checkRateLimit(userId, "createTask", 100, 60000)) {
+                            webSocket.send(JSON.stringify({ 
+                                type: "mutation_error", 
+                                action: "createTask",
+                                error: "Rate limit exceeded. Please slow down.",
+                                updateId: data.updateId
+                            }));
+                            break;
+                        }
+                        
                         this.trackUsage('writes');
                         
-                        // Input validation
-                        const title = data.payload?.title;
-                        if (!title || typeof title !== 'string' || title.trim().length === 0) {
-                            throw new Error('Invalid title: must be a non-empty string');
-                        }
-                        const trimmedTitle = title.trim();
-                        if (trimmedTitle.length > 500) {
-                            throw new Error('Title too long: maximum 500 characters');
-                        }
+                        // SECURITY: Input validation using InputValidator
+                        const titleRaw = data.payload?.title;
+                        const title = InputValidator.sanitizeString(titleRaw, 500, true);
                         
                         this.logAction(method, data.payload);
                         
                         // 1. Insert into DB (Primary operation - must succeed)
                         // Set vector_status to 'pending' initially (will be updated to 'indexed' or 'failed')
-                        const result = this.sql.exec("INSERT INTO tasks (title, status, vector_status) VALUES (?, 'pending', 'pending') RETURNING *", trimmedTitle).toArray();
+                        const result = this.sql.exec("INSERT INTO tasks (title, status, vector_status) VALUES (?, 'pending', 'pending') RETURNING *", title).toArray();
                         const newTask = result[0];
 
                         // 2. Replicate to D1 for distributed reads (async, non-blocking)
@@ -777,7 +897,7 @@ export class NanoStore extends DurableObject {
                             // Use ctx.waitUntil for async operation without blocking the response
                             this.ctx.waitUntil((async () => {
                                 try {
-                                    const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [trimmedTitle] });
+                                    const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [title] });
                                     const values = embeddings.data[0];
                                     if (values) {
                                         await this.env.VECTOR_INDEX.upsert([{ 
@@ -803,15 +923,23 @@ export class NanoStore extends DurableObject {
                                                         
                                                         // If similarity score exceeds threshold, send semantic match notification
                                                         if (similarity >= subscription.threshold) {
-                                                            // Check if socket is still open before sending
-                                                            if (subscription.socket.readyState === 1) { // WebSocket.OPEN
-                                                                subscription.socket.send(JSON.stringify({
-                                                                    type: "semantic_match",
-                                                                    topic: subscription.topic,
-                                                                    similarity: similarity,
-                                                                    row: newTask
-                                                                }));
-                                                                console.log(`Semantic match: task ${newTask.id} matched subscription "${subscription.topic}" (similarity: ${similarity.toFixed(3)})`);
+                                                            // SECURITY: Check if socket is still open and valid before sending
+                                                            if (subscription.socket?.readyState === 1) { // WebSocket.OPEN
+                                                                try {
+                                                                    subscription.socket.send(JSON.stringify({
+                                                                        type: "semantic_match",
+                                                                        topic: subscription.topic,
+                                                                        similarity: similarity,
+                                                                        row: newTask
+                                                                    }));
+                                                                    console.log(`Semantic match: task ${newTask.id} matched subscription "${subscription.topic}" (similarity: ${similarity.toFixed(3)})`);
+                                                                } catch (sendError: any) {
+                                                                    console.error(`Failed to send semantic match notification:`, sendError);
+                                                                    // Mark this subscription for cleanup if socket is dead
+                                                                    if (subscription.socket.readyState !== 1) {
+                                                                        this.memoryStore.delete(key);
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     } catch (e: any) {
@@ -1251,16 +1379,17 @@ export class NanoStore extends DurableObject {
                             throw new Error('Failed to generate embedding vector');
                         }
                         
-                        // Store subscription in MemoryStore with WebSocket reference
+                        // SECURITY: Store subscription with TTL to prevent memory leaks
                         // Key format: semantic_sub:{topic}:{timestamp}
                         const subKey = `semantic_sub:${topic}:${Date.now()}`;
+                        
                         this.memoryStore.set(subKey, {
                             topic,
                             description,
                             vector,
                             threshold,
                             socket: webSocket // Store socket reference for notifications
-                        });
+                        }, NanoStore.SEMANTIC_SUBSCRIPTION_TTL_MS); // Add TTL to automatically cleanup old subscriptions
                         
                         webSocket.send(JSON.stringify({ 
                             type: "success", 
@@ -1290,6 +1419,16 @@ export class NanoStore extends DurableObject {
                         break;
                     }
                     
+                    // SECURITY: Rate limiting for executeSQL (50 queries per minute)
+                    const userId = request.headers.get("X-User-ID") || "anonymous";
+                    if (!this.checkRateLimit(userId, "executeSQL", 50, 60000)) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "query_error", 
+                            error: "Rate limit exceeded for executeSQL" 
+                        }));
+                        break;
+                    }
+                    
                     // Security: Only allow read-only queries
                     if (readonly) {
                         const sqlLower = rawSql.toLowerCase().trim();
@@ -1312,8 +1451,13 @@ export class NanoStore extends DurableObject {
                     }
                     
                     try {
-                        // Use D1 for read-only queries to enable horizontal scaling
-                        const results = await this.readFromD1(rawSql);
+                        // PERFORMANCE: Add query timeout (5 seconds max)
+                        const results = await QueryTimeout.withTimeout(
+                            async () => this.readFromD1(rawSql),
+                            5000,
+                            "Query execution timeout (max 5 seconds)"
+                        );
+                        
                         webSocket.send(JSON.stringify({ 
                             type: "query_result", 
                             data: results, 
@@ -1340,15 +1484,29 @@ export class NanoStore extends DurableObject {
                         break;
                     }
                     
-                    // Validate value size (max 100KB to prevent memory issues)
+                    // SECURITY: Validate value size (max 100KB per value)
                     const valueStr = JSON.stringify(value);
-                    if (valueStr.length > 100000) {
+                    const valueSize = valueStr.length;
+                    
+                    if (valueSize > 100000) {
                         webSocket.send(JSON.stringify({ 
                             type: "error", 
                             error: "Value too large: maximum 100KB" 
                         }));
                         break;
                     }
+                    
+                    // SECURITY: Check total memory limit before accepting write
+                    if (!this.memoryTracker.canAdd(valueSize)) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "Memory limit reached. Please wait for pending writes to flush." 
+                        }));
+                        break;
+                    }
+                    
+                    // Add to memory tracker
+                    this.memoryTracker.add(valueSize);
                     
                     // Write to debounced buffer (will flush after 1 second of inactivity)
                     this.debouncedWriter.write(key, value);

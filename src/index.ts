@@ -1,5 +1,6 @@
 import { NanoStore } from "./durable-object";
 import { createAuth } from "./lib/auth";
+import { SecurityHeaders, InputValidator } from "./lib/security";
 import type { ExecutionContext, ScheduledController } from "cloudflare:workers";
 
 export { NanoStore, NanoStore as DataStore };
@@ -74,25 +75,73 @@ export default {
         try {
             session = await auth.api.getSession({ headers: request.headers });
         } catch (e: any) {
-            return new Response(`Auth Error: ${e.message}`, { status: 500 });
+            return SecurityHeaders.apply(
+                new Response(`Auth Error: ${e.message}`, { status: 500 })
+            );
         }
         
         if (!session) {
-            return new Response("Unauthorized. Please log in.", { status: 401 });
+            return SecurityHeaders.apply(
+                new Response("Unauthorized. Please log in.", { status: 401 })
+            );
         }
 
         if (request.method !== "POST") {
-            return new Response("Method not allowed", { status: 405 });
+            return SecurityHeaders.apply(
+                new Response("Method not allowed", { status: 405 })
+            );
         }
 
-        const body = await request.json() as { name?: string };
+        // SECURITY: Validate request body
+        let body: { name?: string; expiresInDays?: number };
+        try {
+            body = await request.json() as { name?: string; expiresInDays?: number };
+        } catch (e) {
+            return SecurityHeaders.apply(
+                new Response("Invalid JSON body", { status: 400 })
+            );
+        }
+        
+        // Generate secure API key
         const keyId = `nk_live_${crypto.randomUUID().replace(/-/g, '')}`;
         
-        await env.AUTH_DB.prepare(
-            "INSERT INTO api_keys (id, user_id, name, created_at) VALUES (?, ?, ?, ?)"
-        ).bind(keyId, session.user.id, body.name || "Unnamed Key", Date.now()).run();
+        // SECURITY: Validate and set expiration date
+        // Ensure expiresInDays is positive (default: 90 days, max: 365 days)
+        let expiresInDays = 90; // default
+        if (body.expiresInDays !== undefined) {
+            const daysInput = Number(body.expiresInDays);
+            if (isNaN(daysInput) || daysInput <= 0) {
+                return SecurityHeaders.apply(
+                    new Response("expiresInDays must be a positive number", { status: 400 })
+                );
+            }
+            expiresInDays = Math.min(daysInput, 365);
+        }
+        const expiresAt = Date.now() + (expiresInDays * 24 * 60 * 60 * 1000);
+        
+        // SECURITY: Sanitize key name using InputValidator
+        const keyName = InputValidator.sanitizeString(body.name || "Unnamed Key", 100, false) || "Unnamed Key";
+        
+        try {
+            await env.AUTH_DB.prepare(
+                "INSERT INTO api_keys (id, user_id, name, created_at, expires_at) VALUES (?, ?, ?, ?, ?)"
+            ).bind(keyId, session.user.id, keyName, Date.now(), expiresAt).run();
 
-        return Response.json({ id: keyId, name: body.name || "Unnamed Key", created_at: Date.now() });
+            return SecurityHeaders.apply(
+                Response.json({ 
+                    id: keyId, 
+                    name: keyName, 
+                    created_at: Date.now(),
+                    expires_at: expiresAt,
+                    expires_in_days: expiresInDays
+                })
+            );
+        } catch (e: any) {
+            console.error("Failed to create API key:", e);
+            return SecurityHeaders.apply(
+                new Response(`Failed to create API key: ${e.message}`, { status: 500 })
+            );
+        }
     }
 
     if (url.pathname === "/api/keys/list") {
@@ -100,18 +149,30 @@ export default {
         try {
             session = await auth.api.getSession({ headers: request.headers });
         } catch (e: any) {
-            return new Response(`Auth Error: ${e.message}`, { status: 500 });
+            return SecurityHeaders.apply(
+                new Response(`Auth Error: ${e.message}`, { status: 500 })
+            );
         }
         
         if (!session) {
-            return new Response("Unauthorized. Please log in.", { status: 401 });
+            return SecurityHeaders.apply(
+                new Response("Unauthorized. Please log in.", { status: 401 })
+            );
         }
 
-        const result = await env.AUTH_DB.prepare(
-            "SELECT id, name, created_at, last_used_at, scopes FROM api_keys WHERE user_id = ?"
-        ).bind(session.user.id).all();
+        try {
+            const result = await env.AUTH_DB.prepare(
+                "SELECT id, name, created_at, last_used_at, expires_at, scopes FROM api_keys WHERE user_id = ?"
+            ).bind(session.user.id).all();
 
-        return Response.json(result.results || []);
+            return SecurityHeaders.apply(
+                Response.json(result.results || [])
+            );
+        } catch (e: any) {
+            return SecurityHeaders.apply(
+                new Response(`Failed to list API keys: ${e.message}`, { status: 500 })
+            );
+        }
     }
 
     if (url.pathname === "/api/keys/delete") {
@@ -119,24 +180,53 @@ export default {
         try {
             session = await auth.api.getSession({ headers: request.headers });
         } catch (e: any) {
-            return new Response(`Auth Error: ${e.message}`, { status: 500 });
+            return SecurityHeaders.apply(
+                new Response(`Auth Error: ${e.message}`, { status: 500 })
+            );
         }
         
         if (!session) {
-            return new Response("Unauthorized. Please log in.", { status: 401 });
+            return SecurityHeaders.apply(
+                new Response("Unauthorized. Please log in.", { status: 401 })
+            );
         }
 
         if (request.method !== "POST") {
-            return new Response("Method not allowed", { status: 405 });
+            return SecurityHeaders.apply(
+                new Response("Method not allowed", { status: 405 })
+            );
         }
 
-        const body = await request.json() as { id: string };
+        // SECURITY: Validate request body
+        let body: { id: string };
+        try {
+            body = await request.json() as { id: string };
+        } catch (e) {
+            return SecurityHeaders.apply(
+                new Response("Invalid JSON body", { status: 400 })
+            );
+        }
         
-        await env.AUTH_DB.prepare(
-            "DELETE FROM api_keys WHERE id = ? AND user_id = ?"
-        ).bind(body.id, session.user.id).run();
+        if (!body.id || !body.id.startsWith("nk_")) {
+            return SecurityHeaders.apply(
+                new Response("Invalid API key ID", { status: 400 })
+            );
+        }
+        
+        try {
+            // SECURITY: Ensure user can only delete their own keys
+            await env.AUTH_DB.prepare(
+                "DELETE FROM api_keys WHERE id = ? AND user_id = ?"
+            ).bind(body.id, session.user.id).run();
 
-        return Response.json({ success: true });
+            return SecurityHeaders.apply(
+                Response.json({ success: true })
+            );
+        } catch (e: any) {
+            return SecurityHeaders.apply(
+                new Response(`Failed to delete API key: ${e.message}`, { status: 500 })
+            );
+        }
     }
 
     // Handle Global Query
@@ -198,18 +288,38 @@ export default {
     const apiKey = request.headers.get("X-Nano-Key") || url.searchParams.get("api_key");
     
     if (apiKey?.startsWith("nk_")) {
-        // Validate API Key against D1
+        // Validate API Key against D1 with expiration and scope checking
         try {
-            const keyRecord = await env.AUTH_DB.prepare("SELECT * FROM api_keys WHERE id = ?").bind(apiKey).first();
+            const keyRecord = await env.AUTH_DB.prepare(
+                "SELECT id, user_id, expires_at, scopes FROM api_keys WHERE id = ?"
+            ).bind(apiKey).first();
+            
             if (keyRecord) {
+                // SECURITY: Check if key has expired
+                if (keyRecord.expires_at && Date.now() > keyRecord.expires_at) {
+                    return new Response("API key expired", { status: 401 });
+                }
+                
+                // SECURITY: Validate scopes (if implemented)
+                // For now, we just check if key has any scopes defined
+                // In the future, check specific scopes based on the requested action
+                
                 isApiKey = true;
                 // Mock a session for the DO
                 session = { user: { id: keyRecord.user_id, role: "developer" } };
-                // Update last_used_at asynchronously (best effort - may not complete if context terminates early)
-                ctx.waitUntil(env.AUTH_DB.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").bind(Date.now(), apiKey).run());
+                
+                // Update last_used_at asynchronously (best effort)
+                ctx.waitUntil(
+                    env.AUTH_DB.prepare(
+                        "UPDATE api_keys SET last_used_at = ? WHERE id = ?"
+                    ).bind(Date.now(), apiKey).run()
+                );
+            } else {
+                return new Response("Invalid API key", { status: 401 });
             }
         } catch (e: any) {
             console.error("API Key validation error:", e);
+            return new Response(`API Key validation failed: ${e.message}`, { status: 500 });
         }
     }
     

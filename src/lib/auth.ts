@@ -7,15 +7,46 @@ export const createAuth = (env: Env) => {
   // Validate BETTER_AUTH_URL: sometimes a secret value was accidentally
   // stored into BETTER_AUTH_URL. Only accept it if it looks like a URL.
   const providedBase = (env as any).BETTER_AUTH_URL;
-  let baseURL = "https://nanotype-db.josh-f96.workers.dev";
-  if (providedBase && typeof providedBase === "string") {
-    if (providedBase.startsWith("http://") || providedBase.startsWith("https://")) {
-      baseURL = providedBase;
+  
+  // SECURITY: No fallback for baseURL - require explicit configuration
+  // This prevents accidental production deployments with wrong URLs
+  if (!providedBase || typeof providedBase !== "string") {
+    throw new Error("BETTER_AUTH_URL environment variable is required");
+  }
+  
+  if (!providedBase.startsWith("http://") && !providedBase.startsWith("https://")) {
+    throw new Error("BETTER_AUTH_URL must be a valid URL starting with http:// or https://");
+  }
+
+  // SECURITY: Require secret in production, generate random one in development
+  let secret = env.BETTER_AUTH_SECRET;
+  if (!secret) {
+    // Only allow missing secret in development (localhost or 127.0.0.1)
+    let isDev = false;
+    try {
+      const url = new URL(providedBase);
+      isDev = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+    } catch (e) {
+      // Invalid URL, treat as production
+      isDev = false;
+    }
+    
+    if (isDev) {
+      // Generate a random secret for development
+      secret = `dev-${crypto.randomUUID()}`;
+      console.warn('⚠️  Using auto-generated secret for development. Set BETTER_AUTH_SECRET in production!');
     } else {
-      // Log a warning to help debugging (will appear in worker logs)
-      console.warn("Ignoring invalid BETTER_AUTH_URL value (not a URL)", providedBase);
+      throw new Error("BETTER_AUTH_SECRET environment variable is required in production");
     }
   }
+
+  // SECURITY: Parse trusted origins from environment variable
+  // Format: comma-separated list of origins
+  const trustedOriginsStr = (env as any).TRUSTED_ORIGINS || providedBase;
+  const trustedOrigins = trustedOriginsStr
+    .split(',')
+    .map((origin: string) => origin.trim())
+    .filter((origin: string) => origin.length > 0);
 
   return betterAuth({
     database: drizzleAdapter(drizzle(env.AUTH_DB), {
@@ -23,11 +54,8 @@ export const createAuth = (env: Env) => {
       schema: schema,
     }),
     emailAndPassword: { enabled: true },
-    secret: env.BETTER_AUTH_SECRET || "PLACEHOLDER_SECRET_FOR_DEV",
-    baseURL,
-    trustedOrigins: [
-        "https://nanotype-db.josh-f96.workers.dev", 
-        "nanotype-db.josh-f96.workers.dev"
-    ],
+    secret,
+    baseURL: providedBase,
+    trustedOrigins,
   });
 };
