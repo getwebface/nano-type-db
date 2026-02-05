@@ -25,32 +25,69 @@ export default {
       return auth.handler(request);
     }
 
-    // Look for room_id in query params. Some simple public endpoints
-    // (root path and favicon) should not require a room_id so browsers
-    // requesting the worker URL directly don't get a 400.
+    // Debug Endpoint (Temporary)
+    if (url.pathname === "/debug-auth") {
+        const session = await auth.api.getSession({ headers: request.headers });
+        return Response.json({ 
+            hasSession: !!session, 
+            user: session?.user?.id, 
+            cookies: request.headers.get("Cookie") 
+        });
+    }
+
+    // 2. Serve Static Assets (React App)
+    if (env.ASSETS) {
+      try {
+        const asset = await env.ASSETS.fetch(request);
+        if (asset.status < 400) {
+          return asset;
+        }
+      } catch (e) {
+        // failed to fetch asset, continue
+      }
+    }
+
+    // 3. Durable Object Interactions (Logic that needs room_id)
+    // Only enforce room_id and auth checking for backend/API operations
+    const isBackendPath = 
+        url.pathname === "/connect" || 
+        url.pathname === "/schema" || 
+        url.pathname === "/manifest" ||
+        request.headers.get("Upgrade") === "websocket";
+
+    if (!isBackendPath) {
+       // If not a specific backend path, and asset wasn't found (404 above),
+       // fall back to SPA index.html for client-side routing.
+       if (env.ASSETS) {
+          try {
+             // Create a request for index.html
+             const indexReq = new Request(new URL("/index.html", url), request);
+             const index = await env.ASSETS.fetch(indexReq);
+             return index;
+          } catch(e) {}
+       }
+       // If ASSETS not bound or index fail, 404
+       return new Response("Not found", { status: 404 });
+    }
+
+    // --- Backend Logic Starts Here ---
+    
+    // Look for room_id in query params.
     const roomId = url.searchParams.get("room_id");
 
     if (!roomId) {
-      if (url.pathname === "/") {
-        return new Response("Missing room_id query parameter. Use ?room_id=<name>&token=...", { status: 200, headers: { "Content-Type": "text/plain" } });
-      }
-      if (url.pathname === "/favicon.ico") {
-        return new Response(null, { status: 204 });
-      }
       return new Response("Missing room_id query parameter", { status: 400 });
     }
 
-    // 2. Protect Database Access
+    // 4. Protect Database Access
+    console.log(`Checking auth for roomId: ${roomId}, path: ${url.pathname}, upgrade: ${request.headers.get("Upgrade")}`);
     const session = await auth.api.getSession({ headers: request.headers });
     
     if (!session) {
-         // Fallback for Demo/Dev
-         const queryToken = url.searchParams.get("token");
-         if (queryToken !== "demo-token") {
-             return new Response("Unauthorized", { status: 401 });
-         }
-         request.headers.set("X-User-ID", "demo-user");
+         console.log("Auth failed: No session found");
+         return new Response("Unauthorized. Please log in.", { status: 401 });
     } else {
+         console.log(`Auth success: User ${session.user.id}`);
          request.headers.set("X-User-ID", session.user.id);
     }
 

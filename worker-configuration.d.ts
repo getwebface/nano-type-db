@@ -12,5 +12,5 @@ declare global {
         VECTOR_INDEX: VectorizeIndex;
         // AI Binding
         AI: Ai;
-	}
-}
+		// Static Assets Binding
+		ASSETS: Fetcher;
