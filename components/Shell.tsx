@@ -3,6 +3,7 @@ import { useRealtimeQuery, useDatabase } from '../hooks/useDatabase';
 import { DataGrid } from './DataGrid';
 import { SqlConsole } from './SqlConsole';
 import { PsychicSearch } from './PsychicSearch';
+import { VisualSchemaEditor } from './VisualSchemaEditor';
 import { Layout, Table2, HardDrive, Circle, Plus, Loader2, Activity, Users } from 'lucide-react';
 
 export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
@@ -181,6 +182,9 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                 </header>
 
                 <div className="flex-1 overflow-auto p-8 bg-slate-900">
+                    {/* Visual Schema Editor */}
+                    <VisualSchemaEditor />
+                    
                     {/* Psychic Search Demo */}
                     <PsychicSearch />
                     
