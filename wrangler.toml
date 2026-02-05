@@ -70,7 +70,7 @@ max_retries = 5
 dead_letter_queue = "nanotype-embeddings-dlq"
 
 # Analytics Engine for Observability
-[analytics_engine_datasets]
+[[analytics_engine_datasets]]
 binding = "ANALYTICS"
 
 # Static Assets (React Frontend)
