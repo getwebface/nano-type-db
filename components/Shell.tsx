@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useRealtimeQuery, useDatabase } from '../hooks/useDatabase';
 import { DataGrid } from './DataGrid';
 import { SqlConsole } from './SqlConsole';
+import { PsychicSearch } from './PsychicSearch';
 import { Layout, Table2, HardDrive, Circle, Plus, Loader2, Activity } from 'lucide-react';
 
 export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
@@ -134,6 +135,9 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                 </header>
 
                 <div className="flex-1 overflow-auto p-8 bg-slate-900">
+                    {/* Psychic Search Demo */}
+                    <PsychicSearch />
+                    
                     <DataGrid data={data} />
                 </div>
 
