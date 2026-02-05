@@ -41,6 +41,10 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const lastPongRef = useRef<number>(Date.now());
     
     const subscribedTablesRef = useRef<Set<string>>(new Set());
+    
+    // Track current cursor and presence for re-announcing after reset
+    const lastCursorRef = useRef<{ userId: string; position: any } | null>(null);
+    const lastPresenceRef = useRef<{ userId: string; status: any } | null>(null);
 
     const addToast = (message: string, type: 'success' | 'info' | 'error' = 'info') => {
         const id = Math.random().toString(36).substring(7);
@@ -142,7 +146,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                     
                     reconnectTimeoutRef.current = setTimeout(() => {
                         connect(roomId);
-                    }, WS_RECONNECT_INTERVAL);
+                    }, WS_RECONNECT_INTERVAL + Math.random() * 2000);
                 } else {
                     addToast('Maximum reconnection attempts reached. Please refresh the page.', 'error');
                     reconnectAttemptsRef.current = 0;
@@ -206,6 +210,26 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
+
+            // Handle reset message from DO (when it wakes up from hibernation)
+            if (data.type === 'reset') {
+                console.log('Received reset from DO - re-announcing cursor/presence');
+                // Re-send cursor if we have one
+                if (lastCursorRef.current && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        action: 'setCursor',
+                        payload: lastCursorRef.current
+                    }));
+                }
+                // Re-send presence if we have one
+                if (lastPresenceRef.current && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        action: 'setPresence',
+                        payload: lastPresenceRef.current
+                    }));
+                }
+                return;
+            }
 
             // Handle pong response for heartbeat
             if (data.type === 'pong') {
@@ -292,7 +316,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 
                 reconnectTimeoutRef.current = setTimeout(() => {
                     connect(roomId);
-                }, WS_RECONNECT_INTERVAL);
+                }, WS_RECONNECT_INTERVAL + Math.random() * 2000);
             } else if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
                 addToast('Connection lost. Please refresh the page.', 'error');
                 reconnectAttemptsRef.current = 0;
@@ -406,6 +430,32 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         socket.send(JSON.stringify({ action: 'subscribe', table }));
     }, [socket]);
 
+    const setCursor = useCallback((userId: string, position: any) => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        
+        // Store for re-announcing after reset
+        lastCursorRef.current = { userId, position };
+        
+        // Send to server
+        socket.send(JSON.stringify({
+            action: 'setCursor',
+            payload: { userId, position }
+        }));
+    }, [socket]);
+
+    const setPresence = useCallback((userId: string, status: any) => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        
+        // Store for re-announcing after reset
+        lastPresenceRef.current = { userId, status };
+        
+        // Send to server
+        socket.send(JSON.stringify({
+            action: 'setPresence',
+            payload: { userId, status }
+        }));
+    }, [socket]);
+
     // Cleanup on unmount
     useEffect(() => {
         return () => {
@@ -436,7 +486,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, []); // Empty dependency array ensures this only runs on unmount
 
     return (
-        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, socket }}>
+        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, socket, setCursor, setPresence }}>
             {children}
         </DatabaseContext.Provider>
     );

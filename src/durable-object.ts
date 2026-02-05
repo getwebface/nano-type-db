@@ -661,6 +661,14 @@ export class NanoStore extends DurableObject {
       return;
     }
 
+    // Send reset message when DO wakes up (handleSession starts)
+    // This notifies clients to re-announce their cursor/presence
+    try {
+      webSocket.send(JSON.stringify({ type: "reset" }));
+    } catch (e) {
+      console.error("Failed to send reset message:", e);
+    }
+
     webSocket.addEventListener("message", async (event) => {
       try {
         const data = JSON.parse(event.data as string) as WebSocketMessage;
