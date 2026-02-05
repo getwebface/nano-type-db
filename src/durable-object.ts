@@ -3,13 +3,19 @@ import type { DurableObjectState } from "cloudflare:workers";
 import * as fs from 'node:fs';
 
 interface WebSocketMessage {
-  action: "subscribe" | "query" | "mutate" | "rpc"; // Added 'rpc'
+  action: "subscribe" | "query" | "mutate" | "rpc";
   table?: string;
   sql?: string;
-  // RPC payload
   method?: string; 
   payload?: any;
 }
+
+// 1. Define the Manifest explicitly
+const ACTIONS = {
+  createTask: { params: ["title"] },
+  completeTask: { params: ["id"] },
+  deleteTask: { params: ["id"] }
+};
 
 const MIGRATIONS = [
   {
@@ -66,27 +72,19 @@ export class DataStore extends DurableObject {
     return schema;
   }
 
-  // Backup Implementation
   async backupToR2() {
       try {
           const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
           const backupPath = `/tmp/backup-${timestamp}.db`;
-          
-          // 1. Dump SQLite to local temp file
           this.sql.exec(`VACUUM INTO '${backupPath}'`);
-          
-          // 2. Read file buffer
           const fileBuffer = fs.readFileSync(backupPath);
           
-          // 3. Upload to R2
           if (this.env.BACKUP_BUCKET) {
              await this.env.BACKUP_BUCKET.put(`backup-${timestamp}.db`, fileBuffer);
              console.log(`Backup uploaded: backup-${timestamp}.db`);
           } else {
              console.log("R2 Bucket not configured, skipping upload.");
           }
-          
-          // Cleanup
           fs.unlinkSync(backupPath);
       } catch (err) {
           console.error("Backup failed:", err);
@@ -96,7 +94,14 @@ export class DataStore extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
-    // Internal Backup Trigger
+    // MANIFEST ENDPOINT
+    if (url.pathname === "/manifest") {
+      return Response.json({
+        actions: ACTIONS,
+        tables: this.getSchema() 
+      });
+    }
+
     if (url.pathname === "/backup") {
         await this.backupToR2();
         return new Response("Backup completed");
@@ -139,7 +144,6 @@ export class DataStore extends DurableObject {
       try {
         const data = JSON.parse(event.data as string) as WebSocketMessage;
 
-        // 1. Subscribe
         if (data.action === "subscribe" && data.table) {
           if (!this.subscribers.has(data.table)) {
             this.subscribers.set(data.table, new Set());
@@ -147,9 +151,7 @@ export class DataStore extends DurableObject {
           this.subscribers.get(data.table)!.add(webSocket);
         }
 
-        // 2. Query (Read-Only preferred, but keeping raw SQL for existing read functionality)
         if (data.action === "query" && data.sql) {
-          // Ideally, we parse this to ensure it's SELECT only.
           const results = this.sql.exec(data.sql).toArray();
           webSocket.send(JSON.stringify({ 
             type: "query_result", 
@@ -158,32 +160,40 @@ export class DataStore extends DurableObject {
           }));
         }
 
-        // 3. SECURE MUTATIONS (RPC)
-        // Replaced raw "mutate" block with specific Actions to prevent SQL Injection
         if (data.action === "rpc" || (data.action as string) === "createTask") {
-            // Support both generic 'rpc' wrapper or direct action naming if client sends that
             const method = data.method || data.action;
             
             switch (method) {
                 case "createTask":
-                    // Payload: { title: "..." }
-                    // Auto-inject fields or validate here
                     const title = data.payload?.title || "Untitled Task";
                     this.sql.exec("INSERT INTO tasks (title, status) VALUES (?, 'pending')", title);
-                    
                     webSocket.send(JSON.stringify({ type: "mutation_success", action: "createTask" }));
                     this.broadcastUpdate("tasks");
                     break;
+
+                case "completeTask":
+                    if (data.payload?.id) {
+                        this.sql.exec("UPDATE tasks SET status = 'completed' WHERE id = ?", data.payload.id);
+                        webSocket.send(JSON.stringify({ type: "mutation_success", action: "completeTask" }));
+                        this.broadcastUpdate("tasks");
+                    }
+                    break;
+
+                case "deleteTask":
+                    if (data.payload?.id) {
+                        this.sql.exec("DELETE FROM tasks WHERE id = ?", data.payload.id);
+                        webSocket.send(JSON.stringify({ type: "mutation_success", action: "deleteTask" }));
+                        this.broadcastUpdate("tasks");
+                    }
+                    break;
                 
-                // Add more actions here (updateTask, deleteTask, etc.)
                 default:
                     webSocket.send(JSON.stringify({ error: `Unknown RPC method: ${method}` }));
             }
         }
         
-        // Legacy/Unsafe Mutate Block - Disabled/Restricted
         if (data.action === "mutate") {
-             webSocket.send(JSON.stringify({ error: "Raw mutations are disabled. Use RPC actions (e.g., createTask)." }));
+             webSocket.send(JSON.stringify({ error: "Raw mutations are disabled. Use RPC actions." }));
         }
 
       } catch (err: any) {
