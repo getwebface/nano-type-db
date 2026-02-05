@@ -164,9 +164,13 @@ export default {
          const newUrl = new URL(request.url);
          newUrl.pathname = "/connect";
          
-         // Create fresh request with our new headers
+         // 🟢 FIXED CODE: explicitly preserve Upgrade headers
+         const wsHeaders = new Headers(newHeaders);
+         wsHeaders.set("Upgrade", "websocket");
+         wsHeaders.set("Connection", "Upgrade");
+
          const wsRequest = new Request(newUrl.toString(), {
-             headers: newHeaders,
+             headers: wsHeaders,
              method: request.method
          });
          
