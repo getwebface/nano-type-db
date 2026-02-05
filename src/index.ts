@@ -52,6 +52,8 @@ export default {
         url.pathname === "/connect" || 
         url.pathname === "/schema" || 
         url.pathname === "/manifest" ||
+        // Ensure API routes (like /api/keys) are handled by the backend
+        url.pathname.startsWith("/api/") ||
         request.headers.get("Upgrade") === "websocket";
 
     if (!isBackendPath) {
