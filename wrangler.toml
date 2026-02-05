@@ -1,6 +1,7 @@
 name = "nanotype-db"
 main = "src/index.ts"
 compatibility_date = "2024-04-05"
+compatibility_flags = ["nodejs_compat"]
 
 # Define the Durable Object binding
 [[durable_objects.bindings]]
@@ -17,3 +18,12 @@ new_classes = ["DataStore"]
 bindings = [
   { name = "DATA_STORE", class_name = "DataStore" }
 ]
+
+# Backups
+[[r2_buckets]]
+binding = "BACKUP_BUCKET"
+bucket_name = "nanotype-backups"
+
+# Cron Trigger for Backups (Every hour)
+[triggers]
+crons = ["0 * * * *"]
