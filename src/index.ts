@@ -1,7 +1,7 @@
 import { NanoStore } from "./durable-object";
 import { createAuth } from "./lib/auth";
 import { SecurityHeaders, InputValidator } from "./lib/security";
-import type { ExecutionContext, ScheduledController } from "cloudflare:workers";
+import type { ExecutionContext, ScheduledController, MessageBatch } from "cloudflare:workers";
 
 export { NanoStore, NanoStore as DataStore };
 
@@ -403,5 +403,81 @@ export default {
     const id = env.DATA_STORE.idFromName("demo-room");
     const stub = env.DATA_STORE.get(id);
     ctx.waitUntil(stub.fetch("http://do/backup"));
+  },
+
+  async queue(batch: MessageBatch, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Queue Consumer for AI Embedding with Retry Logic
+    console.log(`Processing embedding batch: ${batch.messages.length} messages`);
+    
+    for (const message of batch.messages) {
+      try {
+        const { taskId, doId, title, timestamp } = message.body as {
+          taskId: number;
+          doId: string;
+          title: string;
+          timestamp: number;
+        };
+        
+        console.log(`Processing embedding for task ${taskId} in DO ${doId}`);
+        
+        // Generate embedding using AI
+        const embeddings = await env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [title] });
+        const values = embeddings.data[0];
+        
+        if (values && env.VECTOR_INDEX) {
+          // Upsert to Vector Index
+          await env.VECTOR_INDEX.upsert([{
+            id: `${doId}:${taskId}`,
+            values,
+            metadata: { doId, taskId }
+          }]);
+          
+          // Update status in Durable Object
+          const doIdObj = env.DATA_STORE.idFromString(doId);
+          const stub = env.DATA_STORE.get(doIdObj);
+          
+          // Call internal endpoint to update vector status
+          await stub.fetch("http://do/internal/update-vector-status", {
+            method: "POST",
+            body: JSON.stringify({ taskId, status: 'indexed', values })
+          });
+          
+          console.log(`✅ Embedding indexed for task ${taskId}`);
+          
+          // Log to Analytics Engine
+          if (env.ANALYTICS) {
+            ctx.waitUntil(
+              env.ANALYTICS.writeDataPoint({
+                blobs: [doId, 'ai_embedding_success'],
+                doubles: [taskId, Date.now() - timestamp], // processing time
+                indexes: [`task_${taskId}`]
+              })
+            );
+          }
+          
+          // Acknowledge success
+          message.ack();
+        } else {
+          throw new Error('No embedding values returned from AI');
+        }
+      } catch (error: any) {
+        console.error(`❌ Embedding failed for message:`, error.message);
+        
+        // Log failure to Analytics Engine
+        if (env.ANALYTICS) {
+          ctx.waitUntil(
+            env.ANALYTICS.writeDataPoint({
+              blobs: [message.body.doId || 'unknown', 'ai_embedding_failure'],
+              doubles: [message.body.taskId || 0, message.attempts || 0],
+              indexes: [`error_${Date.now()}`]
+            })
+          );
+        }
+        
+        // Retry (message will be retried automatically up to max_retries)
+        // After max_retries, it goes to dead letter queue
+        message.retry();
+      }
+    }
   }
 };

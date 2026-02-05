@@ -749,6 +749,54 @@ export class NanoStore extends DurableObject {
         return new Response("Backup completed");
     }
 
+    // Internal endpoint to update vector status (called by queue consumer)
+    if (url.pathname === "/internal/update-vector-status") {
+        if (request.method !== "POST") {
+            return new Response("Method not allowed", { status: 405 });
+        }
+        try {
+            const { taskId, status, values } = await request.json() as { taskId: number, status: string, values?: number[] };
+            
+            // Update vector status in database
+            this.sql.exec("UPDATE tasks SET vector_status = ? WHERE id = ?", status, taskId);
+            this.trackUsage('ai_ops');
+            console.log(`Vector status updated for task ${taskId}: ${status}`);
+            
+            // If indexed successfully and we have values, trigger semantic reflex
+            if (status === 'indexed' && values) {
+                const task = this.sql.exec("SELECT * FROM tasks WHERE id = ?", taskId).toArray()[0];
+                
+                // NEURAL EVENT LOOP - Semantic Reflex for queued embeddings
+                for (const key of this.memoryStore.keys()) {
+                    if (key.startsWith('semantic_sub:')) {
+                        const subscription = this.memoryStore.get(key);
+                        if (subscription && subscription.vector && subscription.socket) {
+                            try {
+                                const similarity = calculateCosineSimilarity(values, subscription.vector);
+                                if (similarity >= subscription.threshold && subscription.socket?.readyState === 1) {
+                                    subscription.socket.send(JSON.stringify({
+                                        type: "semantic_match",
+                                        topic: subscription.topic,
+                                        similarity: similarity,
+                                        row: task
+                                    }));
+                                    console.log(`Semantic match (queued): task ${taskId} matched "${subscription.topic}" (similarity: ${similarity.toFixed(3)})`);
+                                }
+                            } catch (e: any) {
+                                console.error(`Semantic check failed for ${key}:`, e.message);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            return new Response("Status updated", { status: 200 });
+        } catch (error: any) {
+            console.error("Failed to update vector status:", error);
+            return new Response(`Error: ${error.message}`, { status: 500 });
+        }
+    }
+
     if (url.pathname === "/schema") {
       this.trackUsage('reads');
       const schema = this.getSchema();
@@ -893,7 +941,18 @@ export class NanoStore extends DurableObject {
 
                         // 3. Generate Embedding & Store (Secondary operation - best effort)
                         // Vector Consistency: Track status in database to allow retry jobs
-                        if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
+                        // PRODUCTION FIX: Use Cloudflare Queue for reliable AI processing with retry
+                        if (newTask && this.env.EMBEDDING_QUEUE) {
+                            // Push embedding job to queue (will retry on failure with exponential backoff)
+                            await this.env.EMBEDDING_QUEUE.send({
+                                taskId: newTask.id,
+                                doId: this.doId,
+                                title: title,
+                                timestamp: Date.now()
+                            });
+                            console.log(`Embedding job queued for task ${newTask.id}`);
+                        } else if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
+                            // FALLBACK: If no queue, use old ctx.waitUntil approach
                             // Use ctx.waitUntil for async operation without blocking the response
                             this.ctx.waitUntil((async () => {
                                 try {
