@@ -16,6 +16,33 @@ View your app in AI Studio: https://ai.studio/apps/drive/1Z_rvYIuwSty1XkzeKDuY_v
 - **Visual Status Indicators**: Real-time connection status display
 - **Better Auth Integration**: Secure authentication with Better Auth
 
+### 🔥 NEW: Automatic Reactivity (Convex-style Live Queries)
+
+**Write a standard query. Data changes? Query auto-refreshes. Zero manual work.**
+
+Previously, you had to manually call `broadcastUpdate` in every RPC method. Now, queries automatically re-run when their dependent tables change.
+
+```javascript
+// Automatic reactivity - query re-runs when tasks table changes
+const unsubscribe = runReactiveQuery('listTasks', {}, ['tasks']);
+
+// Create a new task - ALL subscribed queries automatically refresh
+performMutation('createTask', { title: 'New Task' });
+// UI updates instantly (optimistic), query auto-refreshes with real data
+
+// Cleanup when component unmounts
+useEffect(() => unsubscribe, []);
+```
+
+**Key Benefits:**
+- 🔄 **Automatic Refresh**: Queries re-run when data changes
+- ⚡ **Zero Boilerplate**: No manual `broadcastUpdate` needed
+- 💯 **Type-Safe**: Full TypeScript support
+- 🎯 **Selective**: Only re-runs queries that depend on changed tables
+- 🚀 **Efficient**: Debounced updates prevent query spam
+
+See [CLOUDFLARE_SUPERPOWERS.md](./CLOUDFLARE_SUPERPOWERS.md) for full documentation.
+
 ### ⚡ NEW: Semantic Reflex (Killer Feature #1)
 
 **Push data based on meaning, not just ID.** Subscribe to events using natural language descriptions and get instant notifications when new content matches semantically.

@@ -49,6 +49,8 @@ export interface DatabaseContextType {
     usageStats: UsageStat[];
     refreshUsage: () => void;
     performOptimisticAction: (action: string, payload: any, optimisticUpdate: () => void, rollback: () => void) => void;
+    performMutation?: (method: string, payload: any) => void; // Built-in optimistic updates
+    runReactiveQuery?: (method: string, payload: any, tables: string[]) => (() => void) | undefined; // Automatic reactivity
     socket: WebSocket | null;
     setCursor: (userId: string, position: any) => void;
     setPresence: (userId: string, status: any) => void;

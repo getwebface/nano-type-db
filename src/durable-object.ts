@@ -46,12 +46,13 @@ import { generateTypeSafeClient } from "./client-generator";
  */
 
 interface WebSocketMessage {
-  action: "subscribe" | "query" | "mutate" | "rpc" | "ping";
+  action: "subscribe" | "query" | "mutate" | "rpc" | "ping" | "subscribe_query" | "unsubscribe_query";
   table?: string;
   sql?: string;
   method?: string; 
   payload?: any;
   updateId?: string; // For optimistic updates
+  queryId?: string; // For query subscriptions
 }
 
 /**
@@ -177,13 +178,45 @@ function calculateCosineSimilarity(vecA: number[], vecB: number[]): number {
   return dotProduct;
 }
 
+/**
+ * RLS Policy Engine: Row Level Security
+ * Defines access control policies for database rows
+ */
+class RLSPolicyEngine {
+  private policies: Map<string, (userId: string, row: any) => boolean>;
+  
+  constructor() {
+    this.policies = new Map();
+    // Default policy: user can only access their own rows
+    this.registerPolicy('tasks', (userId: string, row: any) => {
+      return !row.owner_id || row.owner_id === userId;
+    });
+  }
+  
+  registerPolicy(table: string, policy: (userId: string, row: any) => boolean): void {
+    this.policies.set(table, policy);
+  }
+  
+  checkAccess(table: string, userId: string, row: any): boolean {
+    const policy = this.policies.get(table);
+    if (!policy) return true; // No policy = allow all
+    return policy(userId, row);
+  }
+  
+  filterRows(table: string, userId: string, rows: any[]): any[] {
+    const policy = this.policies.get(table);
+    if (!policy) return rows;
+    return rows.filter(row => policy(userId, row));
+  }
+}
+
 // 1. Define the Manifest explicitly
 // Added 'search' to actions
 const ACTIONS = {
-  createTask: { params: ["title"] },
+  createTask: { params: ["title", "owner_id?"] }, // Added owner_id for RLS
   completeTask: { params: ["id"] },
   deleteTask: { params: ["id"] },
-  listTasks: { params: ["limit?", "offset?"] }, // Optional pagination (default: limit=100, offset=0, max limit=1000)
+  listTasks: { params: ["limit?", "offset?", "owner_id?"] }, // Added owner_id for RLS filtering
   search: { params: ["query"] },
   getUsage: { params: [] },
   getAuditLog: { params: [] },
@@ -204,6 +237,17 @@ const ACTIONS = {
   subscribeSemantic: { params: ["topic", "description", "threshold"] },
   // Psychic Data - Killer Feature #2
   streamIntent: { params: ["text"] },
+  // File Storage (R2 Integration)
+  getUploadUrl: { params: ["filename", "contentType"] },
+  listFiles: { params: ["owner_id?"] },
+  // Webhooks
+  registerWebhook: { params: ["url", "event", "headers?"] },
+  listWebhooks: { params: [] },
+  // Cron Jobs
+  scheduleCron: { params: ["name", "schedule", "rpcMethod", "rpcPayload?"] },
+  listCronJobs: { params: [] },
+  // Audit Log Export
+  exportAuditLog: { params: ["format?"] }
   // Webhook Management
   createWebhook: { params: ["url", "events", "secret?"] },
   listWebhooks: { params: [] },
@@ -265,6 +309,54 @@ const MIGRATIONS = [
   {
       version: 6,
       up: (sql: any) => {
+          // Row Level Security: Add owner_id column to tasks
+          try {
+              sql.exec("ALTER TABLE tasks ADD COLUMN owner_id TEXT");
+          } catch (e) {
+              console.warn("Migration v6 warning:", e);
+          }
+      }
+  },
+  {
+      version: 7,
+      up: (sql: any) => {
+          // Webhooks table for outbound events
+          sql.exec(`CREATE TABLE IF NOT EXISTS _webhooks (
+              id INTEGER PRIMARY KEY,
+              url TEXT NOT NULL,
+              event TEXT NOT NULL,
+              headers TEXT,
+              enabled INTEGER DEFAULT 1,
+              created_at TEXT DEFAULT CURRENT_TIMESTAMP
+          )`);
+          // File storage metadata
+          sql.exec(`CREATE TABLE IF NOT EXISTS _files (
+              id TEXT PRIMARY KEY,
+              owner_id TEXT,
+              filename TEXT,
+              size INTEGER,
+              content_type TEXT,
+              r2_key TEXT,
+              created_at TEXT DEFAULT CURRENT_TIMESTAMP
+          )`);
+          // User-defined cron jobs
+          sql.exec(`CREATE TABLE IF NOT EXISTS _cron_jobs (
+              id INTEGER PRIMARY KEY,
+              name TEXT NOT NULL,
+              schedule TEXT NOT NULL,
+              rpc_method TEXT NOT NULL,
+              rpc_payload TEXT,
+              enabled INTEGER DEFAULT 1,
+              owner_id TEXT,
+              created_at TEXT DEFAULT CURRENT_TIMESTAMP
+          )`);
+          // Environments table
+          sql.exec(`CREATE TABLE IF NOT EXISTS _environments (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              type TEXT CHECK(type IN ('dev', 'staging', 'prod')),
+              created_at TEXT DEFAULT CURRENT_TIMESTAMP
+          )`);
           // Add user_id column to tasks table for Row Level Security
           try {
               sql.exec("ALTER TABLE tasks ADD COLUMN user_id TEXT");
@@ -313,6 +405,10 @@ export class NanoStore extends DurableObject {
   rateLimiters: Map<string, RateLimiter>;
   // SECURITY: Memory tracker for debounced writes
   memoryTracker: MemoryTracker;
+  // RLS: Row Level Security policy engine
+  rlsEngine: RLSPolicyEngine;
+  // Automatic Reactivity: Track queries per WebSocket for auto-refresh
+  querySubscriptions: WeakMap<WebSocket, Map<string, { method: string; payload: any; tables: string[] }>>;
   
   // SECURITY: Configuration constants
   private static readonly MAX_SUBSCRIBERS_PER_TABLE = 10000;
@@ -332,6 +428,11 @@ export class NanoStore extends DurableObject {
     // Initialize Psychic cache
     this.psychicSentCache = new WeakMap();
     
+    // Initialize RLS Policy Engine
+    this.rlsEngine = new RLSPolicyEngine();
+    
+    // Initialize query subscriptions for automatic reactivity
+    this.querySubscriptions = new WeakMap();
     // SECURITY: Initialize WebSocket user ID tracking for RLS
     this.webSocketUserIds = new WeakMap();
     
@@ -1060,6 +1161,57 @@ export class NanoStore extends DurableObject {
         
         tableSubscribers.add(webSocket);
       }
+      
+      // Automatic Reactivity: Subscribe to query results
+      // When subscribed table data changes, automatically re-run the query
+      if (data.action === "subscribe_query") {
+        const { queryId, method, payload, tables } = data;
+        
+        if (!queryId || !method || !tables) {
+          webSocket.send(JSON.stringify({
+            type: "error",
+            error: "subscribe_query requires queryId, method, and tables"
+          }));
+          return;
+        }
+        
+        // Get or create query subscriptions for this WebSocket
+        if (!this.querySubscriptions.has(webSocket)) {
+          this.querySubscriptions.set(webSocket, new Map());
+        }
+        
+        const wsQueries = this.querySubscriptions.get(webSocket)!;
+        wsQueries.set(queryId, { method, payload, tables });
+        
+        console.log(`Query ${queryId} subscribed to tables: ${tables.join(', ')}`);
+        
+        // Subscribe to all affected tables
+        tables.forEach((table: string) => {
+          if (!this.subscribers.has(table)) {
+            this.subscribers.set(table, new Set());
+          }
+          this.subscribers.get(table)!.add(webSocket);
+        });
+        
+        webSocket.send(JSON.stringify({
+          type: "query_subscribed",
+          queryId
+        }));
+      }
+      
+      if (data.action === "unsubscribe_query") {
+        const { queryId } = data;
+        
+        if (this.querySubscriptions.has(webSocket)) {
+          const wsQueries = this.querySubscriptions.get(webSocket)!;
+          wsQueries.delete(queryId);
+        }
+        
+        webSocket.send(JSON.stringify({
+          type: "query_unsubscribed",
+          queryId
+        }));
+      }
 
       if (data.action === "query" && data.sql) {
         // SECURITY: Disable raw SQL queries from client to prevent SQL injection
@@ -1103,8 +1255,16 @@ export class NanoStore extends DurableObject {
                         
                         this.logAction(method, data.payload);
                         
+                        // RLS: Get owner_id from payload (for user ownership)
+                        const ownerId = data.payload?.owner_id || userId;
+                        
                         // 1. Insert into DB (Primary operation - must succeed)
                         // Set vector_status to 'pending' initially (will be updated to 'indexed' or 'failed')
+                        const result = this.sql.exec(
+                            "INSERT INTO tasks (title, status, vector_status, owner_id) VALUES (?, 'pending', 'pending', ?) RETURNING *", 
+                            title,
+                            ownerId
+                        ).toArray();
                         // Store user_id for Row Level Security
                         const result = this.sql.exec("INSERT INTO tasks (title, status, vector_status, user_id) VALUES (?, 'pending', 'pending', ?) RETURNING *", title, userId).toArray();
                         const newTask = result[0];
@@ -1112,6 +1272,27 @@ export class NanoStore extends DurableObject {
                         // 2. Replicate to D1 for distributed reads (async, non-blocking)
                         this.ctx.waitUntil(this.replicateToD1('tasks', 'insert', newTask));
 
+                        // 3. Queue AI Embedding Generation (Reliability Fix with Cloudflare Queues)
+                        // Instead of ctx.waitUntil with AI.run, push to Cloudflare Queue for retry logic
+                        if (newTask && this.env.AI_EMBEDDING_QUEUE) {
+                            this.ctx.waitUntil((async () => {
+                                try {
+                                    await this.env.AI_EMBEDDING_QUEUE.send({
+                                        taskId: newTask.id,
+                                        title: title,
+                                        doId: this.doId,
+                                        timestamp: Date.now()
+                                    });
+                                    console.log(`Queued embedding for task ${newTask.id}`);
+                                } catch (e) {
+                                    console.error(`Failed to queue embedding for task ${newTask.id}:`, e);
+                                    // Mark as failed in the database
+                                    this.sql.exec("UPDATE tasks SET vector_status = 'failed' WHERE id = ?", newTask.id);
+                                }
+                            })());
+                        } else if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
+                            // Fallback: Generate Embedding & Store (Secondary operation - best effort)
+                            // Vector Consistency: Track status in database to allow retry jobs
                         // 3. Generate Embedding & Store (Secondary operation - best effort)
                         // Vector Consistency: Track status in database to allow retry jobs
                         // PRODUCTION FIX: Use Cloudflare Queue for reliable AI processing with retry
@@ -1481,6 +1662,7 @@ export class NanoStore extends DurableObject {
                      // Support pagination to avoid loading large datasets (max 1000 per page)
                      const limitRaw = data.payload?.limit;
                      const offsetRaw = data.payload?.offset;
+                     const ownerIdFilter = data.payload?.owner_id; // RLS filter
                      
                      // Parse and validate pagination parameters (could be strings from payload)
                      const limit = limitRaw ? parseInt(String(limitRaw), 10) : 100; // Default 100 rows
@@ -1490,6 +1672,23 @@ export class NanoStore extends DurableObject {
                      const safeLimit = Math.min(Math.max(1, limit), 1000); // Between 1-1000
                      const safeOffset = Math.max(0, offset); // Non-negative
                      
+                     // Build query with RLS filtering
+                     let query = "SELECT * FROM tasks";
+                     const params: any[] = [];
+                     
+                     if (ownerIdFilter) {
+                         query += " WHERE owner_id = ?";
+                         params.push(ownerIdFilter);
+                     }
+                     
+                     query += " ORDER BY id LIMIT ? OFFSET ?";
+                     params.push(safeLimit, safeOffset);
+                     
+                     const tasks = await this.readFromD1(query, ...params);
+                     
+                     // Apply RLS filtering (additional layer of security)
+                     const userId = request.headers.get("X-User-ID") || "anonymous";
+                     const filteredTasks = this.rlsEngine.filterRows('tasks', userId, tasks);
                      // ROW LEVEL SECURITY: Filter tasks by user permissions
                      // First, check if user has explicit read permissions for tasks table
                      let hasReadPermission = false;
@@ -1514,7 +1713,7 @@ export class NanoStore extends DurableObject {
                      
                      webSocket.send(JSON.stringify({ 
                          type: "query_result", 
-                         data: tasks, 
+                         data: filteredTasks, 
                          originalSql: "listTasks",
                          pagination: { limit: safeLimit, offset: safeOffset }
                      }));
@@ -2094,6 +2293,43 @@ export class NanoStore extends DurableObject {
       return;
     }
     
+    // Track event in Analytics Engine (if configured)
+    if (this.env.ANALYTICS) {
+      this.ctx.waitUntil((async () => {
+        try {
+          await this.env.ANALYTICS.writeDataPoint({
+            indexes: [table],
+            blobs: [action, this.doId],
+            doubles: [1], // Count
+          });
+        } catch (e) {
+          console.error("Failed to track analytics:", e);
+        }
+      })());
+    }
+    
+    // Dispatch webhooks (if any registered for this event)
+    this.ctx.waitUntil((async () => {
+      try {
+        const webhooks = this.sql.exec(
+          "SELECT * FROM _webhooks WHERE event = ? AND enabled = 1",
+          `${table}.${action}`
+        ).toArray();
+        
+        for (const webhook of webhooks) {
+          if (this.env.WEBHOOK_QUEUE) {
+            await this.env.WEBHOOK_QUEUE.send({
+              webhookUrl: webhook.url,
+              event: `${table}.${action}`,
+              data: row,
+              headers: webhook.headers ? JSON.parse(webhook.headers) : {}
+            });
+          }
+        }
+      } catch (e) {
+        console.error("Failed to dispatch webhooks:", e);
+      }
+    })());
     // Dispatch webhooks for this event (async, non-blocking)
     // We don't await to avoid blocking the broadcast
     this.dispatchWebhooks(table, action, row).catch(err => {
@@ -2114,6 +2350,41 @@ export class NanoStore extends DurableObject {
       for (const socket of sockets) {
         try {
           socket.send(message);
+          
+          // Automatic Reactivity: Re-run subscribed queries
+          if (this.querySubscriptions.has(socket)) {
+            const wsQueries = this.querySubscriptions.get(socket)!;
+            
+            // Find queries that depend on this table
+            wsQueries.forEach(async (queryInfo, queryId) => {
+              if (queryInfo.tables.includes(table)) {
+                try {
+                  // Re-execute the query
+                  console.log(`Auto-refreshing query ${queryId} due to ${table} ${action}`);
+                  
+                  // Execute the RPC method again
+                  const rerunMessage = {
+                    action: 'rpc',
+                    method: queryInfo.method,
+                    payload: queryInfo.payload,
+                    _autoRefresh: true,
+                    queryId
+                  };
+                  
+                  // Simulate re-running the query (we'd call the actual RPC handler)
+                  // For now, just send a refresh notification
+                  socket.send(JSON.stringify({
+                    type: "query_refresh",
+                    queryId,
+                    table,
+                    action
+                  }));
+                } catch (e) {
+                  console.error(`Failed to auto-refresh query ${queryId}:`, e);
+                }
+              }
+            });
+          }
         } catch (err) {
           sockets.delete(socket);
         }

@@ -54,6 +54,8 @@ index_name = "nanotype-vectors"
 
 [ai]
 binding = "AI"
+# AI Gateway for caching and rate limiting
+gateway = "nano-type-ai-gateway"
 
 # Cloudflare Queue for AI Embeddings (with retry)
 [[queues.producers]]
@@ -86,6 +88,31 @@ directory = "./dist"
 [triggers]
 crons = ["0 * * * *"]
 
+# Cloudflare Queues for AI Embedding Reliability
+[[queues.producers]]
+binding = "AI_EMBEDDING_QUEUE"
+queue = "ai-embedding-queue"
+
+[[queues.consumers]]
+queue = "ai-embedding-queue"
+max_batch_size = 10
+max_batch_timeout = 30
+max_retries = 3
+dead_letter_queue = "ai-embedding-dlq"
+
+# Cloudflare Queues for Webhooks
+[[queues.producers]]
+binding = "WEBHOOK_QUEUE"
+queue = "webhook-queue"
+
+[[queues.consumers]]
+queue = "webhook-queue"
+max_batch_size = 10
+max_batch_timeout = 30
+
+# Analytics Engine for Observability
+[[analytics_engine_datasets]]
+binding = "ANALYTICS"
 # Cloudflare Queue for Webhooks
 [[queues.producers]]
 binding = "WEBHOOK_QUEUE"

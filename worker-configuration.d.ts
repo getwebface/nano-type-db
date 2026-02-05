@@ -20,6 +20,11 @@ declare global {
 		ANALYTICS: AnalyticsEngineDataset;
 		// Static Assets Binding
 		ASSETS: Fetcher;
+		// Cloudflare Queues
+		AI_EMBEDDING_QUEUE: Queue;
+		WEBHOOK_QUEUE: Queue;
+		// Analytics Engine
+		ANALYTICS: AnalyticsEngineDataset;
 		// Webhook Queue
 		WEBHOOK_QUEUE: Queue;
 	}
