@@ -281,6 +281,8 @@ export class NanoStore extends DurableObject {
   debouncedWriter: DebouncedWriter;
   // Psychic cache: Track sent IDs per WebSocket
   psychicSentCache: WeakMap<WebSocket, Set<string>>;
+  // SECURITY: Track user IDs per WebSocket for RLS
+  webSocketUserIds: WeakMap<WebSocket, string>;
   // Sync Engine: Track sync status and health
   syncEngine: {
     lastSyncTime: number;
@@ -310,6 +312,9 @@ export class NanoStore extends DurableObject {
     
     // Initialize Psychic cache
     this.psychicSentCache = new WeakMap();
+    
+    // SECURITY: Initialize WebSocket user ID tracking for RLS
+    this.webSocketUserIds = new WeakMap();
     
     // SECURITY: Initialize rate limiters
     this.rateLimiters = new Map();
@@ -775,12 +780,17 @@ export class NanoStore extends DurableObject {
         return new Response("Expected Upgrade: websocket", { status: 426 });
       }
 
+      // SECURITY: Get userId from authenticated session
+      // X-User-ID is set by the edge worker (src/index.ts) AFTER successful
+      // authentication. The client cannot set this header.
+      const userId = request.headers.get("X-User-ID") || "anonymous";
+
       try {
         // @ts-ignore: WebSocketPair is a global in Cloudflare Workers
         const webSocketPair = new WebSocketPair();
         const [client, server] = Object.values(webSocketPair) as [WebSocket, WebSocket];
 
-        this.handleSession(server);
+        this.handleSession(server, userId);
 
         return new Response(null, {
           status: 101,
@@ -796,11 +806,14 @@ export class NanoStore extends DurableObject {
     return new Response("Not found", { status: 404 });
   }
 
-  handleSession(webSocket: WebSocket) {
+  handleSession(webSocket: WebSocket, userId: string) {
     // ✅ NEW WAY: Register with the Durable Object system to use Hibernation API
     // This connects the WebSocket to the webSocketMessage(), webSocketClose(), and 
     // webSocketError() class methods defined below (lines 710, 1417, 1439)
     this.ctx.acceptWebSocket(webSocket);
+    
+    // SECURITY: Store userId for this WebSocket connection for RLS
+    this.webSocketUserIds.set(webSocket, userId);
 
     // Send reset message when DO wakes up (handleSession starts)
     // This notifies clients to re-announce their cursor/presence
@@ -869,12 +882,9 @@ export class NanoStore extends DurableObject {
             switch (method) {
                 case "createTask": {
                     try {
-                        // SECURITY: Get userId from authenticated session
-                        // X-User-ID is set by the edge worker (src/index.ts) AFTER successful
-                        // authentication. The client cannot set this header - it's added by the
-                        // worker which validates the session/API key before forwarding to DO.
-                        // This ensures rate limits are per actual user, not spoofable.
-                        const userId = request.headers.get("X-User-ID") || "anonymous";
+                        // SECURITY: Get userId from WebSocket connection
+                        // The userId was stored when the WebSocket was accepted in handleSession
+                        const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
                         
                         // SECURITY: Rate limit check (100 creates per minute per user)
                         if (!this.checkRateLimit(userId, "createTask", 100, 60000)) {
@@ -1122,7 +1132,7 @@ export class NanoStore extends DurableObject {
                 case "streamIntent": {
                     // SECURITY: Psychic Data is gated to pro tier users only
                     // Auto-sensing with AI embeddings burns through budget quickly
-                    const userId = request.headers.get("X-User-ID") || "anonymous";
+                    const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
                     
                     // Check user tier from AUTH_DB
                     try {
@@ -1256,7 +1266,7 @@ export class NanoStore extends DurableObject {
 
                 case "listTasks": {
                      // SECURITY: Get userId for Row Level Security filtering
-                     const userId = request.headers.get("X-User-ID") || "anonymous";
+                     const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
                      
                      // Read from D1 replica for horizontal scaling
                      // Support pagination to avoid loading large datasets (max 1000 per page)
@@ -1480,7 +1490,7 @@ export class NanoStore extends DurableObject {
                     }
                     
                     // SECURITY: Rate limiting for executeSQL (50 queries per minute)
-                    const userId = request.headers.get("X-User-ID") || "anonymous";
+                    const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
                     if (!this.checkRateLimit(userId, "executeSQL", 50, 60000)) {
                         webSocket.send(JSON.stringify({ 
                             type: "query_error", 
