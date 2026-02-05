@@ -1,6 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { Activity, TrendingUp, Cpu, Zap, Loader2 } from 'lucide-react';
 
+// Cloudflare pricing constants (estimated)
+const PRICING = {
+    READ_UNIT: 0.00001,    // $0.00001 per read
+    WRITE_UNIT: 0.0001,     // $0.0001 per write
+    AI_OPERATION: 0.001     // $0.001 per AI operation
+} as const;
+
 interface DailyUsage {
     date: string;
     reads: number;
@@ -204,21 +211,25 @@ export const Analytics: React.FC = () => {
                 <h4 className="text-white font-semibold mb-3">Cost Breakdown</h4>
                 <div className="space-y-2 text-sm">
                     <div className="flex justify-between text-slate-300">
-                        <span>Read Units ({formatNumber(data.totals.reads)} × $0.00001)</span>
-                        <span className="font-mono">${(data.totals.reads * 0.00001).toFixed(4)}</span>
+                        <span>Read Units ({formatNumber(data.totals.reads)} × ${PRICING.READ_UNIT})</span>
+                        <span className="font-mono">${(data.totals.reads * PRICING.READ_UNIT).toFixed(4)}</span>
                     </div>
                     <div className="flex justify-between text-slate-300">
-                        <span>Write Units ({formatNumber(data.totals.writes)} × $0.0001)</span>
-                        <span className="font-mono">${(data.totals.writes * 0.0001).toFixed(4)}</span>
+                        <span>Write Units ({formatNumber(data.totals.writes)} × ${PRICING.WRITE_UNIT})</span>
+                        <span className="font-mono">${(data.totals.writes * PRICING.WRITE_UNIT).toFixed(4)}</span>
                     </div>
                     <div className="flex justify-between text-slate-300">
-                        <span>AI Operations ({formatNumber(data.totals.ai_ops)} × $0.001)</span>
-                        <span className="font-mono">${(data.totals.ai_ops * 0.001).toFixed(4)}</span>
+                        <span>AI Operations ({formatNumber(data.totals.ai_ops)} × ${PRICING.AI_OPERATION})</span>
+                        <span className="font-mono">${(data.totals.ai_ops * PRICING.AI_OPERATION).toFixed(4)}</span>
                     </div>
                     <div className="flex justify-between text-white font-semibold pt-2 border-t border-slate-700">
                         <span>Estimated Total</span>
                         <span className="font-mono">
-                            ${((data.totals.reads * 0.00001) + (data.totals.writes * 0.0001) + (data.totals.ai_ops * 0.001)).toFixed(4)}
+                            ${(
+                                (data.totals.reads * PRICING.READ_UNIT) + 
+                                (data.totals.writes * PRICING.WRITE_UNIT) + 
+                                (data.totals.ai_ops * PRICING.AI_OPERATION)
+                            ).toFixed(4)}
                         </span>
                     </div>
                 </div>

@@ -775,29 +775,35 @@ export class NanoStore extends DurableObject {
             
             // If indexed successfully and we have values, trigger semantic reflex
             if (status === 'indexed' && values) {
-                const task = this.sql.exec("SELECT * FROM tasks WHERE id = ?", taskId).toArray()[0];
+                const taskResult = this.sql.exec("SELECT * FROM tasks WHERE id = ?", taskId).toArray();
+                const task = taskResult[0];
                 
-                // NEURAL EVENT LOOP - Semantic Reflex for queued embeddings
-                for (const key of this.memoryStore.keys()) {
-                    if (key.startsWith('semantic_sub:')) {
-                        const subscription = this.memoryStore.get(key);
-                        if (subscription && subscription.vector && subscription.socket) {
-                            try {
-                                const similarity = calculateCosineSimilarity(values, subscription.vector);
-                                if (similarity >= subscription.threshold && subscription.socket?.readyState === 1) {
-                                    subscription.socket.send(JSON.stringify({
-                                        type: "semantic_match",
-                                        topic: subscription.topic,
-                                        similarity: similarity,
-                                        row: task
-                                    }));
-                                    console.log(`Semantic match (queued): task ${taskId} matched "${subscription.topic}" (similarity: ${similarity.toFixed(3)})`);
+                // Only process semantic reflex if task still exists
+                if (task) {
+                    // NEURAL EVENT LOOP - Semantic Reflex for queued embeddings
+                    for (const key of this.memoryStore.keys()) {
+                        if (key.startsWith('semantic_sub:')) {
+                            const subscription = this.memoryStore.get(key);
+                            if (subscription && subscription.vector && subscription.socket) {
+                                try {
+                                    const similarity = calculateCosineSimilarity(values, subscription.vector);
+                                    if (similarity >= subscription.threshold && subscription.socket?.readyState === 1) {
+                                        subscription.socket.send(JSON.stringify({
+                                            type: "semantic_match",
+                                            topic: subscription.topic,
+                                            similarity: similarity,
+                                            row: task
+                                        }));
+                                        console.log(`Semantic match (queued): task ${taskId} matched "${subscription.topic}" (similarity: ${similarity.toFixed(3)})`);
+                                    }
+                                } catch (e: any) {
+                                    console.error(`Semantic check failed for ${key}:`, e.message);
                                 }
-                            } catch (e: any) {
-                                console.error(`Semantic check failed for ${key}:`, e.message);
                             }
                         }
                     }
+                } else {
+                    console.log(`Task ${taskId} no longer exists - skipping semantic reflex`);
                 }
             }
             

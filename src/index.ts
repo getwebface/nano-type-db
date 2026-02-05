@@ -409,15 +409,19 @@ export default {
     // Queue Consumer for AI Embedding with Retry Logic
     console.log(`Processing embedding batch: ${batch.messages.length} messages`);
     
+    interface EmbeddingJob {
+      taskId: number;
+      doId: string;
+      title: string;
+      timestamp: number;
+    }
+    
     for (const message of batch.messages) {
+      // Type-safe access to message body
+      const job = message.body as EmbeddingJob;
+      const { taskId, doId, title, timestamp } = job;
+      
       try {
-        const { taskId, doId, title, timestamp } = message.body as {
-          taskId: number;
-          doId: string;
-          title: string;
-          timestamp: number;
-        };
-        
         console.log(`Processing embedding for task ${taskId} in DO ${doId}`);
         
         // Generate embedding using AI
@@ -444,12 +448,12 @@ export default {
           
           console.log(`✅ Embedding indexed for task ${taskId}`);
           
-          // Log to Analytics Engine
+          // Log to Analytics Engine (standardized format)
           if (env.ANALYTICS) {
             ctx.waitUntil(
               env.ANALYTICS.writeDataPoint({
                 blobs: [doId, 'ai_embedding_success'],
-                doubles: [taskId, Date.now() - timestamp], // processing time
+                doubles: [taskId, Date.now() - timestamp], // task_id, processing_time_ms
                 indexes: [`task_${taskId}`]
               })
             );
@@ -461,14 +465,14 @@ export default {
           throw new Error('No embedding values returned from AI');
         }
       } catch (error: any) {
-        console.error(`❌ Embedding failed for message:`, error.message);
+        console.error(`❌ Embedding failed for task ${taskId} in DO ${doId}:`, error.message);
         
-        // Log failure to Analytics Engine
+        // Log failure to Analytics Engine (standardized format)
         if (env.ANALYTICS) {
           ctx.waitUntil(
             env.ANALYTICS.writeDataPoint({
-              blobs: [message.body.doId || 'unknown', 'ai_embedding_failure'],
-              doubles: [message.body.taskId || 0, message.attempts || 0],
+              blobs: [doId, 'ai_embedding_failure'],
+              doubles: [taskId, message.attempts || 0], // task_id, retry_count
               indexes: [`error_${Date.now()}`]
             })
           );
