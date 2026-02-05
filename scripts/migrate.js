@@ -11,6 +11,8 @@ const __dirname = path.dirname(__filename);
 // Configuration
 const WORKER_URL = process.env.WORKER_URL || "http://localhost:8787";
 const MIGRATIONS_DIR = path.join(__dirname, '..', 'migrations');
+// Database name must match the d1_databases binding in wrangler.toml
+const DATABASE_NAME = process.env.D1_DATABASE_NAME || "nanotype-read-replica";
 
 async function runMigrations() {
   console.log('🔄 Starting migration process...');
@@ -30,8 +32,7 @@ async function runMigrations() {
       
       try {
         // Execute the migration using wrangler d1 execute
-        // This assumes the database binding name is nanotype-read-replica based on wrangler.toml
-        const command = `wrangler d1 execute nanotype-read-replica --file=${filePath}`;
+        const command = `wrangler d1 execute ${DATABASE_NAME} --file=${filePath}`;
         console.log(`   Command: ${command}`);
         
         const output = execSync(command, { 
