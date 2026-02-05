@@ -755,11 +755,11 @@ export class DataStore extends DurableObject {
                         }
                     }
                     
-                    // Query complexity limit: max 10,000 characters
+                    // Query length limit: max 10,000 characters
                     if (rawSql.length > 10000) {
                         webSocket.send(JSON.stringify({ 
                             type: "query_error", 
-                            error: "Query too complex: maximum 10,000 characters" 
+                            error: "Query too long: maximum 10,000 characters" 
                         }));
                         break;
                     }
@@ -788,6 +788,16 @@ export class DataStore extends DurableObject {
                         webSocket.send(JSON.stringify({ 
                             type: "error", 
                             error: "updateDebounced requires key parameter" 
+                        }));
+                        break;
+                    }
+                    
+                    // Validate value size (max 100KB to prevent memory issues)
+                    const valueStr = JSON.stringify(value);
+                    if (valueStr.length > 100000) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "Value too large: maximum 100KB" 
                         }));
                         break;
                     }

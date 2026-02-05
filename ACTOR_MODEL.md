@@ -156,7 +156,8 @@ ws.send(JSON.stringify({
 ### Limitations
 - Read-only mode enforced (no INSERT, UPDATE, DELETE)
 - 10,000 character query limit
-- No access to internal tables (those prefixed with `_`)
+- Parameters must be embedded as literals (no prepared statements)
+- Use caution with user input - validate and sanitize before embedding in queries
 
 ## 3. Local Aggregation: Debounced Writes
 
@@ -223,6 +224,7 @@ canvas.addEventListener('mousemove', (e) => {
 - **Auto-flush on idle**: Writes are guaranteed within 1 second of last update
 - **Manual flush**: Available via `flushDebounced` RPC
 - **Persistent storage**: Stored in `_debounced_state` table after flush
+- **Value size limit**: Maximum 100KB per value to prevent memory issues
 
 ### Implementation Details
 ```javascript

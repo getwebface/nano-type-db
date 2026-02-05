@@ -351,9 +351,9 @@ saveButton.onClick(() => {
 ### 3. SQL Query Optimization
 
 ```javascript
-// ✅ Good: Specific, indexed queries
+// ✅ Good: Specific queries with literal values
 executeSQL({
-  sql: 'SELECT * FROM tasks WHERE status = ? ORDER BY id DESC LIMIT 10'
+  sql: "SELECT * FROM tasks WHERE status = 'pending' ORDER BY id DESC LIMIT 10"
 });
 
 // ✅ Good: Aggregations on small tables
@@ -372,7 +372,7 @@ executeSQL({
 });
 ```
 
-## Performance Comparisons
+### Performance Comparisons
 
 ### Cursor Updates: nanotypeDB vs Convex
 
@@ -381,14 +381,14 @@ executeSQL({
 // 60 cursor moves/sec = 60 database writes/sec
 for (let i = 0; i < 60; i++) {
   await convex.mutation(api.cursors.update, { position });
-  // Cost: 60 writes × $0.001 = $0.06/sec
+  // Each write is billed individually
 }
 
 // nanotypeDB approach (memory only)
 // 60 cursor updates/sec = 0 database writes
 for (let i = 0; i < 60; i++) {
   ws.send({ method: 'setCursor', payload: { position } });
-  // Cost: $0 (in-memory)
+  // Memory-only operations, no billing
 }
 ```
 
@@ -399,14 +399,14 @@ for (let i = 0; i < 60; i++) {
 // User drags slider for 5 seconds = 300 writes
 slider.addEventListener('input', async (e) => {
   await convex.mutation(api.settings.update, { value: e.target.value });
-  // Cost: 300 writes
+  // Each update is a separate billable operation
 });
 
 // nanotypeDB approach
 // User drags slider for 5 seconds = 5 writes (1/sec)
 slider.addEventListener('input', (e) => {
   ws.send({ method: 'updateDebounced', payload: { value: e.target.value } });
-  // Cost: 5 writes (99% reduction!)
+  // Batched into 5 writes total (99% reduction!)
 });
 ```
 
