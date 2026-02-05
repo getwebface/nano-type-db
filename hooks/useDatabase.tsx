@@ -131,7 +131,8 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         }
         
         // Construct WebSocket URL with explicit path and session token for auth
-        let wsUrl = `${WORKER_URL}${WS_PATH_PREFIX}/?room_id=${encodeURIComponent(roomId)}`;
+        // Add /connect to the URL
+        let wsUrl = `${WORKER_URL}${WS_PATH_PREFIX}/connect?room_id=${encodeURIComponent(roomId)}`;
         
         // Append API key if provided (takes precedence over session token)
         if (apiKey) {

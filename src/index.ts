@@ -257,13 +257,14 @@ export default {
     if (request.headers.get("Upgrade") === "websocket") {
        try {
          const newUrl = new URL(request.url);
-         newUrl.pathname = "/connect";
+         newUrl.pathname = "/connect"; // Match the DO's expected path
          
-         // 🟢 FIXED CODE: explicitly preserve Upgrade headers
+         // 🔴 FIX: Explicitly preserve the WebSocket handshake headers
          const wsHeaders = new Headers(newHeaders);
          wsHeaders.set("Upgrade", "websocket");
          wsHeaders.set("Connection", "Upgrade");
 
+         // Create fresh request with the forced headers
          const wsRequest = new Request(newUrl.toString(), {
              headers: wsHeaders,
              method: request.method
