@@ -363,8 +363,8 @@ export class NanoStore extends DurableObject {
           // For tasks table, replicate with room_id for multi-tenancy
           if (table === 'tasks') {
             await this.env.READ_REPLICA.prepare(
-              `INSERT OR REPLACE INTO tasks (id, title, status, room_id) VALUES (?, ?, ?, ?)`
-            ).bind(data.id, data.title, data.status, roomId).run();
+              `INSERT OR REPLACE INTO tasks (id, title, status, room_id, vector_status) VALUES (?, ?, ?, ?, ?)`
+            ).bind(data.id, data.title, data.status, roomId, data.vector_status || 'pending').run();
           }
           break;
 
@@ -518,8 +518,8 @@ export class NanoStore extends DurableObject {
       // Use D1 batch API for better performance
       const statements = tasks.map(task => 
         this.env.READ_REPLICA.prepare(
-          `INSERT OR REPLACE INTO tasks (id, title, status, room_id) VALUES (?, ?, ?, ?)`
-        ).bind(task.id, task.title, task.status, roomId)
+          `INSERT OR REPLACE INTO tasks (id, title, status, room_id, vector_status) VALUES (?, ?, ?, ?, ?)`
+        ).bind(task.id, task.title, task.status, roomId, task.vector_status || 'pending')
       );
 
       // Execute all statements in a batch
