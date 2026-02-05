@@ -2,28 +2,43 @@ import React, { useState } from 'react';
 import { DatabaseProvider, useDatabase } from './hooks/useDatabase';
 import { Shell } from './components/Shell';
 import { Toaster } from './components/Toaster';
-import { ArrowRight, Database } from 'lucide-react';
+import { AuthScreen } from './components/AuthScreen';
+import { authClient } from './src/lib/auth-client';
+import { ArrowRight, Database, LogOut } from 'lucide-react';
 
 const ConnectionScreen: React.FC = () => {
     const { connect, isConnected } = useDatabase();
     const [inputRoom, setInputRoom] = useState('demo-room');
+    
+    // Allow user to logout
+    const handleLogout = async () => {
+        await authClient.signOut();
+        window.location.reload();
+    };
 
     if (isConnected) {
         return <Shell roomId={inputRoom} />;
     }
 
     return (
-        <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
+        <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4 relative">
+            <button 
+                onClick={handleLogout}
+                className="absolute top-4 right-4 flex items-center gap-2 text-slate-400 hover:text-white text-sm"
+            >
+                <LogOut size={16} /> Sign Out
+            </button>
+
             <div className="w-full max-w-md space-y-8">
                 <div className="text-center">
                     <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-slate-900 border border-slate-800 mb-6">
                         <Database className="w-8 h-8 text-green-500" />
                     </div>
                     <h2 className="text-3xl font-extrabold text-white tracking-tight">
-                        Connect to nanotypeDB
+                        Connect Database
                     </h2>
                     <p className="mt-2 text-sm text-slate-400">
-                        Enter a Room ID to spin up a Durable Object.
+                        Enter a Room ID to spin up your instance.
                     </p>
                 </div>
                 
@@ -60,6 +75,17 @@ const ConnectionScreen: React.FC = () => {
 };
 
 function App() {
+    // Check session status using Better Auth hook
+    const { data: session, isPending } = authClient.useSession();
+
+    if (isPending) {
+        return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-500">Loading...</div>;
+    }
+
+    if (!session) {
+        return <AuthScreen />;
+    }
+
     return (
         <DatabaseProvider>
             <Toaster />

@@ -1,9 +1,11 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import { DatabaseContextType, QueryResult, UpdateEvent, ToastMessage, Schema, UsageStat } from '../types';
 
-const WORKER_URL = 'ws://localhost:8787'; 
-const HTTP_URL = 'http://localhost:8787'; 
-const DEMO_TOKEN = 'demo-token';
+// Dynamic URL detection for production/dev
+const PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const HOST = window.location.host; 
+const WORKER_URL = `${PROTOCOL}//${HOST}`; 
+const HTTP_URL = `${window.location.protocol}//${HOST}`;
 
 const DatabaseContext = createContext<DatabaseContextType | null>(null);
 
@@ -29,9 +31,8 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const refreshSchema = useCallback(async () => {
         if (!currentRoomIdRef.current) return;
         try {
-            const res = await fetch(`${HTTP_URL}/schema?room_id=${currentRoomIdRef.current}`, {
-                headers: { 'Authorization': `Bearer ${DEMO_TOKEN}` }
-            });
+            // Browser automatically sends Cookies (Better Auth Session)
+            const res = await fetch(`${HTTP_URL}/schema?room_id=${currentRoomIdRef.current}`);
             if (res.ok) {
                 const data = await res.json();
                 setSchema(data);
@@ -53,7 +54,9 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
 
         currentRoomIdRef.current = roomId;
-        const ws = new WebSocket(`${WORKER_URL}?room_id=${roomId}&token=${DEMO_TOKEN}`);
+        
+        // Browser automatically sends Cookies (Better Auth Session) with WebSocket
+        const ws = new WebSocket(`${WORKER_URL}?room_id=${roomId}`);
 
         ws.onopen = () => {
             console.log('Connected to DO');
