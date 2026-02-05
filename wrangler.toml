@@ -24,7 +24,7 @@ binding = "AUTH_DB"
 database_name = "nanotype-auth"
 database_id = "d1b3a27b-a1de-43ab-ba7f-5ebda88b9807"
 
-# Observability Configuration
+# Observability Configuration (Fixed TOML Syntax)
 [observability]
 enabled = false
 head_sampling_rate = 1
