@@ -164,7 +164,10 @@ const ACTIONS = {
   executeSQL: { params: ["sql", "readonly"] },
   // Debounced updates
   updateDebounced: { params: ["key", "value"] },
-  flushDebounced: { params: [] }
+  flushDebounced: { params: [] },
+  // Sync Engine monitoring
+  getSyncStatus: { params: [] },
+  forceSyncAll: { params: [] }
 };
 
 const MIGRATIONS = [
@@ -215,6 +218,13 @@ export class DataStore extends DurableObject {
   // Hybrid State: In-memory stores for transient data
   memoryStore: MemoryStore;
   debouncedWriter: DebouncedWriter;
+  // Sync Engine: Track sync status and health
+  syncEngine: {
+    lastSyncTime: number;
+    syncErrors: number;
+    totalSyncs: number;
+    isHealthy: boolean;
+  };
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -241,7 +251,18 @@ export class DataStore extends DurableObject {
       }
     });
     
+    // Initialize Sync Engine status
+    this.syncEngine = {
+      lastSyncTime: 0,
+      syncErrors: 0,
+      totalSyncs: 0,
+      isHealthy: true
+    };
+    
     this.runMigrations();
+    
+    // Perform initial sync to D1 after migrations
+    this.performInitialSync();
   }
 
   runMigrations() {
@@ -335,9 +356,17 @@ export class DataStore extends DurableObject {
           }
           break;
       }
+      
+      // Update sync metrics
+      this.syncEngine.lastSyncTime = Date.now();
+      this.syncEngine.totalSyncs++;
+      this.syncEngine.isHealthy = true;
+      
     } catch (e) {
       // Log but don't fail the primary operation if replication fails
       console.error(`D1 replication failed for ${operation} on ${table}:`, e);
+      this.syncEngine.syncErrors++;
+      this.syncEngine.isHealthy = false;
     }
   }
 
@@ -379,6 +408,89 @@ export class DataStore extends DurableObject {
     // Fallback to DO SQLite if D1 is unavailable or fails
     this.trackUsage('reads');
     return this.sql.exec(query, ...params).toArray();
+  }
+
+  /**
+   * Sync Engine: Perform initial sync from DO to D1
+   * Called once when the DO starts to ensure D1 has current data
+   */
+  async performInitialSync(): Promise<void> {
+    if (!this.env.READ_REPLICA) {
+      console.log("D1 READ_REPLICA not available, skipping initial sync");
+      return;
+    }
+
+    try {
+      console.log(`[Sync Engine] Starting initial sync for room ${this.doId}`);
+      
+      // Get all tasks from DO
+      const tasks = this.sql.exec("SELECT * FROM tasks").toArray();
+      
+      if (tasks.length === 0) {
+        console.log("[Sync Engine] No tasks to sync");
+        return;
+      }
+
+      // Batch sync to D1
+      await this.batchSyncToD1(tasks);
+      
+      this.syncEngine.lastSyncTime = Date.now();
+      this.syncEngine.totalSyncs++;
+      this.syncEngine.isHealthy = true;
+      
+      console.log(`[Sync Engine] Initial sync completed: ${tasks.length} tasks synced`);
+    } catch (e) {
+      console.error("[Sync Engine] Initial sync failed:", e);
+      this.syncEngine.syncErrors++;
+      this.syncEngine.isHealthy = false;
+      // Don't throw - allow DO to continue operating even if sync fails
+    }
+  }
+
+  /**
+   * Sync Engine: Batch sync multiple records to D1
+   * More efficient than individual syncs for bulk operations
+   */
+  async batchSyncToD1(tasks: any[]): Promise<void> {
+    if (!this.env.READ_REPLICA || tasks.length === 0) {
+      return;
+    }
+
+    try {
+      const roomId = this.doId;
+      
+      // Use D1 batch API for better performance
+      const statements = tasks.map(task => 
+        this.env.READ_REPLICA.prepare(
+          `INSERT OR REPLACE INTO tasks (id, title, status, room_id) VALUES (?, ?, ?, ?)`
+        ).bind(task.id, task.title, task.status, roomId)
+      );
+
+      // Execute all statements in a batch
+      await this.env.READ_REPLICA.batch(statements);
+      
+      console.log(`[Sync Engine] Batch synced ${tasks.length} tasks to D1`);
+    } catch (e) {
+      console.error("[Sync Engine] Batch sync failed:", e);
+      throw e;
+    }
+  }
+
+  /**
+   * Sync Engine: Get sync status and health metrics
+   */
+  getSyncStatus(): any {
+    return {
+      isHealthy: this.syncEngine.isHealthy,
+      lastSyncTime: this.syncEngine.lastSyncTime,
+      lastSyncAge: Date.now() - this.syncEngine.lastSyncTime,
+      totalSyncs: this.syncEngine.totalSyncs,
+      syncErrors: this.syncEngine.syncErrors,
+      errorRate: this.syncEngine.totalSyncs > 0 
+        ? (this.syncEngine.syncErrors / this.syncEngine.totalSyncs * 100).toFixed(2) + '%'
+        : '0%',
+      replicaAvailable: !!this.env.READ_REPLICA
+    };
   }
 
   getSchema() {
@@ -932,6 +1044,37 @@ export class DataStore extends DurableObject {
                         action: "flushDebounced",
                         message: "Debounced writes flushed to SQLite" 
                     }));
+                    break;
+                }
+                
+                // Sync Engine: Get sync status and health
+                case "getSyncStatus": {
+                    const status = this.getSyncStatus();
+                    webSocket.send(JSON.stringify({ 
+                        type: "query_result", 
+                        data: [status], 
+                        originalSql: "getSyncStatus" 
+                    }));
+                    break;
+                }
+                
+                // Sync Engine: Force full sync to D1
+                case "forceSyncAll": {
+                    try {
+                        await this.performInitialSync();
+                        webSocket.send(JSON.stringify({ 
+                            type: "success", 
+                            action: "forceSyncAll",
+                            message: "Full sync to D1 completed",
+                            status: this.getSyncStatus()
+                        }));
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            action: "forceSyncAll",
+                            error: e.message 
+                        }));
+                    }
                     break;
                 }
 
