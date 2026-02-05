@@ -31,7 +31,7 @@ database_id = "d1b3a27b-a1de-43ab-ba7f-5ebda88b9807"
 [[d1_databases]]
 binding = "READ_REPLICA"
 database_name = "nanotype-read-replica"
-database_id = "placeholder-read-replica-id"
+database_id = "3c7e5378-398d-4ddd-acd4-65d808aa454a"
 
 # Observability Configuration
 [observability]
