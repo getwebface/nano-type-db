@@ -648,135 +648,87 @@ export default {
     ctx.waitUntil(stub.fetch("http://do/backup"));
   },
 
-  async queue(batch: MessageBatch, env: Env): Promise<void> {
-    // Webhook Queue Consumer
-    for (const message of batch.messages) {
-      try {
-        const { webhookId, url, secret, payload } = message.body as {
-          webhookId: string;
-          url: string;
-          secret: string | null;
-          payload: any;
-        };
-        
-        // Prepare webhook request
-        const headers: Record<string, string> = {
-          'Content-Type': 'application/json',
-          'User-Agent': 'NanoTypeDB-Webhooks/1.0'
-        };
-        
-        // Add HMAC signature if secret is provided
-        if (secret) {
-          const encoder = new TextEncoder();
-          const data = encoder.encode(JSON.stringify(payload));
-          const key = await crypto.subtle.importKey(
-            'raw',
-            encoder.encode(secret),
-            { name: 'HMAC', hash: 'SHA-256' },
-            false,
-            ['sign']
-          );
-          const signature = await crypto.subtle.sign('HMAC', key, data);
-          const hashArray = Array.from(new Uint8Array(signature));
-          const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-          headers['X-Webhook-Signature'] = `sha256=${hashHex}`;
+    async queue(batch: MessageBatch, env: Env, ctx: ExecutionContext): Promise<void> {
+        for (const message of batch.messages) {
+            try {
+                // Distinguish message types by body shape
+                const body = message.body as any;
+
+                // Webhook message
+                if (body && body.webhookId && body.url) {
+                    const { webhookId, url, secret, payload } = body as {
+                        webhookId: string;
+                        url: string;
+                        secret?: string | null;
+                        payload: any;
+                    };
+
+                    const headers: Record<string, string> = {
+                        'Content-Type': 'application/json',
+                        'User-Agent': 'NanoTypeDB-Webhooks/1.0'
+                    };
+
+                    if (secret) {
+                        try {
+                            const encoder = new TextEncoder();
+                            const data = encoder.encode(JSON.stringify(payload));
+                            const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+                            const signature = await crypto.subtle.sign('HMAC', key, data);
+                            const hashArray = Array.from(new Uint8Array(signature));
+                            const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+                            headers['X-Webhook-Signature'] = `sha256=${hashHex}`;
+                        } catch (sigErr) {
+                            console.error('Failed to compute webhook signature:', sigErr);
+                        }
+                    }
+
+                    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(payload) });
+                    if (!res.ok) {
+                        const errorText = await res.text().catch(() => 'Unable to read response');
+                        console.error(`Webhook ${body.webhookId} failed: ${res.status} ${res.statusText} - ${errorText}`);
+                        message.retry();
+                    } else {
+                        console.log(`Webhook ${body.webhookId} delivered`);
+                        message.ack();
+                    }
+                    continue;
+                }
+
+                // Embedding job
+                if (body && typeof body.taskId === 'number' && body.doId && body.title) {
+                    const job = body as { taskId: number; doId: string; title: string; timestamp: number };
+                    try {
+                        const embeddings = await env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [job.title] });
+                        const values = embeddings.data?.[0];
+                        if (values && env.VECTOR_INDEX) {
+                            await env.VECTOR_INDEX.upsert([{ id: `${job.doId}:${job.taskId}`, values, metadata: { doId: job.doId, taskId: job.taskId } }]);
+                            const doIdObj = env.DATA_STORE.idFromString(job.doId);
+                            const stub = env.DATA_STORE.get(doIdObj);
+                            await stub.fetch('http://do/internal/update-vector-status', { method: 'POST', body: JSON.stringify({ taskId: job.taskId, status: 'indexed', values }) });
+                            if (env.ANALYTICS) {
+                                ctx.waitUntil(env.ANALYTICS.writeDataPoint({ blobs: [job.doId, 'ai_embedding_success'], doubles: [job.taskId, Date.now() - (job.timestamp || Date.now())], indexes: [`task_${job.taskId}`] }));
+                            }
+                            message.ack();
+                        } else {
+                            throw new Error('No embedding values returned');
+                        }
+                    } catch (err: any) {
+                        console.error('Embedding job failed:', err);
+                        if (env.ANALYTICS) {
+                            ctx.waitUntil(env.ANALYTICS.writeDataPoint({ blobs: [body.doId || 'unknown', 'ai_embedding_failure'], doubles: [body.taskId || 0, message.attempts || 0], indexes: [`error_${Date.now()}`] }));
+                        }
+                        message.retry();
+                    }
+                    continue;
+                }
+
+                // Unknown message type — ack to avoid infinite retries
+                console.warn('Unknown queue message type, acking:', message.body);
+                message.ack();
+            } catch (error: any) {
+                console.error('Queue processing error:', error);
+                try { message.retry(); } catch (_) {}
+            }
         }
-        
-        // Dispatch webhook
-        const response = await fetch(url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(payload)
-        });
-        
-        if (!response.ok) {
-          const errorText = await response.text().catch(() => 'Unable to read response');
-          console.error(`Webhook ${webhookId} to ${url} failed: ${response.status} ${response.statusText} - ${errorText}`);
-          // Retry will be handled by Cloudflare Queue's max_retries config
-          message.retry();
-        } else {
-          console.log(`Webhook ${webhookId} delivered successfully`);
-          message.ack();
-        }
-      } catch (error: any) {
-        console.error('Webhook delivery error:', error.message);
-  async queue(batch: MessageBatch, env: Env, ctx: ExecutionContext): Promise<void> {
-    // Queue Consumer for AI Embedding with Retry Logic
-    console.log(`Processing embedding batch: ${batch.messages.length} messages`);
-    
-    interface EmbeddingJob {
-      taskId: number;
-      doId: string;
-      title: string;
-      timestamp: number;
     }
-    
-    for (const message of batch.messages) {
-      // Type-safe access to message body
-      const job = message.body as EmbeddingJob;
-      const { taskId, doId, title, timestamp } = job;
-      
-      try {
-        console.log(`Processing embedding for task ${taskId} in DO ${doId}`);
-        
-        // Generate embedding using AI
-        const embeddings = await env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [title] });
-        const values = embeddings.data[0];
-        
-        if (values && env.VECTOR_INDEX) {
-          // Upsert to Vector Index
-          await env.VECTOR_INDEX.upsert([{
-            id: `${doId}:${taskId}`,
-            values,
-            metadata: { doId, taskId }
-          }]);
-          
-          // Update status in Durable Object
-          const doIdObj = env.DATA_STORE.idFromString(doId);
-          const stub = env.DATA_STORE.get(doIdObj);
-          
-          // Call internal endpoint to update vector status
-          await stub.fetch("http://do/internal/update-vector-status", {
-            method: "POST",
-            body: JSON.stringify({ taskId, status: 'indexed', values })
-          });
-          
-          console.log(`✅ Embedding indexed for task ${taskId}`);
-          
-          // Log to Analytics Engine (standardized format)
-          if (env.ANALYTICS) {
-            ctx.waitUntil(
-              env.ANALYTICS.writeDataPoint({
-                blobs: [doId, 'ai_embedding_success'],
-                doubles: [taskId, Date.now() - timestamp], // task_id, processing_time_ms
-                indexes: [`task_${taskId}`]
-              })
-            );
-          }
-          
-          // Acknowledge success
-          message.ack();
-        } else {
-          throw new Error('No embedding values returned from AI');
-        }
-      } catch (error: any) {
-        console.error(`❌ Embedding failed for task ${taskId} in DO ${doId}:`, error.message);
-        
-        // Log failure to Analytics Engine (standardized format)
-        if (env.ANALYTICS) {
-          ctx.waitUntil(
-            env.ANALYTICS.writeDataPoint({
-              blobs: [doId, 'ai_embedding_failure'],
-              doubles: [taskId, message.attempts || 0], // task_id, retry_count
-              indexes: [`error_${Date.now()}`]
-            })
-          );
-        }
-        
-        // Retry (message will be retried automatically up to max_retries)
-        // After max_retries, it goes to dead letter queue
-        message.retry();
-      }
-    }
-  }
 };
