@@ -203,7 +203,12 @@ const ACTIONS = {
   // Semantic Reflex - Killer Feature #1
   subscribeSemantic: { params: ["topic", "description", "threshold"] },
   // Psychic Data - Killer Feature #2
-  streamIntent: { params: ["text"] }
+  streamIntent: { params: ["text"] },
+  // Webhook Management
+  createWebhook: { params: ["url", "events", "secret?"] },
+  listWebhooks: { params: [] },
+  updateWebhook: { params: ["id", "url?", "events?", "active?"] },
+  deleteWebhook: { params: ["id"] }
 };
 
 const MIGRATIONS = [
@@ -255,6 +260,24 @@ const MIGRATIONS = [
               // Column might already exist
               console.warn("Migration v5 warning:", e);
           }
+      }
+  },
+  {
+      version: 6,
+      up: (sql: any) => {
+          // Webhooks table for client notification system
+          sql.exec(`CREATE TABLE IF NOT EXISTS _webhooks (
+              id TEXT PRIMARY KEY,
+              url TEXT NOT NULL,
+              events TEXT NOT NULL,
+              secret TEXT,
+              active INTEGER DEFAULT 1,
+              created_at INTEGER NOT NULL,
+              last_triggered_at INTEGER,
+              failure_count INTEGER DEFAULT 0
+          )`);
+          // Index for quick active webhook lookups
+          sql.exec(`CREATE INDEX IF NOT EXISTS idx_webhooks_active ON _webhooks(active) WHERE active = 1`);
       }
   }
 ];
@@ -1575,6 +1598,186 @@ export class NanoStore extends DurableObject {
                     break;
                 }
 
+                // Webhook Management
+                case "createWebhook": {
+                    this.trackUsage('writes');
+                    
+                    const { url, events, secret } = data.payload || {};
+                    
+                    // Validate inputs
+                    if (!url || typeof url !== 'string') {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "createWebhook requires url parameter" 
+                        }));
+                        break;
+                    }
+                    
+                    if (!events || typeof events !== 'string') {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "createWebhook requires events parameter (comma-separated list)" 
+                        }));
+                        break;
+                    }
+                    
+                    // Validate URL format
+                    try {
+                        new URL(url);
+                    } catch (e) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "Invalid webhook URL format" 
+                        }));
+                        break;
+                    }
+                    
+                    try {
+                        const id = `wh_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+                        const now = Date.now();
+                        
+                        this.sql.exec(
+                            `INSERT INTO _webhooks (id, url, events, secret, active, created_at, failure_count) 
+                             VALUES (?, ?, ?, ?, 1, ?, 0)`,
+                            id, url, events, secret || null, now
+                        );
+                        
+                        const webhook = { id, url, events, active: 1, created_at: now };
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_success", 
+                            action: "createWebhook",
+                            data: webhook 
+                        }));
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: `Failed to create webhook: ${e.message}` 
+                        }));
+                    }
+                    break;
+                }
+                
+                case "listWebhooks": {
+                    this.trackUsage('reads');
+                    
+                    try {
+                        const webhooks = this.sql.exec(
+                            `SELECT id, url, events, active, created_at, last_triggered_at, failure_count 
+                             FROM _webhooks ORDER BY created_at DESC`
+                        ).toArray();
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "query_result", 
+                            data: webhooks 
+                        }));
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: `Failed to list webhooks: ${e.message}` 
+                        }));
+                    }
+                    break;
+                }
+                
+                case "updateWebhook": {
+                    this.trackUsage('writes');
+                    
+                    const { id, url, events, active } = data.payload || {};
+                    
+                    if (!id) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "updateWebhook requires id parameter" 
+                        }));
+                        break;
+                    }
+                    
+                    try {
+                        const updates: string[] = [];
+                        const params: any[] = [];
+                        
+                        if (url !== undefined) {
+                            // Validate URL if provided
+                            try {
+                                new URL(url);
+                            } catch (e) {
+                                webSocket.send(JSON.stringify({ 
+                                    type: "error", 
+                                    error: "Invalid webhook URL format" 
+                                }));
+                                break;
+                            }
+                            updates.push("url = ?");
+                            params.push(url);
+                        }
+                        
+                        if (events !== undefined) {
+                            updates.push("events = ?");
+                            params.push(events);
+                        }
+                        
+                        if (active !== undefined) {
+                            updates.push("active = ?");
+                            params.push(active ? 1 : 0);
+                        }
+                        
+                        if (updates.length === 0) {
+                            webSocket.send(JSON.stringify({ 
+                                type: "error", 
+                                error: "No fields to update" 
+                            }));
+                            break;
+                        }
+                        
+                        params.push(id);
+                        this.sql.exec(
+                            `UPDATE _webhooks SET ${updates.join(', ')} WHERE id = ?`,
+                            ...params
+                        );
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_success", 
+                            action: "updateWebhook"
+                        }));
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: `Failed to update webhook: ${e.message}` 
+                        }));
+                    }
+                    break;
+                }
+                
+                case "deleteWebhook": {
+                    this.trackUsage('writes');
+                    
+                    const { id } = data.payload || {};
+                    
+                    if (!id) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "deleteWebhook requires id parameter" 
+                        }));
+                        break;
+                    }
+                    
+                    try {
+                        this.sql.exec(`DELETE FROM _webhooks WHERE id = ?`, id);
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_success", 
+                            action: "deleteWebhook"
+                        }));
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: `Failed to delete webhook: ${e.message}` 
+                        }));
+                    }
+                    break;
+                }
+
                 default:
                     webSocket.send(JSON.stringify({ error: `Unknown RPC method: ${method}` }));
             }
@@ -1646,6 +1849,9 @@ export class NanoStore extends DurableObject {
       return;
     }
     
+    // Dispatch webhooks for this event
+    this.dispatchWebhooks(table, action, row);
+    
     if (this.subscribers.has(table)) {
       const sockets = this.subscribers.get(table)!;
       
@@ -1664,6 +1870,83 @@ export class NanoStore extends DurableObject {
           sockets.delete(socket);
         }
       }
+    }
+  }
+
+  async dispatchWebhooks(table: string, action: 'added' | 'modified' | 'deleted', row: any) {
+    try {
+      // Query active webhooks that match this event
+      const eventName = `${table}.${action}`;
+      const webhooks = this.sql.exec(
+        `SELECT id, url, events, secret FROM _webhooks WHERE active = 1`
+      ).toArray();
+      
+      if (!webhooks || webhooks.length === 0) {
+        return;
+      }
+      
+      // Filter webhooks that subscribe to this event
+      const matchingWebhooks = webhooks.filter((wh: any) => {
+        const events = wh.events.split(',').map((e: string) => e.trim());
+        return events.includes('*') || events.includes(eventName) || 
+               events.includes(`${table}.*`) || events.includes(`*.${action}`);
+      });
+      
+      if (matchingWebhooks.length === 0) {
+        return;
+      }
+      
+      // Send to Cloudflare Queue for async delivery
+      if (this.env.WEBHOOK_QUEUE) {
+        const payload = {
+          event: eventName,
+          table,
+          action,
+          data: row,
+          timestamp: Date.now()
+        };
+        
+        for (const webhook of matchingWebhooks) {
+          try {
+            await this.env.WEBHOOK_QUEUE.send({
+              webhookId: webhook.id,
+              url: webhook.url,
+              secret: webhook.secret,
+              payload
+            });
+            
+            // Update last triggered time
+            this.sql.exec(
+              `UPDATE _webhooks SET last_triggered_at = ? WHERE id = ?`,
+              Date.now(), webhook.id
+            );
+          } catch (e: any) {
+            console.error(`Failed to queue webhook ${webhook.id}:`, e.message);
+            
+            // Increment failure count
+            this.sql.exec(
+              `UPDATE _webhooks SET failure_count = failure_count + 1 WHERE id = ?`,
+              webhook.id
+            );
+            
+            // Disable webhook after 10 failures
+            const failureCount = this.sql.exec(
+              `SELECT failure_count FROM _webhooks WHERE id = ?`,
+              webhook.id
+            ).toArray()[0]?.failure_count || 0;
+            
+            if (failureCount >= 10) {
+              this.sql.exec(
+                `UPDATE _webhooks SET active = 0 WHERE id = ?`,
+                webhook.id
+              );
+              console.warn(`Webhook ${webhook.id} disabled after ${failureCount} failures`);
+            }
+          }
+        }
+      }
+    } catch (e: any) {
+      console.error('dispatchWebhooks error:', e.message);
     }
   }
 

@@ -1,7 +1,7 @@
 import { NanoStore } from "./durable-object";
 import { createAuth } from "./lib/auth";
 import { SecurityHeaders, InputValidator } from "./lib/security";
-import type { ExecutionContext, ScheduledController } from "cloudflare:workers";
+import type { ExecutionContext, ScheduledController, MessageBatch } from "cloudflare:workers";
 
 export { NanoStore, NanoStore as DataStore };
 
@@ -403,5 +403,61 @@ export default {
     const id = env.DATA_STORE.idFromName("demo-room");
     const stub = env.DATA_STORE.get(id);
     ctx.waitUntil(stub.fetch("http://do/backup"));
+  },
+
+  async queue(batch: MessageBatch, env: Env): Promise<void> {
+    // Webhook Queue Consumer
+    for (const message of batch.messages) {
+      try {
+        const { webhookId, url, secret, payload } = message.body as {
+          webhookId: string;
+          url: string;
+          secret: string | null;
+          payload: any;
+        };
+        
+        // Prepare webhook request
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          'User-Agent': 'NanoTypeDB-Webhooks/1.0'
+        };
+        
+        // Add HMAC signature if secret is provided
+        if (secret) {
+          const encoder = new TextEncoder();
+          const data = encoder.encode(JSON.stringify(payload));
+          const key = await crypto.subtle.importKey(
+            'raw',
+            encoder.encode(secret),
+            { name: 'HMAC', hash: 'SHA-256' },
+            false,
+            ['sign']
+          );
+          const signature = await crypto.subtle.sign('HMAC', key, data);
+          const hashArray = Array.from(new Uint8Array(signature));
+          const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+          headers['X-Webhook-Signature'] = `sha256=${hashHex}`;
+        }
+        
+        // Dispatch webhook
+        const response = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload)
+        });
+        
+        if (!response.ok) {
+          console.error(`Webhook ${webhookId} failed: ${response.status} ${response.statusText}`);
+          // Retry will be handled by Cloudflare Queue's max_retries config
+          message.retry();
+        } else {
+          console.log(`Webhook ${webhookId} delivered successfully`);
+          message.ack();
+        }
+      } catch (error: any) {
+        console.error('Webhook delivery error:', error.message);
+        message.retry();
+      }
+    }
   }
 };
