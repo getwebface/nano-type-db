@@ -6,16 +6,14 @@ import { PsychicSearch } from './PsychicSearch';
 import { ApiKeys } from './ApiKeys';
 import { Snapshots } from './Snapshots';
 import { Analytics } from './Analytics';
-import { Layout, Table2, HardDrive, Circle, Plus, Loader2, Activity, Settings, Database } from 'lucide-react';
+import { Layout, Table2, HardDrive, Circle, Plus, Loader2, Activity, Settings, Database, Users } from 'lucide-react';
 import { VisualSchemaEditor } from './VisualSchemaEditor';
-import { Layout, Table2, HardDrive, Circle, Plus, Loader2, Activity, Users } from 'lucide-react';
 
 export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
     const { schema, usageStats, status, rpc } = useDatabase();
     const [selectedTable, setSelectedTable] = useState<string>('tasks');
     const [activeView, setActiveView] = useState<'tables' | 'settings'>('tables');
     const [settingsTab, setSettingsTab] = useState<'api-keys' | 'snapshots' | 'analytics'>('api-keys');
-    const [activeView, setActiveView] = useState<'tables'>('tables');
     const [presenceData, setPresenceData] = useState<any[]>([]);
     
     useEffect(() => {
@@ -237,23 +235,6 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                                 ))}
                             </div>
                         </header>
-                <header className="px-8 py-6 border-b border-slate-800 bg-slate-900 flex justify-between items-center">
-                    <h2 className="text-2xl font-bold text-white capitalize flex items-center gap-2">
-                        {selectedTable}
-                        <span className="text-sm font-normal text-slate-500 ml-2 border border-slate-700 px-2 py-0.5 rounded-full">
-                            {data ? data.length : 0} records
-                        </span>
-                    </h2>
-                    
-                    {/* Schema Info Badge */}
-                    <div className="hidden md:flex gap-2">
-                        {schema && schema[selectedTable] && schema[selectedTable].map(col => (
-                            <span key={col.name} className="text-xs font-mono text-slate-500 bg-slate-800 px-2 py-1 rounded">
-                                {col.name}: {col.type}
-                            </span>
-                        ))}
-                    </div>
-                </header>
 
                 <div className="flex-1 overflow-auto p-8 bg-slate-900">
                     {/* Visual Schema Editor */}
@@ -268,6 +249,8 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                 <div className="h-auto">
                     <SqlConsole currentTable={selectedTable} />
                 </div>
+                    </>
+                )}
             </main>
         </div>
     );
