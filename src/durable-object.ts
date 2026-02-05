@@ -265,6 +265,13 @@ const MIGRATIONS = [
   {
       version: 6,
       up: (sql: any) => {
+          // Add user_id column to tasks table for Row Level Security
+          try {
+              sql.exec("ALTER TABLE tasks ADD COLUMN user_id TEXT");
+          } catch (e) {
+              // Column might already exist
+              console.warn("Migration v6 warning:", e);
+          }
           // Webhooks table for client notification system
           sql.exec(`CREATE TABLE IF NOT EXISTS _webhooks (
               id TEXT PRIMARY KEY,
@@ -293,6 +300,8 @@ export class NanoStore extends DurableObject {
   debouncedWriter: DebouncedWriter;
   // Psychic cache: Track sent IDs per WebSocket
   psychicSentCache: WeakMap<WebSocket, Set<string>>;
+  // SECURITY: Track user IDs per WebSocket for RLS
+  webSocketUserIds: WeakMap<WebSocket, string>;
   // Sync Engine: Track sync status and health
   syncEngine: {
     lastSyncTime: number;
@@ -322,6 +331,9 @@ export class NanoStore extends DurableObject {
     
     // Initialize Psychic cache
     this.psychicSentCache = new WeakMap();
+    
+    // SECURITY: Initialize WebSocket user ID tracking for RLS
+    this.webSocketUserIds = new WeakMap();
     
     // SECURITY: Initialize rate limiters
     this.rateLimiters = new Map();
@@ -966,12 +978,17 @@ export class NanoStore extends DurableObject {
         return new Response("Expected Upgrade: websocket", { status: 426 });
       }
 
+      // SECURITY: Get userId from authenticated session
+      // X-User-ID is set by the edge worker (src/index.ts) AFTER successful
+      // authentication. The client cannot set this header.
+      const userId = request.headers.get("X-User-ID") || "anonymous";
+
       try {
         // @ts-ignore: WebSocketPair is a global in Cloudflare Workers
         const webSocketPair = new WebSocketPair();
         const [client, server] = Object.values(webSocketPair) as [WebSocket, WebSocket];
 
-        this.handleSession(server);
+        this.handleSession(server, userId);
 
         return new Response(null, {
           status: 101,
@@ -987,11 +1004,14 @@ export class NanoStore extends DurableObject {
     return new Response("Not found", { status: 404 });
   }
 
-  handleSession(webSocket: WebSocket) {
+  handleSession(webSocket: WebSocket, userId: string) {
     // ✅ NEW WAY: Register with the Durable Object system to use Hibernation API
     // This connects the WebSocket to the webSocketMessage(), webSocketClose(), and 
     // webSocketError() class methods defined below (lines 710, 1417, 1439)
     this.ctx.acceptWebSocket(webSocket);
+    
+    // SECURITY: Store userId for this WebSocket connection for RLS
+    this.webSocketUserIds.set(webSocket, userId);
 
     // Send reset message when DO wakes up (handleSession starts)
     // This notifies clients to re-announce their cursor/presence
@@ -1060,12 +1080,9 @@ export class NanoStore extends DurableObject {
             switch (method) {
                 case "createTask": {
                     try {
-                        // SECURITY: Get userId from authenticated session
-                        // X-User-ID is set by the edge worker (src/index.ts) AFTER successful
-                        // authentication. The client cannot set this header - it's added by the
-                        // worker which validates the session/API key before forwarding to DO.
-                        // This ensures rate limits are per actual user, not spoofable.
-                        const userId = request.headers.get("X-User-ID") || "anonymous";
+                        // SECURITY: Get userId from WebSocket connection
+                        // The userId was stored when the WebSocket was accepted in handleSession
+                        const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
                         
                         // SECURITY: Rate limit check (100 creates per minute per user)
                         if (!this.checkRateLimit(userId, "createTask", 100, 60000)) {
@@ -1088,7 +1105,8 @@ export class NanoStore extends DurableObject {
                         
                         // 1. Insert into DB (Primary operation - must succeed)
                         // Set vector_status to 'pending' initially (will be updated to 'indexed' or 'failed')
-                        const result = this.sql.exec("INSERT INTO tasks (title, status, vector_status) VALUES (?, 'pending', 'pending') RETURNING *", title).toArray();
+                        // Store user_id for Row Level Security
+                        const result = this.sql.exec("INSERT INTO tasks (title, status, vector_status, user_id) VALUES (?, 'pending', 'pending', ?) RETURNING *", title, userId).toArray();
                         const newTask = result[0];
 
                         // 2. Replicate to D1 for distributed reads (async, non-blocking)
@@ -1321,6 +1339,35 @@ export class NanoStore extends DurableObject {
                 }
 
                 case "streamIntent": {
+                    // SECURITY: Psychic Data is gated to pro tier users only
+                    // Auto-sensing with AI embeddings burns through budget quickly
+                    const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                    
+                    // Check user tier from AUTH_DB
+                    try {
+                        const userCheck = await this.env.AUTH_DB.prepare(
+                            "SELECT tier FROM user WHERE id = ?"
+                        ).bind(userId).first();
+                        
+                        if (!userCheck || userCheck.tier !== 'pro') {
+                            webSocket.send(JSON.stringify({ 
+                                type: "error", 
+                                error: "Psychic Search is a pro-tier feature. Please upgrade to access AI-powered auto-sensing.",
+                                feature: "psychic_search"
+                            }));
+                            break;
+                        }
+                    } catch (e: any) {
+                        console.warn("Tier check failed for streamIntent:", e.message);
+                        // Fail closed - deny access if we can't verify tier
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "Unable to verify subscription tier. Please try again.",
+                            feature: "psychic_search"
+                        }));
+                        break;
+                    }
+                    
                     // Psychic Data: Predict user needs and pre-push data
                     const text = data.payload?.text;
                     if (!text || typeof text !== 'string') {
@@ -1427,6 +1474,9 @@ export class NanoStore extends DurableObject {
                      break;
 
                 case "listTasks": {
+                     // SECURITY: Get userId for Row Level Security filtering
+                     const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                     
                      // Read from D1 replica for horizontal scaling
                      // Support pagination to avoid loading large datasets (max 1000 per page)
                      const limitRaw = data.payload?.limit;
@@ -1440,11 +1490,28 @@ export class NanoStore extends DurableObject {
                      const safeLimit = Math.min(Math.max(1, limit), 1000); // Between 1-1000
                      const safeOffset = Math.max(0, offset); // Non-negative
                      
-                     const tasks = await this.readFromD1(
-                         "SELECT * FROM tasks ORDER BY id LIMIT ? OFFSET ?", 
-                         safeLimit, 
-                         safeOffset
-                     );
+                     // ROW LEVEL SECURITY: Filter tasks by user permissions
+                     // First, check if user has explicit read permissions for tasks table
+                     let hasReadPermission = false;
+                     try {
+                         const permissionCheck = await this.env.AUTH_DB.prepare(
+                             "SELECT can_read FROM permissions WHERE user_id = ? AND room_id = ? AND table_name = 'tasks'"
+                         ).bind(userId, this.doId).first();
+                         
+                         if (permissionCheck && permissionCheck.can_read) {
+                             hasReadPermission = true;
+                         }
+                     } catch (e: any) {
+                         console.warn("Permission check failed:", e.message);
+                     }
+                     
+                     // Permission model:
+                     // - If user has explicit read permission (can_read = true), show ALL tasks in the room
+                     // - Otherwise, show only tasks created by this user (user_id filter)
+                     const tasks = hasReadPermission 
+                         ? await this.readFromD1("SELECT * FROM tasks ORDER BY id LIMIT ? OFFSET ?", safeLimit, safeOffset)
+                         : await this.readFromD1("SELECT * FROM tasks WHERE user_id = ? ORDER BY id LIMIT ? OFFSET ?", userId, safeLimit, safeOffset);
+                     
                      webSocket.send(JSON.stringify({ 
                          type: "query_result", 
                          data: tasks, 
@@ -1634,7 +1701,7 @@ export class NanoStore extends DurableObject {
                     }
                     
                     // SECURITY: Rate limiting for executeSQL (50 queries per minute)
-                    const userId = request.headers.get("X-User-ID") || "anonymous";
+                    const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
                     if (!this.checkRateLimit(userId, "executeSQL", 50, 60000)) {
                         webSocket.send(JSON.stringify({ 
                             type: "query_error", 
