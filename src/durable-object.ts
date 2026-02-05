@@ -151,6 +151,24 @@ class DebouncedWriter {
   }
 }
 
+/**
+ * Calculate cosine similarity between two vectors using dot product
+ * Since BGE embeddings are normalized, dot product equals cosine similarity
+ * Returns a value between -1 and 1 (higher = more similar)
+ */
+function calculateCosineSimilarity(vecA: number[], vecB: number[]): number {
+  if (vecA.length !== vecB.length) {
+    throw new Error('Vectors must have the same length');
+  }
+  
+  let dotProduct = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    dotProduct += vecA[i] * vecB[i];
+  }
+  
+  return dotProduct;
+}
+
 // 1. Define the Manifest explicitly
 // Added 'search' to actions
 const ACTIONS = {
@@ -173,7 +191,9 @@ const ACTIONS = {
   flushDebounced: { params: [] },
   // Sync Engine monitoring
   getSyncStatus: { params: [] },
-  forceSyncAll: { params: [] }
+  forceSyncAll: { params: [] },
+  // Semantic Reflex - Killer Feature #1
+  subscribeSemantic: { params: ["topic", "description", "threshold"] }
 };
 
 const MIGRATIONS = [
@@ -765,6 +785,35 @@ export class NanoStore extends DurableObject {
                                         // Update status to 'indexed' on success
                                         this.sql.exec("UPDATE tasks SET vector_status = 'indexed' WHERE id = ?", newTask.id);
                                         console.log(`Vector indexed for task ${newTask.id}`);
+                                        
+                                        // NEURAL EVENT LOOP - Killer Feature #1: Semantic Reflex
+                                        // Hold vector in RAM and check semantic subscriptions
+                                        // Calculate Cosine Similarity (Dot Product) in V8 for instant alerts
+                                        for (const key of this.memoryStore.keys()) {
+                                            if (key.startsWith('semantic_sub:')) {
+                                                const subscription = this.memoryStore.get(key);
+                                                if (subscription && subscription.vector && subscription.socket) {
+                                                    try {
+                                                        // Calculate cosine similarity between task vector and subscription vector
+                                                        const similarity = calculateCosineSimilarity(values, subscription.vector);
+                                                        
+                                                        // If similarity score exceeds threshold, send semantic match notification
+                                                        if (similarity >= subscription.threshold) {
+                                                            subscription.socket.send(JSON.stringify({
+                                                                type: "semantic_match",
+                                                                topic: subscription.topic,
+                                                                similarity: similarity,
+                                                                row: newTask
+                                                            }));
+                                                            console.log(`Semantic match: task ${newTask.id} matched subscription "${subscription.topic}" (similarity: ${similarity.toFixed(3)})`);
+                                                        }
+                                                    } catch (e: any) {
+                                                        // Don't fail the entire operation if one subscription check fails
+                                                        console.error(`Semantic subscription check failed for ${key}:`, e.message);
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 } catch (e: any) {
                                     // Update status to 'failed' on error (allows future retry)
@@ -1047,6 +1096,88 @@ export class NanoStore extends DurableObject {
                         data: presence, 
                         originalSql: "getPresence" 
                     }));
+                    break;
+                }
+                
+                // Semantic Reflex - Killer Feature #1: Subscribe based on meaning, not just ID
+                case "subscribeSemantic": {
+                    this.trackUsage('ai_ops'); // Track AI operation usage
+                    
+                    const { topic, description, threshold } = data.payload || {};
+                    
+                    // Input validation
+                    if (!topic || typeof topic !== 'string' || topic.trim().length === 0) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "subscribeSemantic requires a non-empty topic string" 
+                        }));
+                        break;
+                    }
+                    if (!description || typeof description !== 'string' || description.trim().length === 0) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "subscribeSemantic requires a non-empty description string" 
+                        }));
+                        break;
+                    }
+                    if (typeof threshold !== 'number' || threshold < 0 || threshold > 1) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "subscribeSemantic requires threshold between 0 and 1" 
+                        }));
+                        break;
+                    }
+                    
+                    // Validate description length
+                    if (description.length > 500) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "Description too long: maximum 500 characters" 
+                        }));
+                        break;
+                    }
+                    
+                    // Generate embedding for the subscription description
+                    try {
+                        if (!this.env.AI) {
+                            webSocket.send(JSON.stringify({ 
+                                type: "error", 
+                                error: "AI service not available" 
+                            }));
+                            break;
+                        }
+                        
+                        const embeddings = await this.env.AI.run('@cf/baai/bge-base-en-v1.5', { 
+                            text: [description.trim()] 
+                        });
+                        const vector = embeddings.data[0];
+                        
+                        if (!vector || !Array.isArray(vector)) {
+                            throw new Error('Failed to generate embedding vector');
+                        }
+                        
+                        // Store subscription in MemoryStore with WebSocket reference
+                        // Key format: semantic_sub:{topic}:{timestamp}
+                        const subKey = `semantic_sub:${topic}:${Date.now()}`;
+                        this.memoryStore.set(subKey, {
+                            topic,
+                            description,
+                            vector,
+                            threshold,
+                            socket: webSocket // Store socket reference for notifications
+                        });
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "success", 
+                            action: "subscribeSemantic",
+                            data: { topic, threshold }
+                        }));
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: `subscribeSemantic failed: ${e.message}` 
+                        }));
+                    }
                     break;
                 }
                 
