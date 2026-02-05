@@ -675,6 +675,47 @@ export class NanoStore extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
+    // HEALTH CHECK ENDPOINT
+    if (url.pathname === "/health") {
+      try {
+        // Perform basic health checks
+        const health = {
+          status: "healthy",
+          timestamp: new Date().toISOString(),
+          doId: this.doId,
+          syncEngine: {
+            isHealthy: this.syncEngine.isHealthy,
+            lastSyncTime: this.syncEngine.lastSyncTime,
+            syncErrors: this.syncEngine.syncErrors,
+            totalSyncs: this.syncEngine.totalSyncs,
+          },
+          memory: {
+            debouncedWritesSize: this.memoryTracker.getCurrentSize(),
+            debouncedWritesLimit: this.memoryTracker.getRemaining() + this.memoryTracker.getCurrentSize(),
+            debouncedWritesRemaining: this.memoryTracker.getRemaining(),
+          },
+          subscribers: {
+            totalTables: this.subscribers.size,
+            tables: Array.from(this.subscribers.entries()).map(([table, subs]) => ({
+              table,
+              count: subs.size
+            }))
+          },
+          rateLimiters: {
+            activeKeys: this.rateLimiters.size
+          }
+        };
+        
+        return Response.json(health);
+      } catch (e: any) {
+        return Response.json({
+          status: "unhealthy",
+          error: e.message,
+          timestamp: new Date().toISOString()
+        }, { status: 500 });
+      }
+    }
+
     // QUERY ENDPOINT for global queries
     if (url.pathname === "/query") {
       this.trackUsage('reads');
@@ -771,10 +812,28 @@ export class NanoStore extends DurableObject {
       }
 
       if (data.action === "subscribe" && data.table) {
+        // SECURITY: Limit number of subscribers per table to prevent DoS
+        const MAX_SUBSCRIBERS_PER_TABLE = 10000;
+        
         if (!this.subscribers.has(data.table)) {
           this.subscribers.set(data.table, new Set());
         }
-        this.subscribers.get(data.table)!.add(webSocket);
+        
+        const tableSubscribers = this.subscribers.get(data.table)!;
+        
+        if (tableSubscribers.size >= MAX_SUBSCRIBERS_PER_TABLE) {
+          try {
+            webSocket.send(JSON.stringify({
+              type: "error",
+              error: `Table '${data.table}' subscription limit reached (${MAX_SUBSCRIBERS_PER_TABLE} max). Please try again later.`
+            }));
+          } catch (e) {
+            console.error("Failed to send subscription limit error:", e);
+          }
+          return;
+        }
+        
+        tableSubscribers.add(webSocket);
       }
 
       if (data.action === "query" && data.sql) {
@@ -1312,16 +1371,18 @@ export class NanoStore extends DurableObject {
                             throw new Error('Failed to generate embedding vector');
                         }
                         
-                        // Store subscription in MemoryStore with WebSocket reference
+                        // SECURITY: Store subscription with TTL (1 hour default) to prevent memory leaks
                         // Key format: semantic_sub:{topic}:{timestamp}
                         const subKey = `semantic_sub:${topic}:${Date.now()}`;
+                        const TTL_MS = 60 * 60 * 1000; // 1 hour
+                        
                         this.memoryStore.set(subKey, {
                             topic,
                             description,
                             vector,
                             threshold,
                             socket: webSocket // Store socket reference for notifications
-                        });
+                        }, TTL_MS); // Add TTL to automatically cleanup old subscriptions
                         
                         webSocket.send(JSON.stringify({ 
                             type: "success", 
@@ -1351,6 +1412,16 @@ export class NanoStore extends DurableObject {
                         break;
                     }
                     
+                    // SECURITY: Rate limiting for executeSQL (50 queries per minute)
+                    const userId = request.headers.get("X-User-ID") || "anonymous";
+                    if (!this.checkRateLimit(userId, "executeSQL", 50, 60000)) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "query_error", 
+                            error: "Rate limit exceeded for executeSQL" 
+                        }));
+                        break;
+                    }
+                    
                     // Security: Only allow read-only queries
                     if (readonly) {
                         const sqlLower = rawSql.toLowerCase().trim();
@@ -1373,8 +1444,13 @@ export class NanoStore extends DurableObject {
                     }
                     
                     try {
-                        // Use D1 for read-only queries to enable horizontal scaling
-                        const results = await this.readFromD1(rawSql);
+                        // PERFORMANCE: Add query timeout (5 seconds max)
+                        const results = await QueryTimeout.withTimeout(
+                            async () => this.readFromD1(rawSql),
+                            5000,
+                            "Query execution timeout (max 5 seconds)"
+                        );
+                        
                         webSocket.send(JSON.stringify({ 
                             type: "query_result", 
                             data: results, 
@@ -1401,15 +1477,29 @@ export class NanoStore extends DurableObject {
                         break;
                     }
                     
-                    // Validate value size (max 100KB to prevent memory issues)
+                    // SECURITY: Validate value size (max 100KB per value)
                     const valueStr = JSON.stringify(value);
-                    if (valueStr.length > 100000) {
+                    const valueSize = valueStr.length;
+                    
+                    if (valueSize > 100000) {
                         webSocket.send(JSON.stringify({ 
                             type: "error", 
                             error: "Value too large: maximum 100KB" 
                         }));
                         break;
                     }
+                    
+                    // SECURITY: Check total memory limit before accepting write
+                    if (!this.memoryTracker.canAdd(valueSize)) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "Memory limit reached. Please wait for pending writes to flush." 
+                        }));
+                        break;
+                    }
+                    
+                    // Add to memory tracker
+                    this.memoryTracker.add(valueSize);
                     
                     // Write to debounced buffer (will flush after 1 second of inactivity)
                     this.debouncedWriter.write(key, value);
