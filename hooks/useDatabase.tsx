@@ -9,6 +9,9 @@ const HTTP_URL = `${window.location.protocol}//${HOST}`;
 
 // Configuration constants
 const OPTIMISTIC_UPDATE_TIMEOUT = 10000; // 10 seconds
+const WS_CONNECTION_TIMEOUT = 10000; // 10 seconds for WebSocket to connect
+const WS_RECONNECT_INTERVAL = 3000; // 3 seconds between reconnection attempts
+const MAX_RECONNECT_ATTEMPTS = 5; // Maximum reconnection attempts
 
 const DatabaseContext = createContext<DatabaseContextType | null>(null);
 
@@ -22,6 +25,10 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const [usageStats, setUsageStats] = useState<UsageStat[]>([]);
     const currentRoomIdRef = useRef<string>("");
     const pendingOptimisticUpdates = useRef<Map<string, OptimisticUpdate>>(new Map());
+    const reconnectAttemptsRef = useRef<number>(0);
+    const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const connectionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const shouldReconnectRef = useRef<boolean>(true);
     
     const subscribedTablesRef = useRef<Set<string>>(new Set());
 
@@ -54,26 +61,92 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, [socket]);
 
     const connect = useCallback((roomId: string) => {
+        // Clear any pending reconnection attempts
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = null;
+        }
+        
+        if (connectionTimeoutRef.current) {
+            clearTimeout(connectionTimeoutRef.current);
+            connectionTimeoutRef.current = null;
+        }
+
+        // Close existing socket if any
         if (socket) {
             socket.onclose = null;
+            socket.onerror = null;
             socket.close();
         }
 
         setStatus('connecting');
         currentRoomIdRef.current = roomId;
+        shouldReconnectRef.current = true;
+        
+        // Construct WebSocket URL
+        const wsUrl = `${WORKER_URL}?room_id=${encodeURIComponent(roomId)}`;
+        console.log('Connecting to WebSocket:', wsUrl);
         
         // Browser automatically sends Cookies (Better Auth Session) with WebSocket
-        const ws = new WebSocket(`${WORKER_URL}?room_id=${roomId}`);
+        const ws = new WebSocket(wsUrl);
+
+        // Set a connection timeout
+        connectionTimeoutRef.current = setTimeout(() => {
+            if (ws.readyState !== WebSocket.OPEN) {
+                console.error('WebSocket connection timeout');
+                ws.close();
+                addToast('Connection timeout. Please try again.', 'error');
+                setStatus('disconnected');
+                
+                // Attempt reconnection if not exceeded max attempts
+                if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+                    reconnectAttemptsRef.current++;
+                    console.log(`Reconnection attempt ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS}`);
+                    
+                    reconnectTimeoutRef.current = setTimeout(() => {
+                        connect(roomId);
+                    }, WS_RECONNECT_INTERVAL);
+                } else {
+                    addToast('Maximum reconnection attempts reached. Please refresh the page.', 'error');
+                    reconnectAttemptsRef.current = 0;
+                }
+            }
+        }, WS_CONNECTION_TIMEOUT);
 
         ws.onopen = () => {
             console.log('Connected to DO');
+            
+            // Clear connection timeout
+            if (connectionTimeoutRef.current) {
+                clearTimeout(connectionTimeoutRef.current);
+                connectionTimeoutRef.current = null;
+            }
+            
+            // Reset reconnection counter on successful connection
+            reconnectAttemptsRef.current = 0;
+            
             setStatus('connected');
             setIsConnected(true);
             refreshSchema();
+            
             // Initial usage fetch
             setTimeout(() => {
-                ws.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
+                }
             }, 500);
+        };
+
+        ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+            
+            // Clear connection timeout
+            if (connectionTimeoutRef.current) {
+                clearTimeout(connectionTimeoutRef.current);
+                connectionTimeoutRef.current = null;
+            }
+            
+            addToast('Connection error. Retrying...', 'error');
         };
 
         ws.onmessage = (event) => {
@@ -118,11 +191,33 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             }
         };
 
-        ws.onclose = () => {
+        ws.onclose = (event) => {
+            console.log('WebSocket closed:', event.code, event.reason);
+            
+            // Clear connection timeout
+            if (connectionTimeoutRef.current) {
+                clearTimeout(connectionTimeoutRef.current);
+                connectionTimeoutRef.current = null;
+            }
+            
             setIsConnected(false);
             setStatus('disconnected');
             setSocket(null);
             setSchema(null);
+            
+            // Attempt reconnection if it was not a clean close and we should reconnect
+            if (shouldReconnectRef.current && event.code !== 1000 && reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+                reconnectAttemptsRef.current++;
+                console.log(`Connection lost. Reconnecting (attempt ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})...`);
+                addToast(`Connection lost. Reconnecting...`, 'info');
+                
+                reconnectTimeoutRef.current = setTimeout(() => {
+                    connect(roomId);
+                }, WS_RECONNECT_INTERVAL);
+            } else if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+                addToast('Connection lost. Please refresh the page.', 'error');
+                reconnectAttemptsRef.current = 0;
+            }
         };
 
         setSocket(ws);
@@ -204,6 +299,27 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
         subscribedTablesRef.current.add(table);
         socket.send(JSON.stringify({ action: 'subscribe', table }));
+    }, [socket]);
+
+    // Cleanup on unmount
+    useEffect(() => {
+        return () => {
+            shouldReconnectRef.current = false;
+            
+            if (reconnectTimeoutRef.current) {
+                clearTimeout(reconnectTimeoutRef.current);
+            }
+            
+            if (connectionTimeoutRef.current) {
+                clearTimeout(connectionTimeoutRef.current);
+            }
+            
+            if (socket) {
+                socket.onclose = null;
+                socket.onerror = null;
+                socket.close();
+            }
+        };
     }, [socket]);
 
     return (

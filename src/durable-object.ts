@@ -210,25 +210,35 @@ export class DataStore extends DurableObject {
         return new Response("Expected Upgrade: websocket", { status: 426 });
       }
 
-      // @ts-ignore: WebSocketPair is a global in Cloudflare Workers
-      const webSocketPair = new WebSocketPair();
-      const [client, server] = Object.values(webSocketPair) as [WebSocket, WebSocket];
+      try {
+        // @ts-ignore: WebSocketPair is a global in Cloudflare Workers
+        const webSocketPair = new WebSocketPair();
+        const [client, server] = Object.values(webSocketPair) as [WebSocket, WebSocket];
 
-      this.handleSession(server);
+        this.handleSession(server);
 
-      return new Response(null, {
-        status: 101,
-        // @ts-ignore: webSocket property exists in Cloudflare ResponseInit
-        webSocket: client,
-      });
+        return new Response(null, {
+          status: 101,
+          // @ts-ignore: webSocket property exists in Cloudflare ResponseInit
+          webSocket: client,
+        });
+      } catch (error: any) {
+        console.error("WebSocket upgrade failed:", error);
+        return new Response(`WebSocket upgrade failed: ${error.message}`, { status: 500 });
+      }
     }
 
     return new Response("Not found", { status: 404 });
   }
 
   handleSession(webSocket: WebSocket) {
-    // @ts-ignore: accept method exists on Cloudflare WebSocket
-    webSocket.accept();
+    try {
+      // @ts-ignore: accept method exists on Cloudflare WebSocket
+      webSocket.accept();
+    } catch (error) {
+      console.error("Failed to accept WebSocket:", error);
+      return;
+    }
 
     webSocket.addEventListener("message", async (event) => {
       try {
@@ -407,11 +417,22 @@ export class DataStore extends DurableObject {
         }
 
       } catch (err: any) {
-        webSocket.send(JSON.stringify({ error: err.message }));
+        console.error("WebSocket message error:", err);
+        try {
+          webSocket.send(JSON.stringify({ error: err.message }));
+        } catch (sendError) {
+          console.error("Failed to send error message:", sendError);
+        }
       }
     });
 
-    webSocket.addEventListener("close", () => {
+    webSocket.addEventListener("close", (event) => {
+      console.log("WebSocket closed:", event.code, event.reason);
+      this.subscribers.forEach((set) => set.delete(webSocket));
+    });
+
+    webSocket.addEventListener("error", (event) => {
+      console.error("WebSocket error:", event);
       this.subscribers.forEach((set) => set.delete(webSocket));
     });
   }
