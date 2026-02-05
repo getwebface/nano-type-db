@@ -799,13 +799,16 @@ export class NanoStore extends DurableObject {
                                                         
                                                         // If similarity score exceeds threshold, send semantic match notification
                                                         if (similarity >= subscription.threshold) {
-                                                            subscription.socket.send(JSON.stringify({
-                                                                type: "semantic_match",
-                                                                topic: subscription.topic,
-                                                                similarity: similarity,
-                                                                row: newTask
-                                                            }));
-                                                            console.log(`Semantic match: task ${newTask.id} matched subscription "${subscription.topic}" (similarity: ${similarity.toFixed(3)})`);
+                                                            // Check if socket is still open before sending
+                                                            if (subscription.socket.readyState === 1) { // WebSocket.OPEN
+                                                                subscription.socket.send(JSON.stringify({
+                                                                    type: "semantic_match",
+                                                                    topic: subscription.topic,
+                                                                    similarity: similarity,
+                                                                    row: newTask
+                                                                }));
+                                                                console.log(`Semantic match: task ${newTask.id} matched subscription "${subscription.topic}" (similarity: ${similarity.toFixed(3)})`);
+                                                            }
                                                         }
                                                     } catch (e: any) {
                                                         // Don't fail the entire operation if one subscription check fails
@@ -1331,6 +1334,23 @@ export class NanoStore extends DurableObject {
   webSocketClose(webSocket: WebSocket, code: number, reason: string, wasClean: boolean) {
     console.log("WebSocket closed:", code, reason);
     this.subscribers.forEach((set) => set.delete(webSocket));
+    
+    // Cleanup semantic subscriptions for this WebSocket to prevent memory leaks
+    const keysToDelete: string[] = [];
+    for (const key of this.memoryStore.keys()) {
+      if (key.startsWith('semantic_sub:')) {
+        const subscription = this.memoryStore.get(key);
+        if (subscription && subscription.socket === webSocket) {
+          keysToDelete.push(key);
+        }
+      }
+    }
+    
+    // Delete the subscriptions
+    keysToDelete.forEach(key => {
+      this.memoryStore.delete(key);
+      console.log(`Cleaned up semantic subscription: ${key}`);
+    });
   }
 
   webSocketError(webSocket: WebSocket, error: unknown) {
