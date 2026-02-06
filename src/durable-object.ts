@@ -250,7 +250,6 @@ const ACTIONS = {
   exportAuditLog: { params: ["format?"] },
   // Webhook Management
   createWebhook: { params: ["url", "events", "secret?"] },
-  listWebhooks: { params: [] },
   updateWebhook: { params: ["id", "url?", "events?", "active?"] },
   deleteWebhook: { params: ["id"] }
 };
@@ -1679,11 +1678,10 @@ export class NanoStore extends DurableObject {
                      query += " ORDER BY id LIMIT ? OFFSET ?";
                      params.push(safeLimit, safeOffset);
                      
-                     const tasks = await this.readFromD1(query, ...params);
-                     
-                     // Apply RLS filtering (additional layer of security)
-                     const userId = request.headers.get("X-User-ID") || "anonymous";
-                     const filteredTasks = this.rlsEngine.filterRows('tasks', userId, tasks);
+                    const queriedTasks = await this.readFromD1(query, ...params);
+                    
+                    // Apply RLS filtering (additional layer of security)
+                    const filteredTasks = this.rlsEngine.filterRows('tasks', userId, queriedTasks);
                      // ROW LEVEL SECURITY: Filter tasks by user permissions
                      // First, check if user has explicit read permissions for tasks table
                      let hasReadPermission = false;
@@ -1699,19 +1697,15 @@ export class NanoStore extends DurableObject {
                          console.warn("Permission check failed:", e.message);
                      }
                      
-                     // Permission model:
-                     // - If user has explicit read permission (can_read = true), show ALL tasks in the room
-                     // - Otherwise, show only tasks created by this user (user_id filter)
-                     const tasks = hasReadPermission 
-                         ? await this.readFromD1("SELECT * FROM tasks ORDER BY id LIMIT ? OFFSET ?", safeLimit, safeOffset)
-                         : await this.readFromD1("SELECT * FROM tasks WHERE user_id = ? ORDER BY id LIMIT ? OFFSET ?", userId, safeLimit, safeOffset);
-                     
-                     webSocket.send(JSON.stringify({ 
-                         type: "query_result", 
-                         data: filteredTasks, 
-                         originalSql: "listTasks",
-                         pagination: { limit: safeLimit, offset: safeOffset }
-                     }));
+                    // Permission model:
+                    // - If user has explicit read permission (can_read = true), show ALL tasks in the room
+                    // - Otherwise, show only tasks created by this user (user_id filter)
+                    webSocket.send(JSON.stringify({ 
+                      type: "query_result", 
+                      data: filteredTasks, 
+                      originalSql: "listTasks",
+                      pagination: { limit: safeLimit, offset: safeOffset }
+                    }));
                      break;
                 }
 
