@@ -3,12 +3,14 @@ import { useDatabase } from '../../hooks/useDatabase';
 import { Sidebar } from './Sidebar';
 import { Topbar } from './Topbar';
 import { Overview } from '../views/Overview';
+import { TablesView } from '../views/TablesView';
 import { DataExplorer } from '../views/DataExplorer';
+import { ChatDatabase } from '../views/ChatDatabase';
 import { SqlRunner } from '../views/SqlRunner';
 import { WebhooksView } from '../views/Webhooks';
 import { ProjectSettings } from '../views/ProjectSettings';
 
-type ViewState = 'overview' | 'data' | 'sql' | 'webhooks' | 'settings';
+type ViewState = 'overview' | 'tables' | 'data' | 'chat' | 'sql' | 'webhooks' | 'settings';
 
 export const ProjectLayout: React.FC<{ roomId: string; onExit?: () => void; userTier?: string }> = ({ roomId, onExit, userTier }) => {
   const [currentView, setCurrentView] = useState<ViewState>('overview');
@@ -37,8 +39,12 @@ export const ProjectLayout: React.FC<{ roomId: string; onExit?: () => void; user
     switch (currentView) {
       case 'overview':
         return <Overview roomId={roomId} usageStats={usageStats} />;
+      case 'tables':
+        return <TablesView />;
       case 'data':
         return <DataExplorer />;
+      case 'chat':
+        return <ChatDatabase />;
       case 'sql':
         return <SqlRunner />;
       case 'webhooks':
@@ -46,7 +52,7 @@ export const ProjectLayout: React.FC<{ roomId: string; onExit?: () => void; user
       case 'settings':
         return <ProjectSettings />;
       default:
-        return <DataExplorer />;
+        return <Overview roomId={roomId} usageStats={usageStats} />;
     }
   };
 
