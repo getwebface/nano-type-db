@@ -616,7 +616,19 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             }
             
             // Generate a unique request ID
-            const requestId = crypto.randomUUID ? crypto.randomUUID() : `rpc_${Date.now()}_${Math.random()}`;
+            // Use crypto.randomUUID() if available, otherwise fall back to a more robust method
+            let requestId: string;
+            if (crypto.randomUUID) {
+                requestId = crypto.randomUUID();
+            } else if (crypto.getRandomValues) {
+                // More robust fallback using crypto.getRandomValues
+                const buffer = new Uint8Array(16);
+                crypto.getRandomValues(buffer);
+                requestId = Array.from(buffer, byte => byte.toString(16).padStart(2, '0')).join('');
+            } else {
+                // Last resort fallback (not cryptographically secure)
+                requestId = `rpc_${Date.now()}_${Math.random()}`;
+            }
             
             // Create a one-time listener for the response
             const handleResponse = (event: MessageEvent) => {

@@ -1522,7 +1522,12 @@ export class NanoStore extends DurableObject {
                         this.logAction(method, data.payload);
                         
                         // Build parameterized update query
-                        // Using string interpolation for field name (already sanitized) but parameterized for value
+                        // SECURITY: Table and field names use string interpolation (not parameterizable in SQL)
+                        // but are protected by:
+                        // 1. Table whitelist check (line 1503)
+                        // 2. Field name regex validation (line 1509-1511)
+                        // 3. Value is properly parameterized (prevents SQL injection)
+                        // This is the standard approach for dynamic column updates in SQL
                         const query = `UPDATE ${table} SET ${field} = ? WHERE id = ? RETURNING *`;
                         const result = this.sql.exec(query, value, id).toArray();
                         
@@ -1611,6 +1616,11 @@ export class NanoStore extends DurableObject {
                                 
                                 const placeholders = fields.map(() => '?').join(', ');
                                 const fieldNames = fields.join(', ');
+                                // SECURITY: Table and field names use string interpolation but are protected by:
+                                // 1. Table whitelist (line 1581)
+                                // 2. Field name validation (lines 1610-1615)
+                                // 3. All values are parameterized (? placeholders)
+                                // This is safe because we control the field names from validated input
                                 const query = `INSERT INTO ${table} (${fieldNames}) VALUES (${placeholders}) RETURNING *`;
                                 
                                 const result = this.sql.exec(query, ...values).toArray();

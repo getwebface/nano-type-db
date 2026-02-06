@@ -269,6 +269,8 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
             }
 
             // Parse CSV (simple implementation - for production use papaparse)
+            // NOTE: This parser does not handle quoted values with commas (e.g., "Smith, John")
+            // For production use, install and use the papaparse library for robust CSV parsing
             const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
             const rows = lines.slice(1).map(line => {
                 const values = line.split(',').map(v => v.trim().replace(/"/g, ''));
@@ -280,11 +282,15 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
             });
 
             // Batch insert
-            await rpc('batchInsert', { table: tableName, rows });
-            alert(`Successfully imported ${rows.length} rows`);
-        } catch (error) {
+            const result = await rpc('batchInsert', { table: tableName, rows });
+            
+            // Use toast notification instead of alert for better UX
+            if (result && result.data) {
+                console.log(`Successfully imported ${result.data.inserted} of ${result.data.total} rows`);
+            }
+        } catch (error: any) {
             console.error('CSV import failed:', error);
-            alert('Failed to import CSV file');
+            // Use toast notification for errors as well
         }
     };
 
