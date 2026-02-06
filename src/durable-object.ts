@@ -845,9 +845,14 @@ export class NanoStore extends DurableObject {
   }
 
   getSchema() {
-    const tables = this.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_%' ESCAPE '\\' AND name != 'sqlite_sequence'").toArray();
+    // Get all user tables (excluding system tables, but include _webhooks)
+    const tables = this.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name != 'sqlite_sequence'").toArray();
     const schema: Record<string, any[]> = {};
     for (const t of tables) {
+      // Include all user tables and explicitly allow _webhooks
+      if (t.name.startsWith('sqlite_') || (t.name.startsWith('_') && t.name !== '_webhooks')) {
+        continue; // Skip system tables except _webhooks
+      }
       const columns = this.sql.exec(`PRAGMA table_info("${t.name}")`).toArray();
       schema[t.name] = columns;
     }
@@ -861,12 +866,40 @@ export class NanoStore extends DurableObject {
   }
 
   /**
+   * SECURITY: Sanitize field/column names for CSV imports
+   * Converts "Post Content" to "post_content" automatically
+   * This allows user-friendly CSV headers while maintaining security
+   */
+  sanitizeIdentifier(name: string): string {
+    // Convert to lowercase
+    let sanitized = name.toLowerCase();
+    
+    // Replace spaces, hyphens, and other non-alphanumeric chars with underscores
+    sanitized = sanitized.replace(/[^a-z0-9_]/g, '_');
+    
+    // Remove leading/trailing underscores
+    sanitized = sanitized.replace(/^_+|_+$/g, '');
+    
+    // Ensure it starts with a letter or underscore
+    if (!/^[a-z_]/.test(sanitized)) {
+      sanitized = '_' + sanitized;
+    }
+    
+    // Collapse multiple underscores into one
+    sanitized = sanitized.replace(/_+/g, '_');
+    
+    return sanitized;
+  }
+
+  /**
    * SECURITY: Check if table exists and is a user-created table (not a system table)
    * This replaces hard-coded table whitelists with dynamic validation
    * while maintaining security by:
    * 1. Ensuring table exists (prevents injection of arbitrary table names)
    * 2. Excluding system tables (tables starting with _ or sqlite_*)
    * 3. Combined with existing table name regex validation
+   * 
+   * EXCEPTION: _webhooks is explicitly allowed for DataGrid access
    */
   isUserTable(tableName: string): boolean {
     // First, validate the table name format to prevent SQL injection
@@ -874,7 +907,12 @@ export class NanoStore extends DurableObject {
       return false;
     }
     
-    // Exclude system tables (tables starting with _ or sqlite_)
+    // Explicitly allow _webhooks system table
+    if (tableName === '_webhooks') {
+      return true;
+    }
+    
+    // Exclude other system tables (tables starting with _ or sqlite_)
     if (tableName.startsWith('_') || tableName.startsWith('sqlite_')) {
       return false;
     }
@@ -1702,10 +1740,18 @@ export class NanoStore extends DurableObject {
                             // Insert rows in this chunk
                             for (const row of chunk) {
                                 try {
-                                    const fields = Object.keys(row);
-                                    const values = Object.values(row);
+                                    // SECURITY: Sanitize field names (convert "Post Content" to "post_content")
+                                    const sanitizedRow: Record<string, any> = {};
+                                    for (const [key, value] of Object.entries(row)) {
+                                        const sanitizedKey = this.sanitizeIdentifier(key);
+                                        sanitizedRow[sanitizedKey] = value;
+                                    }
                                     
-                                    // SECURITY: Validate field names
+                                    const fields = Object.keys(sanitizedRow);
+                                    const values = Object.values(sanitizedRow);
+                                    
+                                    // Note: Field names are already sanitized by sanitizeIdentifier()
+                                    // The regex validation below should always pass, but serves as a final safety check
                                     for (const field of fields) {
                                         if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field)) {
                                             throw new Error(`Invalid field name: ${field}`);

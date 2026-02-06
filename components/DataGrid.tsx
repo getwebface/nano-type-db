@@ -268,6 +268,18 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
                 return;
             }
 
+            // Helper function to sanitize field names (matches backend logic)
+            const sanitizeIdentifier = (name: string): string => {
+                let sanitized = name.toLowerCase();
+                sanitized = sanitized.replace(/[^a-z0-9_]/g, '_');
+                sanitized = sanitized.replace(/^_+|_+$/g, '');
+                if (!/^[a-z_]/.test(sanitized)) {
+                    sanitized = '_' + sanitized;
+                }
+                sanitized = sanitized.replace(/_+/g, '_');
+                return sanitized;
+            };
+
             // Improved CSV parser that handles quoted values with commas
             const parseCSVLine = (line: string): string[] => {
                 const result: string[] = [];
@@ -297,7 +309,15 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
                 return result;
             };
 
-            const headers = parseCSVLine(lines[0]);
+            const rawHeaders = parseCSVLine(lines[0]);
+            
+            // Sanitize headers and build mapping
+            const headers = rawHeaders.map(h => sanitizeIdentifier(h));
+            const headerMapping = rawHeaders.map((raw, idx) => ({
+                original: raw,
+                sanitized: headers[idx]
+            })).filter(mapping => mapping.original !== mapping.sanitized);
+            
             const rows = lines.slice(1).map(line => {
                 const values = parseCSVLine(line);
                 const row: Record<string, any> = {};
@@ -322,12 +342,22 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
                 return row;
             });
 
+            // Build confirmation message with header sanitization info
+            let confirmMessage = `Import ${rows.length} rows into table "${tableName}"?\n\n`;
+            
+            if (headerMapping.length > 0) {
+                confirmMessage += 'Column names will be sanitized:\n';
+                headerMapping.forEach(({ original, sanitized }) => {
+                    confirmMessage += `  "${original}" → "${sanitized}"\n`;
+                });
+                confirmMessage += '\n';
+            }
+            
+            confirmMessage += `Columns: ${headers.join(', ')}\n\n`;
+            confirmMessage += `This will add ${rows.length} new record(s) to the table.`;
+
             // Show confirmation dialog with import preview
-            const confirmImport = confirm(
-                `Import ${rows.length} rows into table "${tableName}"?\n\n` +
-                `Columns: ${headers.join(', ')}\n\n` +
-                `This will add ${rows.length} new record(s) to the table.`
-            );
+            const confirmImport = confirm(confirmMessage);
             
             if (!confirmImport) {
                 return;
