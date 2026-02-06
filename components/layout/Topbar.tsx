@@ -1,14 +1,16 @@
 import React from 'react';
 import { Circle, Users } from 'lucide-react';
+import { ProfileMenu } from '../ProfileMenu';
 
 interface TopbarProps {
   roomId: string;
   status: 'disconnected' | 'connecting' | 'connected';
   presenceData?: any[];
   onExit?: () => void;
+  userTier?: string;
 }
 
-export const Topbar: React.FC<TopbarProps> = ({ roomId, status, presenceData = [], onExit }) => {
+export const Topbar: React.FC<TopbarProps> = ({ roomId, status, presenceData = [], onExit, userTier }) => {
   return (
     <div className="px-8 py-4 border-b border-slate-800 bg-slate-900 flex items-center justify-between">
       <div className="flex items-center gap-4">
@@ -62,14 +64,17 @@ export const Topbar: React.FC<TopbarProps> = ({ roomId, status, presenceData = [
         )}
       </div>
 
-      {onExit && (
-        <button
-          onClick={onExit}
-          className="text-xs text-slate-400 hover:text-white transition-colors"
-        >
-          Exit Project
-        </button>
-      )}
+      <div className="flex items-center gap-4">
+        {onExit && (
+          <button
+            onClick={onExit}
+            className="text-xs text-slate-400 hover:text-white transition-colors"
+          >
+            Exit Project
+          </button>
+        )}
+        <ProfileMenu userTier={userTier} />
+      </div>
     </div>
   );
 };
