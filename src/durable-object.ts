@@ -316,15 +316,24 @@ const MIGRATIONS = [
   {
       version: 7,
       up: (sql: any) => {
-          // Webhooks table for outbound events
+          // Webhooks table for client notification system (with events plural and active column)
           sql.exec(`CREATE TABLE IF NOT EXISTS _webhooks (
-              id INTEGER PRIMARY KEY,
+              id TEXT PRIMARY KEY,
               url TEXT NOT NULL,
-              event TEXT NOT NULL,
-              headers TEXT,
-              enabled INTEGER DEFAULT 1,
-              created_at TEXT DEFAULT CURRENT_TIMESTAMP
+              events TEXT NOT NULL,
+              secret TEXT,
+              active INTEGER DEFAULT 1,
+              created_at INTEGER NOT NULL,
+              last_triggered_at INTEGER,
+              failure_count INTEGER DEFAULT 0
           )`);
+          // Index for quick active webhook lookups
+          try {
+              sql.exec(`CREATE INDEX IF NOT EXISTS idx_webhooks_active ON _webhooks(active) WHERE active = 1`);
+          } catch (e) {
+              console.warn("Could not create idx_webhooks_active index:", e);
+          }
+          
           // File storage metadata
           sql.exec(`CREATE TABLE IF NOT EXISTS _files (
               id TEXT PRIMARY KEY,
@@ -360,29 +369,6 @@ const MIGRATIONS = [
               // Column might already exist
               console.warn("Migration v6 warning:", e);
           }
-          // Webhooks table for client notification system
-          sql.exec(`CREATE TABLE IF NOT EXISTS _webhooks (
-              id TEXT PRIMARY KEY,
-              url TEXT NOT NULL,
-              events TEXT NOT NULL,
-              secret TEXT,
-              active INTEGER DEFAULT 1,
-              created_at INTEGER NOT NULL,
-              last_triggered_at INTEGER,
-              failure_count INTEGER DEFAULT 0
-          )`);
-          // Index for quick active webhook lookups
-            try {
-              // Ensure the `active` column exists (older schemas may have used `enabled`)
-              sql.exec("ALTER TABLE _webhooks ADD COLUMN active INTEGER DEFAULT 1");
-            } catch (e) {
-              // Column may already exist or ALTER not supported; ignore
-            }
-            try {
-              sql.exec(`CREATE INDEX IF NOT EXISTS idx_webhooks_active ON _webhooks(active) WHERE active = 1`);
-            } catch (e) {
-              console.warn("Could not create idx_webhooks_active index:", e);
-            }
       }
   }
 ];
