@@ -91,6 +91,13 @@ export default {
         url.pathname === "/schema" || 
         url.pathname === "/manifest" ||
         url.pathname === "/download-client" ||
+        url.pathname === "/analytics" ||
+        url.pathname === "/backups" ||
+        url.pathname === "/restore" ||
+        url.pathname === "/backup" ||
+        url.pathname === "/health" ||
+        url.pathname === "/query" ||
+        url.pathname === "/global-query" ||
         // Ensure API routes (like /api/keys) are handled by the backend
         url.pathname.startsWith("/api/") ||
         request.headers.get("Upgrade") === "websocket";
