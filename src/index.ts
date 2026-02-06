@@ -86,18 +86,22 @@ export default {
     }
 
     // 3. Routing Checks
+    const backendPaths = new Set([
+        "/connect",
+        "/schema",
+        "/manifest",
+        "/download-client",
+        "/analytics",
+        "/backups",
+        "/restore",
+        "/backup",
+        "/health",
+        "/query",
+        "/global-query",
+    ]);
+    
     const isBackendPath = 
-        url.pathname === "/connect" || 
-        url.pathname === "/schema" || 
-        url.pathname === "/manifest" ||
-        url.pathname === "/download-client" ||
-        url.pathname === "/analytics" ||
-        url.pathname === "/backups" ||
-        url.pathname === "/restore" ||
-        url.pathname === "/backup" ||
-        url.pathname === "/health" ||
-        url.pathname === "/query" ||
-        url.pathname === "/global-query" ||
+        backendPaths.has(url.pathname) ||
         // Ensure API routes (like /api/keys) are handled by the backend
         url.pathname.startsWith("/api/") ||
         request.headers.get("Upgrade") === "websocket";
