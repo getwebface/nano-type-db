@@ -1480,12 +1480,12 @@ export class NanoStore extends DurableObject {
                         // 2. Replicate to D1 for distributed reads (async, non-blocking)
                         this.ctx.waitUntil(this.replicateToD1('tasks', 'insert', newTask));
 
-                        // 3. Queue AI Embedding Generation (Reliability Fix with Cloudflare Queues)
-                        // Instead of ctx.waitUntil with AI.run, push to Cloudflare Queue for retry logic
-                        if (newTask && this.env.AI_EMBEDDING_QUEUE) {
+                        // 3. Queue AI Embedding Generation (Consolidated Queue Binding)
+                        // Use EMBEDDING_QUEUE for reliable AI processing with retry logic
+                        if (newTask && this.env.EMBEDDING_QUEUE) {
                             this.ctx.waitUntil((async () => {
                                 try {
-                                    await this.env.AI_EMBEDDING_QUEUE.send({
+                                    await this.env.EMBEDDING_QUEUE.send({
                                         taskId: newTask.id,
                                         title: title,
                                         doId: this.doId,
@@ -1498,16 +1498,6 @@ export class NanoStore extends DurableObject {
                                     this.sql.exec("UPDATE tasks SET vector_status = 'failed' WHERE id = ?", newTask.id);
                                 }
                             })());
-                        } else if (newTask && this.env.EMBEDDING_QUEUE) {
-                            // PRODUCTION FIX: Use Cloudflare Queue for reliable AI processing with retry
-                            // Push embedding job to queue (will retry on failure with exponential backoff)
-                            await this.env.EMBEDDING_QUEUE.send({
-                                taskId: newTask.id,
-                                doId: this.doId,
-                                title: title,
-                                timestamp: Date.now()
-                            });
-                            console.log(`Embedding job queued for task ${newTask.id}`);
                         } else if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
                             // FALLBACK: If no queue, use old ctx.waitUntil approach
                             // Use ctx.waitUntil for async operation without blocking the response

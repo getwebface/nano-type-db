@@ -48,7 +48,7 @@ binding = "ANALYTICS"
 binding = "ANALYTICS_ALT"
 
 # --- QUEUES ---
-# AI Embeddings
+# AI Embeddings - Consolidated single binding
 [[queues.producers]]
 binding = "EMBEDDING_QUEUE"
 queue = "nanotype-embeddings"
@@ -60,31 +60,9 @@ max_batch_timeout = 30
 max_retries = 5
 dead_letter_queue = "nanotype-embeddings-dlq"
 
-# AI Reliability
-[[queues.producers]]
-binding = "AI_EMBEDDING_QUEUE"
-queue = "ai-embedding-queue"
-
-[[queues.consumers]]
-queue = "ai-embedding-queue"
-max_batch_size = 10
-max_batch_timeout = 30
-max_retries = 3
-dead_letter_queue = "ai-embedding-dlq"
-
-# Webhooks (Standard)
+# Webhooks - Consolidated single binding
 [[queues.producers]]
 binding = "WEBHOOK_QUEUE"
-queue = "webhook-queue"
-
-[[queues.consumers]]
-queue = "webhook-queue"
-max_batch_size = 10
-max_batch_timeout = 30
-
-# Webhooks (Nanotype Specific)
-[[queues.producers]]
-binding = "WEBHOOK_QUEUE_NANOTYPE"
 queue = "nanotype-webhooks"
 
 [[queues.consumers]]
