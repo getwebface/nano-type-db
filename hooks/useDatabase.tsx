@@ -896,8 +896,16 @@ export const useRealtimeQuery = (tableName: string) => {
                     method: 'listWebhooks' 
                 }));
             } else {
+                // SECURITY: Validate table name to prevent SQL injection
+                // Only allow alphanumeric characters and underscores
+                if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
+                    console.error('Invalid table name:', tableName);
+                    return;
+                }
+                
                 // REPLACEMENT: Use executeSQL RPC for other tables instead of runQuery
                 // This avoids the "Raw SQL queries are disabled" error
+                // NOTE: Limited to 100 rows for initial load. Future enhancement: add pagination.
                 socket.send(JSON.stringify({ 
                     action: 'rpc', 
                     method: 'executeSQL', 
