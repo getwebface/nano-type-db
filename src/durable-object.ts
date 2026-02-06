@@ -247,7 +247,7 @@ const ACTIONS = {
   scheduleCron: { params: ["name", "schedule", "rpcMethod", "rpcPayload?"] },
   listCronJobs: { params: [] },
   // Audit Log Export
-  exportAuditLog: { params: ["format?"] }
+  exportAuditLog: { params: ["format?"] },
   // Webhook Management
   createWebhook: { params: ["url", "events", "secret?"] },
   listWebhooks: { params: [] },
@@ -1260,13 +1260,13 @@ export class NanoStore extends DurableObject {
                         
                         // 1. Insert into DB (Primary operation - must succeed)
                         // Set vector_status to 'pending' initially (will be updated to 'indexed' or 'failed')
+                        // Store both owner_id and user_id for compatibility
                         const result = this.sql.exec(
-                            "INSERT INTO tasks (title, status, vector_status, owner_id) VALUES (?, 'pending', 'pending', ?) RETURNING *", 
+                            "INSERT INTO tasks (title, status, vector_status, owner_id, user_id) VALUES (?, 'pending', 'pending', ?, ?) RETURNING *", 
                             title,
-                            ownerId
+                            ownerId,
+                            userId
                         ).toArray();
-                        // Store user_id for Row Level Security
-                        const result = this.sql.exec("INSERT INTO tasks (title, status, vector_status, user_id) VALUES (?, 'pending', 'pending', ?) RETURNING *", title, userId).toArray();
                         const newTask = result[0];
 
                         // 2. Replicate to D1 for distributed reads (async, non-blocking)
@@ -1290,13 +1290,8 @@ export class NanoStore extends DurableObject {
                                     this.sql.exec("UPDATE tasks SET vector_status = 'failed' WHERE id = ?", newTask.id);
                                 }
                             })());
-                        } else if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
-                            // Fallback: Generate Embedding & Store (Secondary operation - best effort)
-                            // Vector Consistency: Track status in database to allow retry jobs
-                        // 3. Generate Embedding & Store (Secondary operation - best effort)
-                        // Vector Consistency: Track status in database to allow retry jobs
-                        // PRODUCTION FIX: Use Cloudflare Queue for reliable AI processing with retry
-                        if (newTask && this.env.EMBEDDING_QUEUE) {
+                        } else if (newTask && this.env.EMBEDDING_QUEUE) {
+                            // PRODUCTION FIX: Use Cloudflare Queue for reliable AI processing with retry
                             // Push embedding job to queue (will retry on failure with exponential backoff)
                             await this.env.EMBEDDING_QUEUE.send({
                                 taskId: newTask.id,
