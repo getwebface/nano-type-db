@@ -5,10 +5,12 @@ import {
   Terminal, 
   Webhook, 
   Settings, 
-  HardDrive
+  HardDrive,
+  Brain,
+  MessageSquare
 } from 'lucide-react';
 
-type ViewState = 'overview' | 'data' | 'sql' | 'webhooks' | 'settings';
+type ViewState = 'overview' | 'tables' | 'data' | 'chat' | 'sql' | 'webhooks' | 'settings';
 
 interface SidebarProps {
   currentView: ViewState;
@@ -18,7 +20,9 @@ interface SidebarProps {
 export const Sidebar: React.FC<SidebarProps> = ({ currentView, onViewChange }) => {
   const navItems = [
     { id: 'overview' as ViewState, label: 'Overview', icon: LayoutDashboard },
-    { id: 'data' as ViewState, label: 'Data Explorer', icon: Table2 },
+    { id: 'tables' as ViewState, label: 'Tables', icon: Table2 },
+    { id: 'data' as ViewState, label: 'Data Explorer', icon: Brain },
+    { id: 'chat' as ViewState, label: 'Chat with DB', icon: MessageSquare },
     { id: 'sql' as ViewState, label: 'SQL Runner', icon: Terminal },
     { id: 'webhooks' as ViewState, label: 'Webhooks', icon: Webhook },
     { id: 'settings' as ViewState, label: 'Settings', icon: Settings },
