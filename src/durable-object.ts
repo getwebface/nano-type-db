@@ -578,7 +578,7 @@ export class NanoStore extends DurableObject {
       switch (operation) {
         case 'insert':
         case 'update':
-          if (!data) throw new Error("Data required for insert/update");
+          if (!data) throw new Error(`Data required for ${operation} operation on table '${table}'`);
           const keys = Object.keys(data).filter(k => k !== 'room_id');
           const columns = [...keys, 'room_id'];
           const placeholders = [...keys.map(() => '?'), '?'];
@@ -590,7 +590,7 @@ export class NanoStore extends DurableObject {
           break;
 
         case 'delete':
-          if (!data || !data.id) throw new Error("ID required for delete");
+          if (!data || !data.id) throw new Error(`ID required for delete operation on table '${table}'`);
           await this.env.READ_REPLICA.prepare(
             `DELETE FROM "${table}" WHERE id = ? AND room_id = ?`
           ).bind(data.id, roomId).run();
