@@ -8,6 +8,7 @@ import { GridHeader } from './GridHeader';
 import { GridToolbar } from './GridToolbar';
 import { GridRow, SkeletonRow, GhostRow } from './Rows';
 import { CsvImportModal } from './CsvImportModal';
+import { ConfirmDialog } from '../Modal';
 
 interface DataGridProps {
     data: any[] | null;
@@ -31,6 +32,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
     const { rpc, addToast } = useDatabase();
     const [showFilters, setShowFilters] = useState(false);
     const [isDragging, setIsDragging] = useState(false);
+    const [deleteRowId, setDeleteRowId] = useState<any>(null);
     
     // Grid State Hook (Sort/Filter)
     const {
@@ -87,6 +89,13 @@ export const DataGrid: React.FC<DataGridProps> = ({
         } catch (error) {
             console.error('Failed to delete row:', error);
             addToast('Failed to delete row', 'error');
+        }
+    };
+
+    const handleConfirmDelete = async () => {
+        if (deleteRowId !== null) {
+            await handleDeleteRow(deleteRowId);
+            setDeleteRowId(null);
         }
     };
 
@@ -296,7 +305,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
                                     tableName={tableName}
                                     schema={schema}
                                     onUpdate={handleCellUpdate}
-                                    onDelete={handleDeleteRow}
+                                    onDeleteClick={() => setDeleteRowId(row.id)}
                                     renderRowActions={renderRowActions}
                                 />
                             ))}
@@ -345,6 +354,16 @@ export const DataGrid: React.FC<DataGridProps> = ({
                 tableName={tableName}
                 onClose={() => setCsvPreview(null)}
                 onConfirm={handleConfirmImport}
+            />
+
+            <ConfirmDialog
+                isOpen={deleteRowId !== null}
+                onConfirm={handleConfirmDelete}
+                onCancel={() => setDeleteRowId(null)}
+                title="Delete Row"
+                message="Are you sure you want to delete this row? This action cannot be undone."
+                confirmLabel="Delete"
+                confirmVariant="danger"
             />
         </div>
     );

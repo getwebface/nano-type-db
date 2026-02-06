@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { DatabaseProvider, useDatabase } from './hooks/useDatabase';
 import { ProjectLayout } from './components/layout/ProjectLayout';
 import { Toaster } from './components/Toaster';
@@ -22,9 +22,23 @@ const ConnectionScreen: React.FC<{ userTier: string }> = ({ userTier }) => {
     };
 
     const handleSelectRoom = (roomId: string) => {
+        // Update URL without reloading
+        const url = new URL(window.location.href);
+        url.searchParams.set('room_id', roomId);
+        window.history.pushState({}, '', url);
+
         setSelectedRoom(roomId);
         connect(roomId);
     };
+
+    // Read room_id from URL on mount to support deep linking
+    useEffect(() => {
+        const params = new URLSearchParams(window.location.search);
+        const roomIdFromUrl = params.get('room_id');
+        if (roomIdFromUrl) {
+            handleSelectRoom(roomIdFromUrl);
+        }
+    }, []);
 
     if (isConnected && selectedRoom) {
         return <ProjectLayout roomId={selectedRoom} userTier={userTier} />;
