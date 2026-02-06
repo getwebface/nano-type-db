@@ -8,6 +8,38 @@ This contains everything you need to run your app locally.
 
 View your app in AI Studio: https://ai.studio/apps/drive/1Z_rvYIuwSty1XkzeKDuY_vanU1VE93QC
 
+## 🔧 Quick Start & Database Setup
+
+**IMPORTANT:** Before running the app, ensure your databases are properly initialized.
+
+### Fix Database Issues
+
+If you encounter **"no such table: api_keys"** or other database errors:
+
+**Local Development:**
+```bash
+npm install
+npm run db:fix:local
+npm run dev
+```
+
+**Production:**
+```bash
+npm run db:fix:remote  # Requires CLOUDFLARE_API_TOKEN
+```
+
+For detailed migration documentation, see [PRODUCTION_MIGRATIONS_GUIDE.md](./PRODUCTION_MIGRATIONS_GUIDE.md).
+
+### Common Database Commands
+
+```bash
+npm run migrate:status          # Check migration status
+npm run migrate:up -- --local   # Apply migrations (local)
+npm run migrate:up -- --remote  # Apply migrations (production)
+npm run db:fix:local            # Auto-fix local database
+npm run db:fix:remote           # Auto-fix production database
+```
+
 ## Features
 
 - **Real-time Database**: Powered by Cloudflare Durable Objects with WebSocket support

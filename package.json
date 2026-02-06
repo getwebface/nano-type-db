@@ -12,6 +12,9 @@
     "migrate:status": "node scripts/migrate-enhanced.js status",
     "migrate:up": "node scripts/migrate-enhanced.js up",
     "migrate:down": "node scripts/migrate-enhanced.js down",
+    "db:fix": "node scripts/fix-database.js",
+    "db:fix:local": "node scripts/fix-database.js --local",
+    "db:fix:remote": "node scripts/fix-database.js --remote",
     "generate-client": "tsx scripts/generate-client-typed.ts"
   },
   "dependencies": {

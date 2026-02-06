@@ -670,9 +670,12 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             // Timeout after 10 seconds
             timeoutId = setTimeout(() => {
                 timeoutId = null;
+            // Timeout configuration: longer for batch operations
+            const timeout = method === 'batchInsert' ? 60000 : 10000; // 60s for batch, 10s for others
+            setTimeout(() => {
                 socket.removeEventListener('message', handleResponse);
                 reject(new Error(`RPC call to ${method} timed out`));
-            }, 10000);
+            }, timeout);
         });
     }, [socket]);
 
