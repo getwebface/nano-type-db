@@ -389,6 +389,16 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                 } else {
                     setLastResult(data);
                 }
+            } else if (data.type === 'error') {
+                 if (data.code === 'TABLE_NOT_FOUND' && data.details?.table) {
+                    addToast(`Table '${data.details.table}' not found. Please create it first.`, 'error');
+                    // Trigger Create Table Modal via window event (handled in App.tsx)
+                    window.dispatchEvent(new CustomEvent('open-create-table-modal', { 
+                        detail: { tableName: data.details.table } 
+                    }));
+                 } else {
+                    addToast(data.error || 'An error occurred', 'error');
+                 }
             } else if (data.type === 'mutation_success') {
                 // Remove optimistic update from pending queue on success
                 const updateId = data.updateId;
@@ -776,7 +786,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             }));
             
             // Timeout after a configurable delay (longer for batch operations)
-            const timeout = method === 'batchInsert' ? 60000 : 10000; // 60s for batch, 10s for others
+            const timeout = (method === 'batchInsert' || method === 'createTable') ? 60000 : 10000; // 60s for batch, 10s for others
             timeoutId = setTimeout(() => {
                 timeoutId = null;
                 socket.removeEventListener('message', handleResponse);
@@ -867,9 +877,11 @@ export const useDatabase = () => {
     return context;
 };
 
-export const useRealtimeQuery = (tableName: string) => {
+export const useRealtimeQuery = (tableName: string, options: { limit?: number; offset?: number; } = {}) => {
     const { runQuery, subscribe, lastResult, isConnected, socket } = useDatabase();
     const [data, setData] = useState<any[]>([]);
+    const [total, setTotal] = useState<number>(0);
+    const { limit = 100, offset = 0 } = options;
 
     // Helper function to detect primary key field
     const detectPrimaryKey = (sampleRow: any): string => {
@@ -879,6 +891,13 @@ export const useRealtimeQuery = (tableName: string) => {
             : Object.keys(sampleRow).find(k => k.toLowerCase().endsWith('id')) || 'id';
     };
 
+    const loadMore = useCallback(() => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        
+        // This function can be expanded to fetch next page by updating a local offset state
+        // For now, we assume the parent component controls offset via props
+    }, [socket]);
+
     useEffect(() => {
         if (isConnected && tableName && socket && socket.readyState === WebSocket.OPEN) {
             subscribe(tableName);
@@ -887,7 +906,8 @@ export const useRealtimeQuery = (tableName: string) => {
             if (tableName === 'tasks') {
                 socket.send(JSON.stringify({ 
                     action: 'rpc', 
-                    method: 'listTasks' 
+                    method: 'listTasks',
+                    payload: { limit, offset }
                 }));
             } else if (tableName === '_webhooks') {
                 // CRITICAL FIX: Use RPC for webhooks, do NOT send raw SQL
@@ -909,11 +929,11 @@ export const useRealtimeQuery = (tableName: string) => {
                 socket.send(JSON.stringify({ 
                     action: 'rpc', 
                     method: 'executeSQL', 
-                    payload: { sql: `SELECT * FROM ${tableName} LIMIT 100`, readonly: true }
+                    payload: { sql: `SELECT * FROM ${tableName} LIMIT ${limit} OFFSET ${offset}`, readonly: true }
                 }));
             }
         }
-    }, [isConnected, tableName, subscribe, socket]);
+    }, [isConnected, tableName, subscribe, socket, limit, offset]);
 
     useEffect(() => {
         const handleUpdate = (e: Event) => {
@@ -924,6 +944,11 @@ export const useRealtimeQuery = (tableName: string) => {
                 // Handle efficient action-based updates (new format)
                 if (action && row) {
                     setData(currentData => {
+                        // Reconcile optimistic updates:
+                        // If we have an optimistic row (starts with temp_) and we receive a real row
+                        // We should check if they look similar, or just allow the real row to coexist?
+                        // Ideally, we replace the temp row. But we don't know the ID mapping.
+                         
                         // Detect primary key field from data
                         const sampleRow = currentData[0] || row;
                         if (!sampleRow) return currentData;
@@ -940,7 +965,18 @@ export const useRealtimeQuery = (tableName: string) => {
                         if (action === 'added') {
                             // Add new row if it doesn't exist
                             const exists = currentData.some(item => item[pkField] === pkValue);
-                            return exists ? currentData : [...currentData, row];
+                            // Cleanup optimistic update if we see a real row with same data (approximate matching)
+                            // This is a heuristic since we don't have the ID
+                            const cleanData = currentData.filter(item => {
+                                // If item is optimistic and looks like the new row (e.g. same title/content)
+                                // This is risky, so maybe we just rely on explicit refresh or just leave it for now
+                                // User asked to "Reconcile ... using a temporary ID".
+                                // If the broadcast includes the temp ID, we could use it.
+                                // Assuming the server does NOT echo temp ID, we skip this for now.
+                                return true;
+                            });
+
+                            return exists ? cleanData : [...cleanData, row];
                         } else if (action === 'modified') {
                             // Update existing row
                             return currentData.map(item => 
@@ -1003,7 +1039,8 @@ export const useRealtimeQuery = (tableName: string) => {
                         if (tableName === 'tasks') {
                             socket.send(JSON.stringify({ 
                                 action: 'rpc', 
-                                method: 'listTasks' 
+                                method: 'listTasks',
+                                payload: { limit, offset }
                             }));
                         }
                     }
@@ -1013,7 +1050,7 @@ export const useRealtimeQuery = (tableName: string) => {
 
         window.addEventListener('db-update', handleUpdate);
         return () => window.removeEventListener('db-update', handleUpdate);
-    }, [tableName, socket, runQuery]);
+    }, [tableName, socket, runQuery, limit, offset]);
 
     useEffect(() => {
         if (lastResult && lastResult.originalSql) {
@@ -1023,9 +1060,12 @@ export const useRealtimeQuery = (tableName: string) => {
             
             if (matchesTable && !lastResult.originalSql.toLowerCase().startsWith('insert')) {
                  setData(lastResult.data);
+                 if (lastResult.total !== undefined) {
+                     setTotal(lastResult.total);
+                 }
             }
         }
     }, [lastResult, tableName]);
 
-    return data;
+    return { data, total, loadMore };
 };

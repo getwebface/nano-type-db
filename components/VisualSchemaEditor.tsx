@@ -82,10 +82,19 @@ export const VisualSchemaEditor: React.FC = () => {
             setError(null);
             setSuccess(null);
 
-            const sql = generateSQL();
+            // Execute via RPC using createTable instead of executeSQL for better D1 compatibility
+            const columns = newTable.columns.map(col => ({
+                name: col.name,
+                type: col.type,
+                primaryKey: col.primaryKey,
+                notNull: col.notNull,
+                default: col.defaultValue
+            }));
             
-            // Execute via RPC
-            const result = await rpc('executeSQL', { sql });
+            const result = await rpc('createTable', { 
+                tableName: newTable.name,
+                columns 
+            });
             
             if (result.error) {
                 throw new Error(result.error);

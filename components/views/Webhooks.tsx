@@ -5,7 +5,7 @@ import { Webhook, Plus, Eye, EyeOff } from 'lucide-react';
 
 export const WebhooksView: React.FC = () => {
   const { schema, rpc, addToast } = useDatabase();
-  const webhooksData = useRealtimeQuery('_webhooks');
+  const { data: webhooksData, total, loadMore } = useRealtimeQuery('_webhooks');
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newWebhookUrl, setNewWebhookUrl] = useState('');
   const [newWebhookEvents, setNewWebhookEvents] = useState<string[]>([]);
@@ -128,6 +128,8 @@ export const WebhooksView: React.FC = () => {
             )}
             <DataGrid 
               data={maskedWebhooksData} 
+              total={total}
+              loadMore={loadMore}
               tableName="_webhooks" 
               schema={schema['_webhooks']}
             />

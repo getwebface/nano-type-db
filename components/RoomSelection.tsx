@@ -22,11 +22,26 @@ export const RoomSelection: React.FC<RoomSelectionProps> = ({ onSelectRoom }) =>
     const [creating, setCreating] = useState(false);
     const [newRoomId, setNewRoomId] = useState('');
     const [newRoomName, setNewRoomName] = useState('');
+    const [projectName, setProjectName] = useState('');
     const [deleteConfirmRoom, setDeleteConfirmRoom] = useState<string | null>(null);
 
     useEffect(() => {
         loadRooms();
     }, []);
+
+    const generateSlug = (name: string) => {
+        return name
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/(^-|-$)/g, '');
+    };
+
+    const handleProjectNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const name = e.target.value;
+        setProjectName(name);
+        setNewRoomName(name);
+        setNewRoomId(generateSlug(name));
+    };
 
     const loadRooms = async () => {
         try {
@@ -71,6 +86,7 @@ export const RoomSelection: React.FC<RoomSelectionProps> = ({ onSelectRoom }) =>
             setShowCreateModal(false);
             setNewRoomId('');
             setNewRoomName('');
+            setProjectName('');
         } catch (e: any) {
             setError(e.message);
         } finally {
@@ -171,8 +187,23 @@ export const RoomSelection: React.FC<RoomSelectionProps> = ({ onSelectRoom }) =>
                         <h3 className="text-xl font-bold text-white mb-4">Create New Database</h3>
                         <form onSubmit={handleCreateRoom} className="space-y-4">
                             <div>
+                                <label htmlFor="project-name" className="block text-sm font-medium text-slate-400 mb-1">
+                                    Project Name *
+                                </label>
+                                <input
+                                    id="project-name"
+                                    type="text"
+                                    required
+                                    value={projectName}
+                                    onChange={handleProjectNameChange}
+                                    className="w-full px-4 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-green-500"
+                                    placeholder="e.g. My Awesome Project"
+                                    autoFocus
+                                />
+                            </div>
+                            <div>
                                 <label htmlFor="room-id" className="block text-sm font-medium text-slate-400 mb-1">
-                                    Database ID *
+                                    Database ID (Slug) *
                                 </label>
                                 <input
                                     id="room-id"
@@ -180,24 +211,11 @@ export const RoomSelection: React.FC<RoomSelectionProps> = ({ onSelectRoom }) =>
                                     required
                                     value={newRoomId}
                                     onChange={(e) => setNewRoomId(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
-                                    className="w-full px-4 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-green-500"
-                                    placeholder="e.g. my-production-db"
+                                    className="w-full px-4 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-green-500 font-mono text-sm"
+                                    placeholder="e.g. my-awesome-project"
                                     minLength={3}
                                 />
                                 <p className="text-xs text-slate-500 mt-1">Lowercase letters, numbers, and hyphens only. Min 3 characters.</p>
-                            </div>
-                            <div>
-                                <label htmlFor="room-name" className="block text-sm font-medium text-slate-400 mb-1">
-                                    Display Name (optional)
-                                </label>
-                                <input
-                                    id="room-name"
-                                    type="text"
-                                    value={newRoomName}
-                                    onChange={(e) => setNewRoomName(e.target.value)}
-                                    className="w-full px-4 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-green-500"
-                                    placeholder="e.g. Production Database"
-                                />
                             </div>
                             <div className="flex gap-3 pt-2">
                                 <button

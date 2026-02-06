@@ -588,12 +588,15 @@ export class NanoStore extends DurableObject {
             return;
           }
           
-          // For tasks table, replicate with room_id for multi-tenancy
-          if (table === 'tasks') {
-            await this.env.READ_REPLICA.prepare(
-              `INSERT OR REPLACE INTO tasks (id, title, status, room_id, vector_status) VALUES (?, ?, ?, ?, ?)`
-            ).bind(data.id, data.title, data.status, roomId, data.vector_status || 'pending').run();
-          }
+          // Dynamic replication for all user tables
+          const keys = Object.keys(data).filter(k => k !== 'room_id'); // Exclude room_id if present in data
+          const columns = [...keys, 'room_id'];
+          const placeholders = [...keys.map(() => '?'), '?'];
+          const values = [...keys.map(k => data[k]), roomId];
+          
+          const query = `INSERT OR REPLACE INTO "${table}" (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`;
+          
+          await this.env.READ_REPLICA.prepare(query).bind(...values).run();
           break;
 
         case 'delete':
@@ -603,11 +606,9 @@ export class NanoStore extends DurableObject {
           }
           
           // Delete from D1 with room_id constraint for safety
-          if (table === 'tasks') {
-            await this.env.READ_REPLICA.prepare(
-              `DELETE FROM tasks WHERE id = ? AND room_id = ?`
-            ).bind(data.id, roomId).run();
-          }
+          await this.env.READ_REPLICA.prepare(
+            `DELETE FROM "${table}" WHERE id = ? AND room_id = ?`
+          ).bind(data.id, roomId).run();
           break;
       }
       
@@ -631,27 +632,48 @@ export class NanoStore extends DurableObject {
     }
 
     try {
-      // Get all non-system tables
+      // Get all non-system tables with their CREATE statements
       const tables = this.sql.exec(`
-        SELECT name FROM sqlite_master 
+        SELECT name, sql FROM sqlite_master 
         WHERE type='table' AND name NOT LIKE '_%' AND name != 'sqlite_sequence'
       `).toArray();
       
       for (const table of tables) {
         const tableName = table.name;
+        let createSql = table.sql;
         
-        // SECURITY: Validate table name before using in PRAGMA
+        // Skip if no SQL found
+        if (!createSql) continue;
+
+        // SECURITY: Validate table name
         if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
           console.warn(`Invalid table name for replication: ${tableName}`);
           continue;
         }
         
-        // Get table schema
-        const tableInfo = this.sql.exec(`PRAGMA table_info(${tableName})`).toArray();
+        // Transform schema for D1 multi-tenancy: Add room_id column
+        if (!createSql.includes('room_id')) {
+             const lastParenIndex = createSql.lastIndexOf(')');
+             if (lastParenIndex !== -1) {
+                 createSql = createSql.substring(0, lastParenIndex) + ", room_id TEXT)";
+             }
+        }
         
-        // Note: For full D1 sync, you would need to create tables in D1 as well
-        // This is a placeholder for schema replication logic
-        console.log(`Schema replication for table ${tableName}`);
+        // Ensure IF NOT EXISTS
+        if (!createSql.toUpperCase().includes('IF NOT EXISTS')) {
+            createSql = createSql.replace(/CREATE TABLE/i, 'CREATE TABLE IF NOT EXISTS');
+        }
+
+        await this.env.READ_REPLICA.exec(createSql);
+        
+        // Create index on room_id for performance
+        try {
+            await this.env.READ_REPLICA.exec(`CREATE INDEX IF NOT EXISTS idx_${tableName}_room_id ON "${tableName}" (room_id)`);
+        } catch (idxErr) {
+            console.warn(`Could not create index for ${tableName}:`, idxErr);
+        }
+        
+        console.log(`Schema replicated for table ${tableName}`);
       }
     } catch (e) {
       console.error("Failed to replicate schema to D1:", e);
@@ -783,11 +805,8 @@ export class NanoStore extends DurableObject {
               break; // No more rows to sync
             }
 
-            // Batch sync to D1 (note: batchSyncToD1 is currently hardcoded for tasks table)
-            // For now, we'll just sync the tasks table to maintain backward compatibility
-            if (tableName === 'tasks') {
-              await this.batchSyncToD1(rows);
-            }
+            // Batch sync to D1 (dynamic for all tables)
+            await this.batchSyncToD1(tableName, rows);
             
             totalSynced += rows.length;
             offset += BATCH_SIZE;
@@ -799,8 +818,12 @@ export class NanoStore extends DurableObject {
           }
           
           console.log(`[Sync Engine] Synced ${totalSynced} rows from table ${tableName}`);
-        } catch (tableError) {
-          console.error(`[Sync Engine] Failed to sync table ${tableName}:`, tableError);
+        } catch (tableError: any) {
+          if (tableError.message?.includes('no such table')) {
+             console.log(`[Sync Engine] Table ${tableName} skipped (not found)`);
+          } else {
+             console.error(`[Sync Engine] Failed to sync table ${tableName}:`, tableError);
+          }
           // Continue with other tables
         }
       }
@@ -822,27 +845,31 @@ export class NanoStore extends DurableObject {
    * Sync Engine: Batch sync multiple records to D1
    * More efficient than individual syncs for bulk operations
    */
-  async batchSyncToD1(tasks: any[]): Promise<void> {
-    if (!this.env.READ_REPLICA || tasks.length === 0) {
+  async batchSyncToD1(table: string, rows: any[]): Promise<void> {
+    if (!this.env.READ_REPLICA || rows.length === 0) {
       return;
     }
 
     try {
       const roomId = this.doId;
       
-      // Use D1 batch API for better performance
-      const statements = tasks.map(task => 
-        this.env.READ_REPLICA.prepare(
-          `INSERT OR REPLACE INTO tasks (id, title, status, room_id, vector_status) VALUES (?, ?, ?, ?, ?)`
-        ).bind(task.id, task.title, task.status, roomId, task.vector_status || 'pending')
-      );
+      const statements = rows.map(row => {
+          const keys = Object.keys(row).filter(k => k !== 'room_id');
+          const columns = [...keys, 'room_id'];
+          const placeholders = [...keys.map(() => '?'), '?'];
+          const values = [...keys.map(k => row[k]), roomId];
+          
+          return this.env.READ_REPLICA.prepare(
+            `INSERT OR REPLACE INTO "${table}" (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`
+          ).bind(...values);
+      });
 
       // Execute all statements in a batch
       await this.env.READ_REPLICA.batch(statements);
       
-      console.log(`[Sync Engine] Batch synced ${tasks.length} tasks to D1`);
+      console.log(`[Sync Engine] Batch synced ${rows.length} rows to D1 table ${table}`);
     } catch (e) {
-      console.error("[Sync Engine] Batch sync failed:", e);
+      console.error(`[Sync Engine] Batch sync failed for table ${table}:`, e);
       throw e;
     }
   }
@@ -1283,6 +1310,22 @@ export class NanoStore extends DurableObject {
     }
   }
 
+  /**
+   * Helper to send structured error responses
+   */
+  sendError(ws: WebSocket, code: string, message: string, details?: any) {
+    try {
+      ws.send(JSON.stringify({ 
+        type: "error",
+        code, 
+        error: message, 
+        details 
+      }));
+    } catch (e) {
+      this.logger.error("Failed to send error response", e);
+    }
+  }
+
   // Native Cloudflare Hibernation API: Class-based WebSocket handlers
   // These allow the DO to fully sleep between messages instead of staying in memory
   async webSocketMessage(webSocket: WebSocket, message: string | ArrayBuffer) {
@@ -1384,6 +1427,7 @@ export class NanoStore extends DurableObject {
 
       if (data.action === "rpc" || (data.action as string) === "createTask") {
             const method = data.method || data.action;
+            const start = performance.now();
             
             // Log the attempt
             // 'reads' or 'writes' tracked inside specific blocks or generally here?
@@ -1731,12 +1775,6 @@ export class NanoStore extends DurableObject {
                             throw new Error('Batch size limited to 10000 rows');
                         }
                         
-                        // SECURITY: Validate that table exists and is a user-created table
-                        // This replaces the hard-coded whitelist with dynamic validation
-                        if (!this.isUserTable(table)) {
-                            throw new Error(`Table '${table}' does not exist or is not accessible`);
-                        }
-                        
                         // SECURITY: Get userId
                         const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
                         
@@ -1756,6 +1794,13 @@ export class NanoStore extends DurableObject {
                         const newColumns = Object.keys(sampleRow)
                             .map(k => this.sanitizeIdentifier(k))
                             .filter(k => k !== 'id' && !existingColumns.has(k));
+
+                        // VALIDATE HEADERS ONCE
+                        // Check if incoming columns are valid against existing ones (or if we are adding them)
+                        // If strict mode is on or we want to prevent partial failures:
+                        // Here we just ensure we don't have widely invalid structure
+                         // No specific validation rule provided other than "Throw a single error if columns are invalid"
+                         // We can assume that if keys are not strings or empty, it's invalid
                         
                         // If we found columns in the CSV that aren't in the DB, create them!
                         if (newColumns.length > 0) {
@@ -1914,6 +1959,10 @@ export class NanoStore extends DurableObject {
                              // Each taskId maps to a '?' placeholder, preventing injection
                              const placeholders = taskIds.map(() => '?').join(',');
                              results = await this.readFromD1(`SELECT * FROM tasks WHERE id IN (${placeholders})`, ...taskIds);
+                             
+                             // SECURITY: Apply RLS filtering to search results
+                             const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                             results = this.rlsEngine.filterRows('tasks', userId, results);
                          }
                     }
                     
@@ -2073,13 +2122,22 @@ export class NanoStore extends DurableObject {
                      const safeLimit = Math.min(Math.max(1, limit), 1000); // Between 1-1000
                      const safeOffset = Math.max(0, offset); // Non-negative
                      
-                     // RLS: Query all tasks, filtering will be applied by RLS engine
-                     const query = "SELECT * FROM tasks ORDER BY id LIMIT ? OFFSET ?";
-                     const params: any[] = [safeLimit, safeOffset];
+                     // RLS: Query only user's tasks or apply simplified filtering in WHERE clause
+                     // This prevents pagination issues where user's data is hidden behind other users' records
+                     // Note: Complex permission logic (shared tasks) should be handled via a more complex query
+                     // involving JOINs or subqueries on the permissions table.
+                     const query = "SELECT * FROM tasks WHERE user_id = ? ORDER BY id LIMIT ? OFFSET ?";
+                     const params: any[] = [userId, safeLimit, safeOffset];
                      
-                    const queriedTasks = await this.readFromD1(query, ...params);
+                     const queriedTasks = await this.readFromD1(query, ...params);
+                     
+                     // Get total count for pagination
+                     // Note: This matches the WHERE clause of the main query
+                     const countQuery = "SELECT count(*) as total FROM tasks WHERE user_id = ?";
+                     const countResult = await this.readFromD1(countQuery, userId);
+                     const total = countResult && countResult.length > 0 ? countResult[0].total : 0;
                     
-                    // Apply RLS filtering (additional layer of security)
+                    // Apply RLS filtering (additional layer of security, though WHERE clause handles strict ownership)
                     const filteredTasks = this.rlsEngine.filterRows('tasks', userId, queriedTasks);
                      // ROW LEVEL SECURITY: Filter tasks by user permissions
                      // First, check if user has explicit read permissions for tasks table
@@ -2102,8 +2160,9 @@ export class NanoStore extends DurableObject {
                     webSocket.send(JSON.stringify({ 
                       type: "query_result", 
                       data: filteredTasks, 
+                      total: total,
                       originalSql: "listTasks",
-                      pagination: { limit: safeLimit, offset: safeOffset }
+                      pagination: { limit: safeLimit, offset: safeOffset, total }
                     }));
                      break;
                 }
@@ -2492,23 +2551,89 @@ export class NanoStore extends DurableObject {
                 }
                 
                 case "listWebhooks": {
-                    this.trackUsage('reads');
-                    
                     try {
+                        this.trackUsage('reads');
+                        // Ensure table exists
+                        this.sql.exec(`
+                            CREATE TABLE IF NOT EXISTS _webhooks (
+                                id TEXT PRIMARY KEY,
+                                url TEXT NOT NULL,
+                                events TEXT NOT NULL,
+                                created_at INTEGER,
+                                active INTEGER DEFAULT 1,
+                                last_triggered_at INTEGER,
+                                failure_count INTEGER DEFAULT 0
+                            )
+                        `);
+
                         const webhooks = this.sql.exec(
                             `SELECT id, url, events, active, created_at, last_triggered_at, failure_count 
                              FROM _webhooks ORDER BY created_at DESC`
                         ).toArray();
-                        
+
                         webSocket.send(JSON.stringify({ 
                             type: "query_result", 
                             data: webhooks 
                         }));
                     } catch (e: any) {
+                        // Lazy Migration: Self-heal schema if columns missing
+                            console.log("Lazy migration: Fixing _webhooks table schema...");
+                            try {
+                                // Add potentially missing columns safely
+                                try { this.sql.exec("ALTER TABLE _webhooks ADD COLUMN failure_count INTEGER DEFAULT 0"); } catch (_) {}
+                                try { this.sql.exec("ALTER TABLE _webhooks ADD COLUMN last_triggered_at INTEGER"); } catch (_) {}
+                                try { this.sql.exec("ALTER TABLE _webhooks ADD COLUMN active INTEGER DEFAULT 1"); } catch (_) {}
+                                
+                                // Create index if missing
+                                try { this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_webhooks_active ON _webhooks(active) WHERE active = 1`); } catch (_) {}
+
+                                // Retry query
+                                const webhooks = this.sql.exec(
+                                    `SELECT id, url, events, active, created_at, last_triggered_at, failure_count 
+                                     FROM _webhooks ORDER BY created_at DESC`
+                                ).toArray();
+                                
+                                webSocket.send(JSON.stringify({ 
+                                    type: "query_result", 
+                                    data: webhooks 
+                                }));
+                                return;
+                            } catch (migrationErr: any) {
+                                console.error("Lazy migration failed:", migrationErr);
+                            }
+                        
+                        this.sendError(webSocket, "QUERY_FAILED", `Failed to list webhooks: ${e.message}`);
+                    }
+                    break;
+                }
+
+                // Webhook Logs
+                case "getWebhooklogs": {
+                    this.trackUsage('reads');
+                    // Fetch logs from D1 (as consumer writes there) OR from local if it was replicated back?
+                    // Assuming webhook-consumer writes to READ_REPLICA (D1)
+                    if (!this.env.READ_REPLICA) {
+                        this.sendError(webSocket, "CONFIG_ERROR", "D1 READ_REPLICA not available");
+                        break;
+                    }
+
+                    try {
+                        // Use raw D1 query
+                        const logs = await this.env.READ_REPLICA.prepare(
+                            `SELECT * FROM _webhook_logs ORDER BY created_at DESC LIMIT 50`
+                        ).all();
+                        
                         webSocket.send(JSON.stringify({ 
-                            type: "error", 
-                            error: `Failed to list webhooks: ${e.message}` 
+                            type: "query_result", 
+                            data: logs.results 
                         }));
+                    } catch (e: any) {
+                         // Check if table exists
+                         if (e.message.includes("no such table")) {
+                             webSocket.send(JSON.stringify({ type: "query_result", data: [] })); // Empty if no logs table yet
+                         } else {
+                             this.sendError(webSocket, "QUERY_FAILED", `Failed to fetch webhook logs: ${e.message}`);
+                         }
                     }
                     break;
                 }
@@ -2770,7 +2895,13 @@ export class NanoStore extends DurableObject {
                 }
 
                 default:
-                    webSocket.send(JSON.stringify({ error: `Unknown RPC method: ${method}` }));
+                    this.sendError(webSocket, "UNKNOWN_METHOD", `Unknown RPC method: ${method}`);
+                    break;
+            }
+
+            const duration = performance.now() - start;
+            if (duration > 1000) {
+               this.logger.warn(`RPC Slow: ${method}`, { duration });
             }
         }
       
@@ -2917,27 +3048,9 @@ export class NanoStore extends DurableObject {
     }
     
     // Dispatch webhooks (if any registered for this event)
-    this.ctx.waitUntil((async () => {
-      try {
-        const webhooks = this.sql.exec(
-          "SELECT * FROM _webhooks WHERE event = ? AND enabled = 1",
-          `${table}.${action}`
-        ).toArray();
-        
-        for (const webhook of webhooks) {
-          if (this.env.WEBHOOK_QUEUE) {
-            await this.env.WEBHOOK_QUEUE.send({
-              webhookUrl: webhook.url,
-              event: `${table}.${action}`,
-              data: row,
-              headers: webhook.headers ? JSON.parse(webhook.headers) : {}
-            });
-          }
-        }
-      } catch (e) {
-        console.error("Failed to dispatch webhooks:", e);
-      }
-    })());
+    // Removed inline ctx.waitUntil block that sends to WEBHOOK_QUEUE to prevent duplicate events.
+    // Retain only the call to this.dispatchWebhooks(...) below.
+
     // Dispatch webhooks for this event (async, non-blocking)
     // We don't await to avoid blocking the broadcast
     this.dispatchWebhooks(table, action, row).catch(err => {

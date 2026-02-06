@@ -8,6 +8,10 @@ import { Snapshots } from './Snapshots';
 import { Analytics } from './Analytics';
 import { Layout, Table2, HardDrive, Circle, Plus, Loader2, Activity, Settings, Database, Users, RefreshCw, Wifi } from 'lucide-react';
 import { VisualSchemaEditor } from './VisualSchemaEditor';
+import { FileManager } from './views/FileManager';
+import { Scheduler } from './views/Scheduler';
+import { ErrorBoundary } from './ErrorBoundary';
+import { Files, Clock } from 'lucide-react';
 
 /** Displays seconds remaining until next reconnection attempt */
 const ReconnectCountdown: React.FC<{ nextRetryAt: number }> = ({ nextRetryAt }) => {
@@ -24,18 +28,18 @@ const ReconnectCountdown: React.FC<{ nextRetryAt: number }> = ({ nextRetryAt }) 
 export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
     const { schema, usageStats, status, rpc, manualReconnect, reconnectInfo, connectionQuality } = useDatabase();
     const [selectedTable, setSelectedTable] = useState<string>('tasks');
-    const [activeView, setActiveView] = useState<'tables' | 'settings'>('tables');
+    const [activeView, setActiveView] = useState<'tables' | 'settings' | 'files' | 'scheduler'>('tables');
     const [settingsTab, setSettingsTab] = useState<'api-keys' | 'snapshots' | 'analytics'>('api-keys');
     const [presenceData, setPresenceData] = useState<any[]>([]);
     
     useEffect(() => {
         if (schema) {
             const tables = Object.keys(schema);
-            if (tables.length > 0 && !tables.includes(selectedTable)) {
+            if (tables.length > 0 && !tables.includes(selectedTable) && activeView === 'tables') {
                 setSelectedTable(tables[0]);
             }
         }
-    }, [schema]);
+    }, [schema, activeView]);
 
     // Fetch presence data periodically
     useEffect(() => {
@@ -55,7 +59,7 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
         return () => clearInterval(interval);
     }, [rpc]);
 
-    const data = useRealtimeQuery(selectedTable);
+    const { data, total, loadMore } = useRealtimeQuery(selectedTable);
     const tableList = schema ? Object.keys(schema) : [];
 
     // Calculate totals
@@ -63,6 +67,7 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
     const totalWrites = usageStats.reduce((acc, stat) => acc + stat.writes, 0);
 
     return (
+        <ErrorBoundary>
         <div className="flex h-screen overflow-hidden bg-slate-900 text-slate-100 font-sans">
             {/* Sidebar */}
             <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col">
@@ -152,6 +157,32 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
 
                 <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
                     <div className="flex items-center justify-between px-2 mb-3">
+                        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">System</p>
+                    </div>
+                    <button
+                        onClick={() => setActiveView('files')}
+                        className={`w-full flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md transition-all ${
+                            activeView === 'files'
+                                ? 'bg-slate-800 text-green-400' 
+                                : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
+                        }`}
+                    >
+                        <Files size={18} />
+                        File Manager
+                    </button>
+                    <button
+                        onClick={() => setActiveView('scheduler')}
+                        className={`w-full flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md transition-all ${
+                            activeView === 'scheduler'
+                                ? 'bg-slate-800 text-green-400' 
+                                : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
+                        }`}
+                    >
+                        <Clock size={18} />
+                        Scheduler
+                    </button>
+
+                    <div className="flex items-center justify-between px-2 mb-3 mt-6">
                         <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Tables</p>
                     </div>
                     
@@ -163,9 +194,12 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                         tableList.map(table => (
                             <button
                                 key={table}
-                                onClick={() => setSelectedTable(table)}
+                                onClick={() => {
+                                    setSelectedTable(table);
+                                    setActiveView('tables');
+                                }}
                                 className={`w-full flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md transition-all ${
-                                    selectedTable === table
+                                    selectedTable === table && activeView === 'tables'
                                         ? 'bg-slate-800 text-green-400' 
                                         : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
                                 }`}
@@ -257,6 +291,10 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                             {settingsTab === 'analytics' && <Analytics />}
                         </div>
                     </>
+                ) : activeView === 'files' ? (
+                    <FileManager />
+                ) : activeView === 'scheduler' ? (
+                    <Scheduler />
                 ) : (
                     <>
                         <header className="px-8 py-6 border-b border-slate-800 bg-slate-900 flex justify-between items-center">
@@ -286,6 +324,8 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                     
                     <DataGrid 
                         data={data} 
+                        total={total}
+                        loadMore={loadMore}
                         tableName={selectedTable} 
                         schema={schema?.[selectedTable]}
                     />
@@ -298,5 +338,6 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                 )}
             </main>
         </div>
+        </ErrorBoundary>
     );
 };

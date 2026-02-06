@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Key, Copy, Plus, Trash, Check, Download, FileCode } from 'lucide-react';
-import { ConfirmDialog, PromptDialog } from './Modal';
+import { Key, Copy, Plus, Trash, Check, Download, FileCode, Shield, Calendar, AlertTriangle, Eye, Lock } from 'lucide-react';
+import { ConfirmDialog, Modal } from './Modal';
 
 interface ApiKey {
     id: string;
@@ -26,9 +26,17 @@ export const ApiKeys: React.FC = () => {
     const [loading, setLoading] = useState(false);
     const [copiedId, setCopiedId] = useState<string | null>(null);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
-    const [showNamePrompt, setShowNamePrompt] = useState(false);
     const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
     const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+    // Create Modal State
+    const [isCreateOpen, setIsCreateOpen] = useState(false);
+    const [createForm, setCreateForm] = useState({
+        name: '',
+        expiresInDays: 90,
+        scopes: ['read', 'write']
+    });
+    const [createdKey, setCreatedKey] = useState<ApiKey & { expires_in_days?: number } | null>(null);
 
     const fetchKeys = async () => {
         try {
@@ -60,23 +68,27 @@ export const ApiKeys: React.FC = () => {
         fetchKeys();
     }, []);
 
-    const generateKey = async (name: string) => {
+    const generateKey = async () => {
+        if (!createForm.name.trim()) return;
         setLoading(true);
         try {
             const res = await fetch(`${HTTP_URL}/api/keys/generate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name })
+                body: JSON.stringify({
+                    name: createForm.name,
+                    expiresInDays: createForm.expiresInDays,
+                    scopes: createForm.scopes
+                })
             });
 
             if (res.ok) {
-                const newKey = await res.json();
+                const newKey: ApiKey & { expires_in_days?: number } = await res.json();
                 setKeys([...keys, newKey]);
-                // Auto-copy the key to clipboard
-                await navigator.clipboard.writeText(newKey.id);
-                setCopiedId(newKey.id);
-                setTimeout(() => setCopiedId(null), 2000);
-                setSuccessMessage(`API key created and copied to clipboard!\n\nKey: ${newKey.id}\nExpires in: ${newKey.expires_in_days} days`);
+                setCreatedKey(newKey);
+                setIsCreateOpen(false);
+                setCreateForm({ name: '', expiresInDays: 90, scopes: ['read', 'write'] });
+                setSuccessMessage('API key created successfully');
             } else {
                 const errorData = await parseJsonResponse(res, 'Failed to generate API key');
                 console.error('Failed to generate API key:', errorData.error || res.statusText);
@@ -200,7 +212,7 @@ export const ApiKeys: React.FC = () => {
                     </p>
                 </div>
                 <button 
-                    onClick={() => setShowNamePrompt(true)}
+                    onClick={() => setIsCreateOpen(true)}
                     disabled={loading}
                     className="bg-green-600 hover:bg-green-700 px-3 py-1.5 rounded text-sm font-bold flex gap-2 items-center disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
@@ -222,23 +234,21 @@ export const ApiKeys: React.FC = () => {
                             <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2">
                                     <div className="font-mono text-slate-300 text-sm truncate">
-                                        {key.id}
+                                        {/** Mask API key, show only prefix */}
+                                        {key.id.substring(0, 10)}...{key.id.substring(key.id.length - 4)}
                                     </div>
-                                    <button
-                                        onClick={() => copyToClipboard(key.id)}
-                                        className="text-slate-500 hover:text-white transition-colors"
-                                        title="Copy to clipboard"
-                                    >
-                                        {copiedId === key.id ? (
-                                            <Check size={16} className="text-green-500" />
-                                        ) : (
-                                            <Copy size={16} />
-                                        )}
-                                    </button>
+                                    {/** Removed copy button for existing keys (security) */}
+                                    <div className="bg-slate-800 text-slate-500 text-xs px-2 py-0.5 rounded">
+                                        Hidden
+                                    </div>
                                 </div>
-                                <div className="text-xs text-slate-500 mt-1">
-                                    {key.name} • Created {formatDate(key.created_at)}
-                                    {key.last_used_at && ` • Last used ${formatDate(key.last_used_at)}`}
+                                <div className="text-xs text-slate-500 mt-1 flex gap-2 items-center">
+                                    <span>{key.name || "Unnamed"}</span>
+                                    <span>•</span>
+                                    <span>Created {formatDate(key.created_at)}</span>
+                                    {key.last_used_at && (
+                                        <><span>•</span><span>Last used {formatDate(key.last_used_at)}</span></>
+                                    )}
                                 </div>
                             </div>
                             <button
@@ -258,7 +268,7 @@ export const ApiKeys: React.FC = () => {
                     <h4 className="text-xs font-bold text-slate-400 mb-2 uppercase">Usage Example</h4>
                     <pre className="text-xs text-slate-500 font-mono overflow-x-auto">
 {`<DatabaseProvider 
-  apiKey="${keys[0].id}"
+  apiKey="${keys[0].id.substring(0, 5)}..."
 >
   <App />
 </DatabaseProvider>`}
@@ -281,16 +291,127 @@ export const ApiKeys: React.FC = () => {
                 </div>
             )}
 
-            {/* Prompt for API key name */}
-            <PromptDialog
-                isOpen={showNamePrompt}
-                onConfirm={(name) => { setShowNamePrompt(false); generateKey(name); }}
-                onCancel={() => setShowNamePrompt(false)}
+            {/* Create Key Modal */}
+            <Modal
+                isOpen={isCreateOpen}
+                onClose={() => setIsCreateOpen(false)}
                 title="Create API Key"
-                message='Enter a name for this API key:'
-                placeholder='e.g., "Production Website"'
-                confirmLabel="Generate Key"
-            />
+                footer={
+                    <>
+                        <button 
+                            onClick={() => setIsCreateOpen(false)}
+                            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors"
+                        >
+                            Cancel
+                        </button>
+                        <button 
+                            onClick={generateKey}
+                            disabled={!createForm.name || loading}
+                            className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-colors flex items-center gap-2"
+                        >
+                            {loading ? 'Generating...' : 'Generate Key'}
+                        </button>
+                    </>
+                }
+            >
+                <div className="space-y-4">
+                    <div>
+                        <label className="block text-sm font-medium text-slate-400 mb-1">Key Name</label>
+                        <input
+                            type="text"
+                            value={createForm.name}
+                            onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })}
+                            placeholder="e.g. Mobile App"
+                            className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white focus:outline-none focus:border-green-500"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-400 mb-1">Expiration (Days)</label>
+                        <input
+                            type="number"
+                            value={createForm.expiresInDays}
+                            onChange={(e) => setCreateForm({ ...createForm, expiresInDays: parseInt(e.target.value) || 0 })}
+                            min="1"
+                            max="365"
+                            className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-white focus:outline-none focus:border-green-500"
+                        />
+                        <p className="text-xs text-slate-500 mt-1">Maximum 365 days</p>
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-400 mb-2">Scopes</label>
+                        <div className="flex gap-4">
+                            {['read', 'write', 'admin'].map(scope => (
+                                <label key={scope} className="flex items-center gap-2 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={createForm.scopes.includes(scope)}
+                                        onChange={(e) => {
+                                            const newScopes = e.target.checked
+                                                ? [...createForm.scopes, scope]
+                                                : createForm.scopes.filter(s => s !== scope);
+                                            setCreateForm({ ...createForm, scopes: newScopes });
+                                        }}
+                                        className="rounded border-slate-700 bg-slate-950 text-green-500 focus:ring-green-500 focus:ring-offset-slate-900"
+                                    />
+                                    <span className="text-sm text-slate-300 capitalize">{scope}</span>
+                                </label>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            </Modal>
+
+            {/* Reveal Key Modal */}
+            <Modal
+                isOpen={!!createdKey}
+                onClose={() => setCreatedKey(null)}
+                title="API Key Generated"
+                maxWidth="max-w-lg"
+                footer={
+                    <button 
+                        onClick={() => setCreatedKey(null)}
+                        className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors w-full"
+                    >
+                        I have copied the key
+                    </button>
+                }
+            >
+                <div className="space-y-4">
+                    <div className="bg-yellow-500/10 border border-yellow-500/20 p-4 rounded text-yellow-200 text-sm flex gap-3 items-start">
+                        <AlertTriangle className="shrink-0 mt-0.5" size={16} />
+                        <p>This key will only be shown once. Please copy it and store it securely. You won't be able to see it again.</p>
+                    </div>
+                    
+                    <div>
+                        <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Your API Key</label>
+                        <div className="flex gap-2">
+                            <code className="flex-1 block w-full bg-slate-950 border border-slate-800 rounded px-3 py-3 text-green-400 font-mono text-sm break-all">
+                                {createdKey?.id}
+                            </code>
+                            <button
+                                onClick={() => createdKey && copyToClipboard(createdKey.id)}
+                                className="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white px-3 rounded flex items-center justify-center transition-colors shrink-0"
+                                title="Copy to clipboard"
+                            >
+                                {copiedId === createdKey?.id ? <Check size={18} className="text-green-500" /> : <Copy size={18} />}
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4 mt-4 pt-4 border-t border-slate-800">
+                        <div>
+                            <span className="text-xs text-slate-500 block uppercase">Name</span>
+                            <span className="text-sm text-white">{createdKey?.name}</span>
+                        </div>
+                        <div>
+                            <span className="text-xs text-slate-500 block uppercase">Expiration</span>
+                            <span className="text-sm text-white">
+                                {createdKey?.expires_in_days ? `${createdKey.expires_in_days} days` : 'Never'}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </Modal>
 
             {/* Delete confirmation */}
             <ConfirmDialog

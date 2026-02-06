@@ -23,7 +23,7 @@ export const TablesView: React.FC = () => {
     }
   }, [schema, selectedTable]);
 
-  const data = useRealtimeQuery(selectedTable);
+  const { data, total, loadMore } = useRealtimeQuery(selectedTable);
   const tableList = schema ? Object.keys(schema) : [];
 
   const handleCreateTable = async () => {
@@ -303,6 +303,8 @@ export const TablesView: React.FC = () => {
             <div className="flex-1 overflow-auto p-8 bg-slate-900">
               <DataGrid 
                 data={data} 
+                total={total}
+                loadMore={loadMore}
                 tableName={selectedTable} 
                 schema={schema?.[selectedTable]}
               />
