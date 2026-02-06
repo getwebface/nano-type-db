@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { DatabaseProvider, useDatabase } from './hooks/useDatabase';
-import { Shell } from './components/Shell';
+import { ProjectLayout } from './components/layout/ProjectLayout';
 import { Toaster } from './components/Toaster';
 import { AuthScreen } from './components/AuthScreen';
 import { RoomSelection } from './components/RoomSelection';
@@ -27,7 +27,7 @@ const ConnectionScreen: React.FC = () => {
     };
 
     if (isConnected && selectedRoom) {
-        return <Shell roomId={selectedRoom} />;
+        return <ProjectLayout roomId={selectedRoom} />;
     }
 
     if (currentView === 'settings') {
