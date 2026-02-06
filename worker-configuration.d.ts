@@ -1,4 +1,3 @@
-import { DurableObjectNamespace, R2Bucket, D1Database, VectorizeIndex, Ai, Queue } from "cloudflare:workers";
 import { DurableObjectNamespace, R2Bucket, D1Database, VectorizeIndex, Ai, Queue, AnalyticsEngineDataset } from "cloudflare:workers";
 
 declare global {
@@ -14,18 +13,12 @@ declare global {
         VECTOR_INDEX: VectorizeIndex;
         // AI Binding
         AI: Ai;
-		// Embedding Queue for retry logic
+		// Consolidated Queue Bindings
 		EMBEDDING_QUEUE: Queue;
+		WEBHOOK_QUEUE: Queue;
 		// Analytics Engine for observability
 		ANALYTICS: AnalyticsEngineDataset;
 		// Static Assets Binding (Legacy Worker Sites)
 		__STATIC_CONTENT: KVNamespace;
-		// Cloudflare Queues
-		AI_EMBEDDING_QUEUE: Queue;
-		WEBHOOK_QUEUE: Queue;
-		// Analytics Engine
-		ANALYTICS: AnalyticsEngineDataset;
-		// Webhook Queue
-		WEBHOOK_QUEUE: Queue;
 	}
 }

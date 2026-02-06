@@ -716,11 +716,9 @@ export class NanoStore extends DurableObject {
    * should pre-include room_id filtering to avoid modification issues.
    */
   async readFromD1(query: string, ...params: any[]): Promise<any[]> {
-    // FORCE LOCAL READ: For "Tables View" and "SqlConsole", we need immediate consistency.
-    // Reading from D1 replica introduces lag which makes new data "vanish" temporarily.
-    // Un-comment the block below only if offloading reads is strictly necessary and lag is acceptable.
+    // RE-ENABLED: D1 Read Replica for distributed read scaling
+    // Falls back to local SQLite if D1 is unavailable or returns stale data
     
-    /*
     // Try D1 first for distributed reads
     if (this.env.READ_REPLICA) {
       try {
@@ -744,12 +742,16 @@ export class NanoStore extends DurableObject {
         }
         
         const result = await stmt.all();
+        
+        // Track that we successfully used D1 for analytics
+        this.trackUsage('reads');
+        
         return result.results || [];
       } catch (e) {
         console.warn("D1 read failed, falling back to DO SQLite:", e);
+        // Fall through to local read
       }
     }
-    */
     
     // Fallback to DO SQLite if D1 is unavailable or fails
     this.trackUsage('reads');
@@ -986,30 +988,53 @@ export class NanoStore extends DurableObject {
 
     async backupToR2() {
       try {
-        // If running in Node (local dev), allow file-based backup. In the
-        // Cloudflare Workers runtime there is no `fs` module, so skip.
-        const runningInNode = typeof process !== "undefined" && (process as any).versions?.node;
-        if (!runningInNode) {
-          console.log("Backup skipped: running in Cloudflare Workers (no fs available). To enable, run locally in Node.");
+        // PRODUCTION FIX: Export as JSON instead of SQLite file
+        // Cloudflare Workers do not have a writable file system or fs module
+        // This approach works in both development and production
+        
+        if (!this.env.BACKUP_BUCKET) {
+          console.log("R2 Bucket not configured, skipping backup.");
           return;
         }
 
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const backupPath = `/tmp/backup-${timestamp}.db`;
-        // @ts-ignore: VACUUM INTO used for local SQLite file export
-        this.sql.exec(`VACUUM INTO '${backupPath}'`);
-        // Lazy require to avoid bundling `fs` into worker bundle
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const fs = require('fs');
-        const fileBuffer = fs.readFileSync(backupPath);
-
-        if (this.env.BACKUP_BUCKET) {
-         await this.env.BACKUP_BUCKET.put(`backup-${timestamp}.db`, fileBuffer);
-         console.log(`Backup uploaded: backup-${timestamp}.db`);
-        } else {
-         console.log("R2 Bucket not configured, skipping upload.");
+        
+        // Get all tables in the database
+        const tables = this.sql.exec(`
+          SELECT name FROM sqlite_master 
+          WHERE type='table' AND name NOT LIKE 'sqlite_%'
+        `).toArray();
+        
+        // Export data as JSON
+        const backup: Record<string, any> = {
+          timestamp: new Date().toISOString(),
+          doId: this.doId,
+          schema: {},
+          data: {}
+        };
+        
+        for (const tableRow of tables) {
+          const tableName = this.sanitizeIdentifier(tableRow.name as string);
+          
+          if (!tableName) {
+            console.warn(`Skipping invalid table name: ${tableRow.name}`);
+            continue;
+          }
+          
+          // Get table schema - safe to use quoted identifier after sanitization
+          const schemaInfo = this.sql.exec(`PRAGMA table_info("${tableName}")`).toArray();
+          backup.schema[tableName] = schemaInfo;
+          
+          // Get table data
+          const tableData = this.sql.exec(`SELECT * FROM "${tableName}"`).toArray();
+          backup.data[tableName] = tableData;
         }
-        fs.unlinkSync(backupPath);
+        
+        // Upload JSON backup to R2
+        const backupJson = JSON.stringify(backup, null, 2);
+        await this.env.BACKUP_BUCKET.put(`backup-${timestamp}.json`, backupJson);
+        console.log(`JSON backup uploaded: backup-${timestamp}.json (${backupJson.length} bytes)`);
+        
       } catch (err) {
         console.error("Backup failed:", err);
       }
@@ -1480,12 +1505,12 @@ export class NanoStore extends DurableObject {
                         // 2. Replicate to D1 for distributed reads (async, non-blocking)
                         this.ctx.waitUntil(this.replicateToD1('tasks', 'insert', newTask));
 
-                        // 3. Queue AI Embedding Generation (Reliability Fix with Cloudflare Queues)
-                        // Instead of ctx.waitUntil with AI.run, push to Cloudflare Queue for retry logic
-                        if (newTask && this.env.AI_EMBEDDING_QUEUE) {
+                        // 3. Queue AI Embedding Generation (Consolidated Queue Binding)
+                        // Use EMBEDDING_QUEUE for reliable AI processing with retry logic
+                        if (newTask && this.env.EMBEDDING_QUEUE) {
                             this.ctx.waitUntil((async () => {
                                 try {
-                                    await this.env.AI_EMBEDDING_QUEUE.send({
+                                    await this.env.EMBEDDING_QUEUE.send({
                                         taskId: newTask.id,
                                         title: title,
                                         doId: this.doId,
@@ -1498,16 +1523,6 @@ export class NanoStore extends DurableObject {
                                     this.sql.exec("UPDATE tasks SET vector_status = 'failed' WHERE id = ?", newTask.id);
                                 }
                             })());
-                        } else if (newTask && this.env.EMBEDDING_QUEUE) {
-                            // PRODUCTION FIX: Use Cloudflare Queue for reliable AI processing with retry
-                            // Push embedding job to queue (will retry on failure with exponential backoff)
-                            await this.env.EMBEDDING_QUEUE.send({
-                                taskId: newTask.id,
-                                doId: this.doId,
-                                title: title,
-                                timestamp: Date.now()
-                            });
-                            console.log(`Embedding job queued for task ${newTask.id}`);
                         } else if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
                             // FALLBACK: If no queue, use old ctx.waitUntil approach
                             // Use ctx.waitUntil for async operation without blocking the response
@@ -1791,36 +1806,22 @@ export class NanoStore extends DurableObject {
                         
                         this.logAction(method, { table, rowCount: rows.length });
                         
-                        // SCHEMA EVOLUTION: Auto-detect and add missing columns
+                        // SCHEMA VALIDATION: Prevent automatic column creation
+                        // Require users to explicitly map CSV columns to existing schema or create columns first
                         const currentInfo = this.sql.exec(`PRAGMA table_info("${table}")`).toArray();
                         const existingColumns = new Set(currentInfo.map((c: any) => c.name));
                         
-                        // Analyze the first row to find new columns
+                        // Analyze the first row to find unmapped columns
                         const sampleRow = rows[0];
-                        const newColumns = Object.keys(sampleRow)
-                            .map(k => this.sanitizeIdentifier(k))
-                            .filter(k => k !== 'id' && !existingColumns.has(k));
-
-                        // VALIDATE HEADERS ONCE
-                        // Check if incoming columns are valid against existing ones (or if we are adding them)
-                        // If strict mode is on or we want to prevent partial failures:
-                        // Here we just ensure we don't have widely invalid structure
-                         // No specific validation rule provided other than "Throw a single error if columns are invalid"
-                         // We can assume that if keys are not strings or empty, it's invalid
+                        const incomingColumns = Object.keys(sampleRow).map(k => this.sanitizeIdentifier(k));
+                        const unmappedColumns = incomingColumns.filter(k => k !== 'id' && !existingColumns.has(k));
                         
-                        // If we found columns in the CSV that aren't in the DB, create them!
-                        if (newColumns.length > 0) {
-                            console.log(`[Auto-Schema] Adding ${newColumns.length} missing columns to ${table}: ${newColumns.join(', ')}`);
-                            
-                            for (const col of newColumns) {
-                                try {
-                                    this.sql.exec(`ALTER TABLE "${table}" ADD COLUMN "${col}" TEXT`);
-                                } catch (alterErr: any) {
-                                    console.warn(`Failed to add column ${col}: ${alterErr.message}`);
-                                }
-                            }
-                            // Note: replicateSchemaToD1 doesn't exist yet, but we're keeping the concept
-                            // For now, schema changes will be synced on next full sync
+                        // PREVENT GHOST ROWS: Reject imports with unmapped columns
+                        // This prevents the scenario where User A imports "email, name" and User B imports "Email, FullName"
+                        // resulting in columns: email, name, Email, FullName
+                        if (unmappedColumns.length > 0) {
+                            const errorMsg = `Column mismatch detected. The following columns in your CSV do not exist in the table "${table}": ${unmappedColumns.join(', ')}. Please create these columns first or map them to existing columns. Existing columns: ${Array.from(existingColumns).join(', ')}`;
+                            throw new Error(errorMsg);
                         }
                         
                         const insertedRows: any[] = [];
@@ -2911,6 +2912,87 @@ export class NanoStore extends DurableObject {
                         webSocket.send(JSON.stringify({ 
                             type: "error", 
                             error: `Failed to delete table: ${e.message}` 
+                        }));
+                    }
+                    break;
+                }
+
+                case "chatWithDatabase": {
+                    this.trackUsage('ai_ops');
+                    
+                    const { message } = data.payload || {};
+                    
+                    // Input validation
+                    if (!message || typeof message !== 'string') {
+                        webSocket.send(JSON.stringify({ 
+                            type: "chat_error",
+                            error: "Message is required"
+                        }));
+                        break;
+                    }
+                    
+                    if (message.length > 1000) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "chat_error",
+                            error: "Message too long: maximum 1000 characters"
+                        }));
+                        break;
+                    }
+                    
+                    try {
+                        if (!this.env.AI) {
+                            webSocket.send(JSON.stringify({ 
+                                type: "chat_response",
+                                response: "AI is not available. Please configure the AI binding."
+                            }));
+                            break;
+                        }
+                        
+                        // Get current schema for context
+                        const schema = this.getSchema();
+                        const tableNames = Object.keys(schema);
+                        
+                        // Build schema context for the AI
+                        let schemaContext = "You are a helpful database assistant. Here is the current database schema:\n\n";
+                        
+                        if (tableNames.length === 0) {
+                            schemaContext += "No tables exist in the database yet.\n";
+                        } else {
+                            for (const tableName of tableNames) {
+                                const columns = schema[tableName];
+                                schemaContext += `Table: ${tableName}\n`;
+                                schemaContext += `Columns: ${columns.map(c => `${c.name} (${c.type})`).join(', ')}\n\n`;
+                            }
+                        }
+                        
+                        // Create the system prompt for the AI
+                        const systemPrompt = schemaContext + 
+                            "\nYou help users understand their database, explore tables, and answer questions about their data. " +
+                            "Provide helpful, concise responses about the schema, data structure, and general database concepts. " +
+                            "If the user asks about specific data, suggest they use the query or search features.";
+                        
+                        // Call Workers AI (Llama 3)
+                        const response = await this.env.AI.run('@cf/meta/llama-3-8b-instruct', {
+                            messages: [
+                                { role: 'system', content: systemPrompt },
+                                { role: 'user', content: message }
+                            ],
+                            max_tokens: 512,
+                            temperature: 0.7
+                        });
+                        
+                        const aiResponse = response.response || "I'm sorry, I couldn't generate a response.";
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "chat_response",
+                            response: aiResponse
+                        }));
+                        
+                    } catch (e: any) {
+                        console.error("Chat with database error:", e);
+                        webSocket.send(JSON.stringify({ 
+                            type: "chat_error",
+                            error: `Failed to process chat: ${e.message}`
                         }));
                     }
                     break;

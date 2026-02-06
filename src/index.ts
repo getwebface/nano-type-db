@@ -29,6 +29,27 @@ function generateWebhookSecret(): string {
 }
 
 /**
+ * SECURITY: Sanitize sensitive data from logs
+ * Prevents BETTER_AUTH_SECRET and other sensitive values from being logged
+ */
+function sanitizeForLogging(obj: any): any {
+  if (!obj || typeof obj !== 'object') return obj;
+  
+  const sanitized = Array.isArray(obj) ? [...obj] : { ...obj };
+  const sensitiveKeys = ['BETTER_AUTH_SECRET', 'secret', 'password', 'token', 'apiKey', 'api_key'];
+  
+  for (const key in sanitized) {
+    if (sensitiveKeys.some(sk => key.toLowerCase().includes(sk.toLowerCase()))) {
+      sanitized[key] = '[REDACTED]';
+    } else if (typeof sanitized[key] === 'object' && sanitized[key] !== null) {
+      sanitized[key] = sanitizeForLogging(sanitized[key]);
+    }
+  }
+  
+  return sanitized;
+}
+
+/**
  * PRODUCTION: Environment variable validation
  * Validates that all required bindings and configuration are present
  */
@@ -1165,9 +1186,11 @@ export default {
         } catch (e: any) {
             try {
                 const raw = await request.text();
-                console.error("/api/rooms/create - JSON parse error:", e.message, "rawBody:", raw, "headers:", Object.fromEntries(request.headers));
+                // SECURITY: Sanitize headers to prevent logging sensitive data
+                const sanitizedHeaders = sanitizeForLogging(Object.fromEntries(request.headers));
+                console.error("/api/rooms/create - JSON parse error:", e.message, "rawBody:", raw.substring(0, 200), "headers:", sanitizedHeaders);
             } catch (readErr) {
-                console.error("/api/rooms/create - JSON parse error and failed to read raw body:", e.message, readErr);
+                console.error("/api/rooms/create - JSON parse error and failed to read raw body:", e.message);
             }
             return SecurityHeaders.apply(
                 new Response("Invalid JSON body", { status: 400 })
@@ -1403,7 +1426,8 @@ export default {
                 }
             }
         } catch (e: any) {
-            console.error("Critical Auth Error:", e);
+            // SECURITY: Only log error message, not full error object that might contain env
+            console.error("Critical Auth Error:", e.message || String(e));
             return new Response(`Auth Error: ${e.message}`, { status: 500 });
         }
     }
