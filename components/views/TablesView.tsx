@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useRealtimeQuery, useDatabase } from '../../hooks/useDatabase';
 import { DataGrid } from '../DataGrid';
-import { Table2, Plus, Trash2, Database } from 'lucide-react';
+import { Table2, Plus, Trash2, Database, Upload } from 'lucide-react';
 import { ConfirmDialog } from '../Modal';
 
 export const TablesView: React.FC = () => {
@@ -11,6 +11,8 @@ export const TablesView: React.FC = () => {
   const [newTableName, setNewTableName] = useState('');
   const [newTableColumns, setNewTableColumns] = useState([{ name: 'name', type: 'TEXT', notNull: false }]);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [showCSVImportModal, setShowCSVImportModal] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
   useEffect(() => {
     if (schema) {
@@ -85,6 +87,120 @@ export const TablesView: React.FC = () => {
     setNewTableColumns(newTableColumns.filter((_, i) => i !== index));
   };
 
+  const sanitizeIdentifier = (name: string): string => {
+    let sanitized = name.toLowerCase();
+    sanitized = sanitized.replace(/[^a-z0-9_]/g, '_');
+    sanitized = sanitized.replace(/^_+|_+$/g, '');
+    if (!/^[a-z_]/.test(sanitized)) {
+      sanitized = '_' + sanitized;
+    }
+    sanitized = sanitized.replace(/_+/g, '_');
+    return sanitized;
+  };
+
+  const handleCSVFileSelect = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleCSVFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !file.name.endsWith('.csv')) {
+      addToast('Please select a valid CSV file', 'error');
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      const lines = text.split('\n').filter(line => line.trim());
+      
+      if (lines.length < 2) {
+        addToast('CSV file must contain a header row and at least one data row', 'error');
+        return;
+      }
+
+      // Parse CSV headers
+      const parseCSVLine = (line: string): string[] => {
+        const result: string[] = [];
+        let current = '';
+        let inQuotes = false;
+        
+        for (let i = 0; i < line.length; i++) {
+          const char = line[i];
+          if (char === '"') {
+            if (inQuotes && line[i + 1] === '"') {
+              current += '"';
+              i++;
+            } else {
+              inQuotes = !inQuotes;
+            }
+          } else if (char === ',' && !inQuotes) {
+            result.push(current.trim());
+            current = '';
+          } else {
+            current += char;
+          }
+        }
+        result.push(current.trim());
+        return result;
+      };
+
+      const rawHeaders = parseCSVLine(lines[0]);
+      const sanitizedHeaders = rawHeaders.map(h => sanitizeIdentifier(h));
+      
+      // Generate table name from file name
+      const suggestedTableName = sanitizeIdentifier(file.name.replace('.csv', ''));
+      
+      // Create columns from CSV headers
+      const columns = sanitizedHeaders.map(header => ({
+        name: header,
+        type: 'TEXT',
+        notNull: false
+      }));
+
+      // Create table with inferred schema
+      await rpc('createTable', {
+        tableName: suggestedTableName,
+        columns: columns
+      });
+
+      addToast(`Table "${suggestedTableName}" created successfully`, 'success');
+
+      // Parse and insert data
+      const rows = lines.slice(1).map(line => {
+        const values = parseCSVLine(line);
+        const row: Record<string, any> = {};
+        sanitizedHeaders.forEach((header, idx) => {
+          let value: any = values[idx] || '';
+          // Try to parse as number
+          if (value && !isNaN(Number(value))) {
+            value = Number(value);
+          } else if (value.toLowerCase() === 'true') {
+            value = true;
+          } else if (value.toLowerCase() === 'false') {
+            value = false;
+          }
+          row[header] = value;
+        });
+        return row;
+      });
+
+      // Batch insert the rows
+      await rpc('batchInsert', { table: suggestedTableName, rows });
+      
+      addToast(`Successfully imported ${rows.length} rows into "${suggestedTableName}"`, 'success');
+      setSelectedTable(suggestedTableName);
+      
+    } catch (error: any) {
+      console.error('CSV import failed:', error);
+      addToast('CSV import failed: ' + (error.message || 'Unknown error'), 'error');
+    } finally {
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
   return (
     <div className="flex h-full overflow-hidden">
       {/* Tables Sidebar */}
@@ -104,13 +220,30 @@ export const TablesView: React.FC = () => {
           {tableList.length === 0 ? (
             <div className="px-2 py-4 text-center">
               <Database size={32} className="mx-auto mb-2 text-slate-600" />
-              <p className="text-xs text-slate-600 mb-2">No tables found.</p>
-              <button
-                onClick={() => setShowCreateModal(true)}
-                className="text-xs text-green-500 hover:text-green-400"
-              >
-                Create your first table
-              </button>
+              <p className="text-xs text-slate-600 mb-3">No tables found.</p>
+              <div className="space-y-2">
+                <button
+                  onClick={() => setShowCreateModal(true)}
+                  className="w-full text-xs text-green-500 hover:text-green-400 py-1"
+                >
+                  Create your first table
+                </button>
+                <div className="text-xs text-slate-600">or</div>
+                <button
+                  onClick={handleCSVFileSelect}
+                  className="w-full flex items-center justify-center gap-2 text-xs text-blue-500 hover:text-blue-400 py-1"
+                >
+                  <Upload size={14} />
+                  Import from CSV
+                </button>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv"
+                onChange={handleCSVFileChange}
+                className="hidden"
+              />
             </div>
           ) : (
             tableList.map(table => (
@@ -179,14 +312,29 @@ export const TablesView: React.FC = () => {
           <div className="flex-1 flex items-center justify-center bg-slate-900">
             <div className="text-center">
               <Database size={64} className="mx-auto mb-4 text-slate-700" />
-              <h3 className="text-xl font-semibold text-slate-400 mb-2">No table selected</h3>
-              <p className="text-slate-600 mb-4">Select a table from the sidebar or create a new one</p>
-              <button
-                onClick={() => setShowCreateModal(true)}
-                className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
-              >
-                Create New Table
-              </button>
+              <h3 className="text-xl font-semibold text-slate-400 mb-2">
+                {tableList.length === 0 ? 'No tables yet' : 'No table selected'}
+              </h3>
+              <p className="text-slate-600 mb-6">
+                {tableList.length === 0 
+                  ? 'Get started by creating a table or importing from CSV' 
+                  : 'Select a table from the sidebar or create a new one'}
+              </p>
+              <div className="flex gap-3 justify-center">
+                <button
+                  onClick={() => setShowCreateModal(true)}
+                  className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
+                >
+                  Create New Table
+                </button>
+                <button
+                  onClick={handleCSVFileSelect}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors flex items-center gap-2"
+                >
+                  <Upload size={16} />
+                  Import CSV
+                </button>
+              </div>
             </div>
           </div>
         )}
