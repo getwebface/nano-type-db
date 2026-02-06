@@ -874,8 +874,8 @@ export class NanoStore extends DurableObject {
       return false;
     }
     
-    // Exclude system tables
-    if (tableName.startsWith('_') || tableName === 'sqlite_sequence' || tableName.startsWith('sqlite_')) {
+    // Exclude system tables (tables starting with _ or sqlite_)
+    if (tableName.startsWith('_') || tableName.startsWith('sqlite_')) {
       return false;
     }
     
