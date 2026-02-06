@@ -10,7 +10,7 @@ interface Message {
 }
 
 export const ChatDatabase: React.FC = () => {
-  const { schema, rpc } = useDatabase();
+  const { schema } = useDatabase();
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '1',

@@ -5,7 +5,7 @@ import { Table2, Plus } from 'lucide-react';
 
 export const TablesView: React.FC = () => {
   const { schema } = useDatabase();
-  const [selectedTable, setSelectedTable] = useState<string>('tasks');
+  const [selectedTable, setSelectedTable] = useState<string>('');
   
   useEffect(() => {
     if (schema) {
