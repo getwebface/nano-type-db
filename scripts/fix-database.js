@@ -56,6 +56,8 @@ function tableExists(database, tableName) {
   }
   
   // SECURITY: tableName is validated above with regex - safe to interpolate
+  // The regex validation on lines 51-56 ensures tableName can only contain
+  // alphanumeric characters and underscores, preventing SQL injection
   const result = execD1Command(database, `SELECT name FROM sqlite_master WHERE type='table' AND name='${tableName}'`);
   if (!result.success) {
     return false;

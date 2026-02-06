@@ -1605,7 +1605,12 @@ export class NanoStore extends DurableObject {
                         this.logAction(method, { table, rowCount: rows.length });
                         
                         const insertedRows: any[] = [];
-                        const CHUNK_SIZE = 100; // Process in chunks to avoid blocking
+                        // PERFORMANCE: Process in chunks to avoid blocking the event loop
+                        // Chunk size of 100 rows balances:
+                        // - Progress update frequency (every 100 rows)
+                        // - Event loop responsiveness (prevents blocking)
+                        // - Network overhead (not too many progress messages)
+                        const CHUNK_SIZE = 100;
                         
                         // Process rows in chunks to provide progress updates
                         for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
@@ -1627,7 +1632,7 @@ export class NanoStore extends DurableObject {
                                     const placeholders = fields.map(() => '?').join(', ');
                                     const fieldNames = fields.join(', ');
                                     // SECURITY: Table and field names use string interpolation but are protected by:
-                                    // 1. Table whitelist (lines 1591-1598)
+                                    // 1. Table whitelist validation (lines 1591-1595)
                                     // 2. Field name validation (lines 1621-1624)
                                     // 3. All values are parameterized (? placeholders)
                                     // This is safe because we control the field names from validated input
