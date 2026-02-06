@@ -19,6 +19,7 @@ export const ProfileMenu: React.FC<ProfileMenuProps> = ({ userTier = 'free' }) =
   const [isOpen, setIsOpen] = useState(false);
   const [showBilling, setShowBilling] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [displayName, setDisplayName] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
   const { data: session } = authClient.useSession();
 
@@ -41,10 +42,24 @@ export const ProfileMenu: React.FC<ProfileMenuProps> = ({ userTier = 'free' }) =
 
   const user = session?.user;
   if (!user) return null;
+  
+  // Initialize display name from user data
+  useEffect(() => {
+    if (user.name && !displayName) {
+      setDisplayName(user.name);
+    }
+  }, [user.name, displayName]);
 
   // Calculate account age
   const accountCreatedAt = user.createdAt ? new Date(user.createdAt) : new Date();
   const daysSinceJoined = Math.floor((Date.now() - accountCreatedAt.getTime()) / (1000 * 60 * 60 * 24));
+  
+  // Format days since joined
+  const formatDaysSince = (days: number) => {
+    if (days === 0) return 'Joined today';
+    if (days === 1) return 'Joined yesterday';
+    return `Joined ${days} days ago`;
+  };
   
   // Get user initials for avatar
   const initials = user.name
@@ -121,7 +136,7 @@ export const ProfileMenu: React.FC<ProfileMenuProps> = ({ userTier = 'free' }) =
               </div>
               <div className="flex items-center gap-1 text-slate-400 text-xs">
                 <Calendar size={12} />
-                <span>Joined {daysSinceJoined} {daysSinceJoined === 1 ? 'day' : 'days'} ago</span>
+                <span>{formatDaysSince(daysSinceJoined)}</span>
               </div>
             </div>
           </div>
@@ -190,7 +205,8 @@ export const ProfileMenu: React.FC<ProfileMenuProps> = ({ userTier = 'free' }) =
                   <label className="text-slate-400 text-xs block mb-1">Display Name</label>
                   <input
                     type="text"
-                    defaultValue={user.name || ''}
+                    value={displayName}
+                    onChange={(e) => setDisplayName(e.target.value)}
                     className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                     placeholder="Enter your name"
                   />
@@ -204,7 +220,14 @@ export const ProfileMenu: React.FC<ProfileMenuProps> = ({ userTier = 'free' }) =
                     className="w-full bg-slate-900/50 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-500 cursor-not-allowed"
                   />
                 </div>
-                <button className="w-full bg-blue-600 hover:bg-blue-700 text-white text-sm py-2 rounded-lg transition-colors duration-200">
+                <button 
+                  onClick={() => {
+                    // TODO: Implement profile update API call
+                    console.log('Saving profile changes:', { displayName });
+                    // This would call an API endpoint to update the user profile
+                  }}
+                  className="w-full bg-blue-600 hover:bg-blue-700 text-white text-sm py-2 rounded-lg transition-colors duration-200"
+                >
                   Save Changes
                 </button>
               </div>
@@ -227,10 +250,17 @@ export const ProfileMenu: React.FC<ProfileMenuProps> = ({ userTier = 'free' }) =
                       Enjoy unlimited databases, advanced features, and priority support.
                     </p>
                     <p className="text-slate-400 text-xs">
+                      {/* TODO: Fetch real billing date from subscription data */}
                       Next billing date: {new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toLocaleDateString()}
                     </p>
                   </div>
-                  <button className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm py-2 rounded-lg transition-colors duration-200">
+                  <button 
+                    onClick={() => {
+                      // TODO: Navigate to subscription management page
+                      console.log('Navigate to subscription management');
+                    }}
+                    className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm py-2 rounded-lg transition-colors duration-200"
+                  >
                     Manage Subscription
                   </button>
                 </div>
@@ -251,7 +281,13 @@ export const ProfileMenu: React.FC<ProfileMenuProps> = ({ userTier = 'free' }) =
                       </div>
                     </div>
                   </div>
-                  <button className="w-full bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600 text-slate-900 font-semibold text-sm py-2 rounded-lg transition-all duration-200 transform hover:scale-[1.02]">
+                  <button 
+                    onClick={() => {
+                      // TODO: Navigate to upgrade/payment page
+                      console.log('Navigate to upgrade flow');
+                    }}
+                    className="w-full bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600 text-slate-900 font-semibold text-sm py-2 rounded-lg transition-all duration-200 transform hover:scale-[1.02]"
+                  >
                     Upgrade to Pro
                   </button>
                 </div>
