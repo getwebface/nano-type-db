@@ -4,6 +4,8 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
+    const isProduction = mode === 'production';
+    
     return {
       server: {
         port: 3000,
@@ -32,6 +34,35 @@ export default defineConfig(({ mode }) => {
         alias: {
           '@': path.resolve(__dirname, '.'),
         }
-      }
+      },
+      // PRODUCTION: Build optimizations
+      build: {
+        // Minification for production
+        minify: isProduction ? 'esbuild' : false,
+        // Source maps for debugging (hidden in production)
+        sourcemap: isProduction ? 'hidden' : true,
+        // Optimize chunks
+        rollupOptions: {
+          output: {
+            // Manual chunk splitting for better caching
+            manualChunks: {
+              'react-vendor': ['react', 'react-dom'],
+              'ui-vendor': ['lucide-react'],
+            },
+          },
+        },
+        // Target modern browsers for smaller bundles
+        target: 'es2020',
+        // Improve tree-shaking
+        modulePreload: {
+          polyfill: true,
+        },
+        // Chunk size warnings
+        chunkSizeWarningLimit: 1000,
+      },
+      // Optimize dependencies
+      optimizeDeps: {
+        include: ['react', 'react-dom', 'lucide-react'],
+      },
     };
 });

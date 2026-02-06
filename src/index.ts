@@ -9,9 +9,61 @@ const assetManifest = JSON.parse(manifestJSON);
 
 export { NanoStore, NanoStore as DataStore };
 
+/**
+ * PRODUCTION: Environment variable validation
+ * Validates that all required bindings and configuration are present
+ */
+function validateEnvironment(env: Env): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  
+  // Critical bindings (production-required)
+  if (!env.DATA_STORE) errors.push("Missing DATA_STORE binding (Durable Object)");
+  if (!env.AUTH_DB) errors.push("Missing AUTH_DB binding (D1 Database)");
+  
+  // Optional but recommended bindings (warn only in production)
+  const warnings: string[] = [];
+  if (!env.AI) warnings.push("Missing AI binding - AI features disabled");
+  if (!env.VECTOR_INDEX) warnings.push("Missing VECTOR_INDEX binding - semantic search disabled");
+  if (!env.ANALYTICS) warnings.push("Missing ANALYTICS binding - analytics disabled");
+  if (!env.EMBEDDING_QUEUE) warnings.push("Missing EMBEDDING_QUEUE - AI embeddings will be best-effort");
+  if (!env.WEBHOOK_QUEUE) warnings.push("Missing WEBHOOK_QUEUE - webhooks disabled");
+  
+  // Log warnings (non-blocking)
+  if (warnings.length > 0) {
+    console.warn(JSON.stringify({
+      type: 'environment_warnings',
+      warnings,
+      timestamp: new Date().toISOString()
+    }));
+  }
+  
+  return { valid: errors.length === 0, errors };
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // PRODUCTION: Validate environment on startup (only check on first request or health check)
     const url = new URL(request.url);
+    if (url.pathname === "/health" || url.pathname === "/") {
+      const validation = validateEnvironment(env);
+      if (!validation.valid) {
+        console.error(JSON.stringify({
+          type: 'environment_error',
+          errors: validation.errors,
+          timestamp: new Date().toISOString()
+        }));
+        
+        // Return error response for health check
+        if (url.pathname === "/health") {
+          return Response.json({
+            status: "unhealthy",
+            errors: validation.errors,
+            timestamp: new Date().toISOString()
+          }, { status: 503 });
+        }
+      }
+    }
+    
     const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
 
     // 0. Rate Limiting Protection
