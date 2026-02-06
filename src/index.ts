@@ -2,6 +2,10 @@ import { NanoStore } from "./durable-object";
 import { createAuth } from "./lib/auth";
 import { SecurityHeaders, InputValidator } from "./lib/security";
 import type { ExecutionContext, ScheduledController, MessageBatch } from "cloudflare:workers";
+import { getAssetFromKV, NotFoundError, MethodNotAllowedError } from "@cloudflare/kv-asset-handler";
+// @ts-ignore
+import manifestJSON from "__STATIC_CONTENT_MANIFEST";
+const assetManifest = JSON.parse(manifestJSON);
 
 export { NanoStore, NanoStore as DataStore };
 
@@ -57,20 +61,27 @@ export default {
             );
         } catch (e: any) {
             return SecurityHeaders.apply(
-                new Response(`Error fetching user tier: ${e.message}`, { status: 500 })
+                Response.json({ error: e.message }, { status: 500 })
             );
         }
     }
 
     // 2. Serve Static Assets (React App)
-    if (env.ASSETS) {
-      try {
-        const asset = await env.ASSETS.fetch(request);
-        if (asset.status < 400) {
-          return asset;
+    try {
+      return await getAssetFromKV(
+        {
+          request,
+          waitUntil: ctx.waitUntil.bind(ctx),
+        },
+        {
+          ASSET_NAMESPACE: env.__STATIC_CONTENT,
+          ASSET_MANIFEST: assetManifest,
         }
-      } catch (e) {
-        // failed to fetch asset, continue
+      );
+    } catch (e) {
+      if (!(e instanceof NotFoundError || e instanceof MethodNotAllowedError)) {
+          // In case of other errors (e.g. KV error), we might want to log it or let it fail
+          // But here acts as a fall-through like before
       }
     }
 
@@ -85,11 +96,20 @@ export default {
         request.headers.get("Upgrade") === "websocket";
 
     if (!isBackendPath) {
-       if (env.ASSETS) {
-          try {
-             const indexReq = new Request(new URL("/index.html", url), request);
-             return await env.ASSETS.fetch(indexReq);
-          } catch(e) {}
+       try {
+           return await getAssetFromKV(
+               {
+                 request,
+                 waitUntil: ctx.waitUntil.bind(ctx),
+               },
+               {
+                 ASSET_NAMESPACE: env.__STATIC_CONTENT,
+                 ASSET_MANIFEST: assetManifest,
+                 mapRequestToAsset: req => new Request(`${new URL(req.url).origin}/index.html`, req),
+               }
+           );
+       } catch(e) {
+         // Fallback
        }
        return new Response("Not found", { status: 404 });
     }
@@ -251,7 +271,7 @@ export default {
             );
         } catch (e: any) {
             return SecurityHeaders.apply(
-                new Response(`Failed to delete API key: ${e.message}`, { status: 500 })
+                Response.json({ error: e.message }, { status: 500 })
             );
         }
     }
@@ -283,7 +303,7 @@ export default {
             );
         } catch (e: any) {
             return SecurityHeaders.apply(
-                new Response(`Failed to list rooms: ${e.message}`, { status: 500 })
+                Response.json({ error: e.message }, { status: 500 })
             );
         }
     }

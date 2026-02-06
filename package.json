@@ -11,6 +11,7 @@
     "generate-client": "tsx scripts/generate-client-typed.ts"
   },
   "dependencies": {
+    "@cloudflare/kv-asset-handler": "^0.4.2",
     "better-auth": "^1.4.18",
     "drizzle-orm": "^0.45.1",
     "fs": "^0.0.1-security",

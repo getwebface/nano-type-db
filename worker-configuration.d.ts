@@ -18,8 +18,8 @@ declare global {
 		EMBEDDING_QUEUE: Queue;
 		// Analytics Engine for observability
 		ANALYTICS: AnalyticsEngineDataset;
-		// Static Assets Binding
-		ASSETS: Fetcher;
+		// Static Assets Binding (Legacy Worker Sites)
+		__STATIC_CONTENT: KVNamespace;
 		// Cloudflare Queues
 		AI_EMBEDDING_QUEUE: Queue;
 		WEBHOOK_QUEUE: Queue;

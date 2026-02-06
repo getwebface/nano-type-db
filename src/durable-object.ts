@@ -375,7 +375,17 @@ const MIGRATIONS = [
               failure_count INTEGER DEFAULT 0
           )`);
           // Index for quick active webhook lookups
-          sql.exec(`CREATE INDEX IF NOT EXISTS idx_webhooks_active ON _webhooks(active) WHERE active = 1`);
+            try {
+              // Ensure the `active` column exists (older schemas may have used `enabled`)
+              sql.exec("ALTER TABLE _webhooks ADD COLUMN active INTEGER DEFAULT 1");
+            } catch (e) {
+              // Column may already exist or ALTER not supported; ignore
+            }
+            try {
+              sql.exec(`CREATE INDEX IF NOT EXISTS idx_webhooks_active ON _webhooks(active) WHERE active = 1`);
+            } catch (e) {
+              console.warn("Could not create idx_webhooks_active index:", e);
+            }
       }
   }
 ];
@@ -1074,7 +1084,9 @@ export class NanoStore extends DurableObject {
 
     if (url.pathname === "/connect") {
       const upgradeHeader = request.headers.get("Upgrade");
-      if (!upgradeHeader || upgradeHeader !== "websocket") {
+      console.log("/connect upgrade header:", upgradeHeader);
+      if (!upgradeHeader || upgradeHeader.toLowerCase() !== "websocket") {
+        console.error("Invalid Upgrade header for websocket", { upgradeHeader });
         return new Response("Expected Upgrade: websocket", { status: 426 });
       }
 

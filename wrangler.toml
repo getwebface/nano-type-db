@@ -1,63 +1,54 @@
 name = "nanotype-db"
 main = "src/index.ts"
-compatibility_date = "2024-04-05"
+compatibility_date = "2026-02-06"
 compatibility_flags = ["nodejs_compat"]
 
-# Define the Durable Object binding
+# --- PREVIEW CONFIGURATION ---
+# DISABLING PREVIEW URLS IS REQUIRED FOR DURABLE OBJECTS
+preview_urls = false
+
+# --- DURABLE OBJECTS ---
 [[durable_objects.bindings]]
 name = "DATA_STORE"
-class_name = "NanoStore" # Changed from DataStore to force SQLite creation
+class_name = "NanoStore"
 
-# Database migrations
 [[migrations]]
 tag = "v2"
-new_sqlite_classes = ["NanoStore"] # Must use new_sqlite_classes for SQL support
+new_sqlite_classes = ["NanoStore"]
 
-# Backups
-[[r2_buckets]]
-binding = "BACKUP_BUCKET"
-bucket_name = "nanotype-backups"
+# --- FIX: USE WORKER SITES INSTEAD OF ASSETS ---
+# This bypasses the Preview URL versioning error entirely.
+[site]
+bucket = "./dist" 
 
-# Auth Database (D1)
+# --- DATABASES ---
 [[d1_databases]]
 binding = "AUTH_DB"
 database_name = "nanotype-auth"
 database_id = "d1b3a27b-a1de-43ab-ba7f-5ebda88b9807"
 
-# Read Replica Database (D1) - For distributed read operations
-# IMPORTANT: Replace 'placeholder-read-replica-id' with your actual database ID
-# Run: wrangler d1 create nanotype-read-replica
-# Then copy the database_id from the output
 [[d1_databases]]
 binding = "READ_REPLICA"
 database_name = "nanotype-read-replica"
 database_id = "3c7e5378-398d-4ddd-acd4-65d808aa454a"
 
-# Observability Configuration
-[observability]
-enabled = false
-head_sampling_rate = 1
-
-[observability.logs]
-enabled = true
-head_sampling_rate = 1
-invocation_logs = true
-
-[observability.traces]
-enabled = false
-head_sampling_rate = 1
-
-# Vector Index & AI
 [[vectorize]]
 binding = "VECTOR_INDEX"
 index_name = "nanotype-vectors"
 
+# --- AI & ANALYTICS ---
 [ai]
 binding = "AI"
-# AI Gateway for caching and rate limiting
 gateway = "nano-type-ai-gateway"
 
-# Cloudflare Queue for AI Embeddings (with retry)
+[[analytics_engine_datasets]]
+binding = "ANALYTICS"
+
+[[analytics_engine_datasets]]
+binding = "ANALYTICS_ALT"
+
+# --- QUEUES ---
+# AI Embeddings
 [[queues.producers]]
 binding = "EMBEDDING_QUEUE"
 queue = "nanotype-embeddings"
@@ -69,26 +60,7 @@ max_batch_timeout = 30
 max_retries = 5
 dead_letter_queue = "nanotype-embeddings-dlq"
 
-# Analytics Engine for Observability
-[[analytics_engine_datasets]]
-binding = "ANALYTICS_ALT"
-
-# Static Assets (React Frontend)
-[assets]
-binding = "ASSETS"
-directory = "./dist"
-
-# Rate Limit (Optional - uncomment if you have a namespace)
-# [[rate_limits]]
-# binding = "RATE_LIMITER"
-# namespace_id = "<namespace-id>"
-# simple = { limit = 100, period = 60 }
-
-# Cron Trigger for Backups (Every hour)
-[triggers]
-crons = ["0 * * * *"]
-
-# Cloudflare Queues for AI Embedding Reliability
+# AI Reliability
 [[queues.producers]]
 binding = "AI_EMBEDDING_QUEUE"
 queue = "ai-embedding-queue"
@@ -100,7 +72,7 @@ max_batch_timeout = 30
 max_retries = 3
 dead_letter_queue = "ai-embedding-dlq"
 
-# Cloudflare Queues for Webhooks
+# Webhooks (Standard)
 [[queues.producers]]
 binding = "WEBHOOK_QUEUE"
 queue = "webhook-queue"
@@ -110,10 +82,7 @@ queue = "webhook-queue"
 max_batch_size = 10
 max_batch_timeout = 30
 
-# Analytics Engine for Observability
-[[analytics_engine_datasets]]
-binding = "ANALYTICS"
-# Cloudflare Queue for Webhooks (unique binding name)
+# Webhooks (Nanotype Specific)
 [[queues.producers]]
 binding = "WEBHOOK_QUEUE_NANOTYPE"
 queue = "nanotype-webhooks"
@@ -124,3 +93,12 @@ max_batch_size = 10
 max_batch_timeout = 30
 max_retries = 3
 dead_letter_queue = "nanotype-webhooks-dlq"
+
+# --- CONFIGURATION ---
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+
+[triggers]
+crons = ["0 * * * *"]
