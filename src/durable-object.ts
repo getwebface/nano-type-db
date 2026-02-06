@@ -260,10 +260,6 @@ const MIGRATIONS = [
     version: 1,
     up: (sql: any) => {
       sql.exec(`CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, title TEXT, status TEXT)`);
-      const count = sql.exec("SELECT count(*) as c FROM tasks").toArray()[0].c;
-      if (count === 0) {
-        sql.exec(`INSERT INTO tasks (title, status) VALUES ('Buy milk', 'pending'), ('Walk the dog', 'completed')`);
-      }
     }
   },
   {
@@ -640,6 +636,62 @@ export class NanoStore extends DurableObject {
       this.syncEngine.syncErrors++;
       this.syncEngine.isHealthy = false;
     }
+  }
+
+  async replicateSchemaToD1() {
+    if (!this.env.READ_REPLICA) {
+      console.warn("D1 READ_REPLICA not available, skipping schema replication");
+      return;
+    }
+
+    try {
+      // Get all non-system tables
+      const tables = this.sql.exec(`
+        SELECT name FROM sqlite_master 
+        WHERE type='table' AND name NOT LIKE '_%' AND name != 'sqlite_sequence'
+      `).toArray();
+      
+      for (const table of tables) {
+        const tableName = table.name;
+        
+        // SECURITY: Validate table name before using in PRAGMA
+        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
+          console.warn(`Invalid table name for replication: ${tableName}`);
+          continue;
+        }
+        
+        // Get table schema
+        const tableInfo = this.sql.exec(`PRAGMA table_info(${tableName})`).toArray();
+        
+        // Note: For full D1 sync, you would need to create tables in D1 as well
+        // This is a placeholder for schema replication logic
+        console.log(`Schema replication for table ${tableName}`);
+      }
+    } catch (e) {
+      console.error("Failed to replicate schema to D1:", e);
+    }
+  }
+
+  broadcastSchemaUpdate() {
+    // Get current schema
+    const schema = this.getSchema();
+    
+    // Broadcast to all connected clients
+    const message = JSON.stringify({
+      type: "schema_update",
+      schema
+    });
+    
+    // Send to all subscribed websockets
+    this.subscribers.forEach((sockets) => {
+      sockets.forEach((socket) => {
+        try {
+          socket.send(message);
+        } catch (err) {
+          console.error("Failed to send schema update:", err);
+        }
+      });
+    });
   }
 
   /**
@@ -2393,6 +2445,164 @@ export class NanoStore extends DurableObject {
                         webSocket.send(JSON.stringify({ 
                             type: "error", 
                             error: `Failed to delete webhook: ${e.message}` 
+                        }));
+                    }
+                    break;
+                }
+                
+                case "createTable": {
+                    this.trackUsage('writes');
+                    
+                    const { tableName, columns } = data.payload || {};
+                    
+                    if (!tableName || !columns || !Array.isArray(columns) || columns.length === 0) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "createTable requires tableName and columns array" 
+                        }));
+                        break;
+                    }
+                    
+                    // SECURITY: Validate table name (alphanumeric and underscore only)
+                    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "Invalid table name. Use only letters, numbers, and underscores. Must start with a letter or underscore." 
+                        }));
+                        break;
+                    }
+                    
+                    // Prevent creating internal tables
+                    if (tableName.startsWith('_') || tableName === 'sqlite_sequence') {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "Cannot create tables with names starting with underscore (reserved for system tables)" 
+                        }));
+                        break;
+                    }
+                    
+                    // SECURITY: Rate limiting (10 table creates per minute)
+                    const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                    if (!this.checkRateLimit(userId, "createTable", 10, 60000)) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "Rate limit exceeded for createTable" 
+                        }));
+                        break;
+                    }
+                    
+                    try {
+                        // Build CREATE TABLE SQL
+                        const columnDefs = columns.map((col: any) => {
+                            const name = col.name;
+                            const type = col.type || 'TEXT';
+                            const constraints = [];
+                            
+                            // Validate column name
+                            if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
+                                throw new Error(`Invalid column name: ${name}`);
+                            }
+                            
+                            // Validate column type
+                            const validTypes = ['TEXT', 'INTEGER', 'REAL', 'BLOB', 'NUMERIC', 'BOOLEAN', 'DATE', 'DATETIME'];
+                            if (!validTypes.includes(type.toUpperCase())) {
+                                throw new Error(`Invalid column type: ${type}. Valid types: ${validTypes.join(', ')}`);
+                            }
+                            
+                            if (col.primaryKey) constraints.push('PRIMARY KEY');
+                            if (col.notNull) constraints.push('NOT NULL');
+                            if (col.unique) constraints.push('UNIQUE');
+                            if (col.default !== undefined) constraints.push(`DEFAULT ${col.default}`);
+                            
+                            return `${name} ${type}${constraints.length ? ' ' + constraints.join(' ') : ''}`;
+                        }).join(', ');
+                        
+                        // Always add an id column if not present
+                        const hasIdColumn = columns.some((col: any) => col.name === 'id');
+                        const finalColumns = hasIdColumn ? columnDefs : `id INTEGER PRIMARY KEY AUTOINCREMENT, ${columnDefs}`;
+                        
+                        const createTableSQL = `CREATE TABLE IF NOT EXISTS ${tableName} (${finalColumns})`;
+                        this.sql.exec(createTableSQL);
+                        
+                        // Replicate to D1 for distributed reads
+                        this.ctx.waitUntil(this.replicateSchemaToD1());
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_success", 
+                            action: "createTable",
+                            data: { tableName, sql: createTableSQL }
+                        }));
+                        
+                        // Broadcast schema update to all connected clients
+                        this.broadcastSchemaUpdate();
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: `Failed to create table: ${e.message}` 
+                        }));
+                    }
+                    break;
+                }
+                
+                case "deleteTable": {
+                    this.trackUsage('writes');
+                    
+                    const { tableName } = data.payload || {};
+                    
+                    if (!tableName) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "deleteTable requires tableName parameter" 
+                        }));
+                        break;
+                    }
+                    
+                    // SECURITY: Validate table name (alphanumeric and underscore only)
+                    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "Invalid table name" 
+                        }));
+                        break;
+                    }
+                    
+                    // Prevent deleting internal tables
+                    if (tableName.startsWith('_') || tableName === 'sqlite_sequence') {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "Cannot delete system tables" 
+                        }));
+                        break;
+                    }
+                    
+                    // SECURITY: Rate limiting (10 table deletes per minute)
+                    const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                    if (!this.checkRateLimit(userId, "deleteTable", 10, 60000)) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "Rate limit exceeded for deleteTable" 
+                        }));
+                        break;
+                    }
+                    
+                    try {
+                        this.sql.exec(`DROP TABLE IF EXISTS ${tableName}`);
+                        
+                        // Replicate to D1 for distributed reads
+                        this.ctx.waitUntil(this.replicateSchemaToD1());
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_success", 
+                            action: "deleteTable",
+                            data: { tableName }
+                        }));
+                        
+                        // Broadcast schema update to all connected clients
+                        this.broadcastSchemaUpdate();
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: `Failed to delete table: ${e.message}` 
                         }));
                     }
                     break;

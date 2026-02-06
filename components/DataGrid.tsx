@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Plus, Loader2, Filter, ArrowUpDown, Upload, Check, X, ChevronDown, Calendar, FileJson } from 'lucide-react';
+import { Plus, Loader2, Filter, ArrowUpDown, Upload, Download, Check, X, ChevronDown, Calendar, FileJson } from 'lucide-react';
 import { useDatabase } from '../hooks/useDatabase';
 import { ColumnDefinition } from '../types';
 
@@ -264,33 +264,139 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
             const lines = text.split('\n').filter(line => line.trim());
             
             if (lines.length < 2) {
-                alert('CSV file is empty or invalid');
+                alert('CSV file must contain a header row and at least one data row.');
                 return;
             }
 
-            // Parse CSV (simple implementation - for production use papaparse)
-            // NOTE: This parser does not handle quoted values with commas (e.g., "Smith, John")
-            // For production use, install and use the papaparse library for robust CSV parsing
-            const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+            // Improved CSV parser that handles quoted values with commas
+            const parseCSVLine = (line: string): string[] => {
+                const result: string[] = [];
+                let current = '';
+                let inQuotes = false;
+                
+                for (let i = 0; i < line.length; i++) {
+                    const char = line[i];
+                    
+                    if (char === '"') {
+                        // Handle escaped quotes ("")
+                        if (inQuotes && line[i + 1] === '"') {
+                            current += '"';
+                            i++; // Skip next quote
+                        } else {
+                            inQuotes = !inQuotes;
+                        }
+                    } else if (char === ',' && !inQuotes) {
+                        result.push(current.trim());
+                        current = '';
+                    } else {
+                        current += char;
+                    }
+                }
+                
+                result.push(current.trim());
+                return result;
+            };
+
+            const headers = parseCSVLine(lines[0]);
             const rows = lines.slice(1).map(line => {
-                const values = line.split(',').map(v => v.trim().replace(/"/g, ''));
+                const values = parseCSVLine(line);
                 const row: Record<string, any> = {};
                 headers.forEach((header, idx) => {
-                    row[header] = values[idx] || '';
+                    // Convert values to appropriate types
+                    let value = values[idx] || '';
+                    
+                    // Try to parse as number
+                    if (value && !isNaN(Number(value))) {
+                        value = Number(value);
+                    }
+                    // Try to parse as boolean
+                    else if (value.toLowerCase() === 'true') {
+                        value = true;
+                    } else if (value.toLowerCase() === 'false') {
+                        value = false;
+                    }
+                    // Keep as string otherwise
+                    
+                    row[header] = value;
                 });
                 return row;
             });
 
+            // Show confirmation dialog with import preview
+            const confirmImport = confirm(
+                `Import ${rows.length} rows into table "${tableName}"?\n\n` +
+                `Columns: ${headers.join(', ')}\n\n` +
+                `This will add ${rows.length} new record(s) to the table.`
+            );
+            
+            if (!confirmImport) {
+                return;
+            }
+
             // Batch insert
             const result = await rpc('batchInsert', { table: tableName, rows });
             
-            // Use toast notification instead of alert for better UX
+            // Show success message
             if (result && result.data) {
-                console.log(`Successfully imported ${result.data.inserted} of ${result.data.total} rows`);
+                alert(`✓ Successfully imported ${result.data.inserted} of ${result.data.total} rows`);
+            } else {
+                alert(`✓ Successfully imported ${rows.length} rows`);
             }
         } catch (error: any) {
             console.error('CSV import failed:', error);
-            // Use toast notification for errors as well
+            alert('CSV import failed: ' + (error.message || 'Unknown error'));
+        }
+    };
+
+    const handleCSVExport = () => {
+        if (!data || data.length === 0) {
+            alert('No data to export');
+            return;
+        }
+
+        try {
+            // Get headers from first row
+            const headers = Object.keys(data[0]);
+            
+            // Helper function to escape CSV values
+            const escapeCSV = (value: any): string => {
+                if (value === null || value === undefined) return '';
+                const str = String(value);
+                // If value contains comma, quote, or newline, wrap in quotes and escape quotes
+                if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+                    return `"${str.replace(/"/g, '""')}"`;
+                }
+                return str;
+            };
+            
+            // Build CSV content
+            const csvContent = [
+                headers.join(','), // Header row
+                ...data.map(row => 
+                    headers.map(header => escapeCSV(row[header])).join(',')
+                )
+            ].join('\n');
+            
+            // SECURITY: Sanitize table name for filename
+            const safeTableName = tableName.replace(/[^a-zA-Z0-9_-]/g, '_');
+            
+            // Create and download file
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            
+            link.setAttribute('href', url);
+            link.setAttribute('download', `${safeTableName}_${new Date().toISOString().split('T')[0]}.csv`);
+            link.style.visibility = 'hidden';
+            
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            URL.revokeObjectURL(url);
+        } catch (error: any) {
+            console.error('CSV export failed:', error);
+            alert('CSV export failed: ' + (error.message || 'Unknown error'));
         }
     };
 
@@ -380,6 +486,15 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
                     onChange={handleFileSelect}
                     className="hidden"
                 />
+                
+                <button
+                    onClick={handleCSVExport}
+                    disabled={!data || data.length === 0}
+                    className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors border border-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    <Download size={16} />
+                    Export CSV
+                </button>
                 
                 <div className="text-xs text-slate-500 ml-auto">
                     {data.length} {data.length === 1 ? 'row' : 'rows'}
