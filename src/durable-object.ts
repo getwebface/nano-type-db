@@ -5,7 +5,8 @@ import {
   RateLimiter, 
   InputValidator, 
   QueryTimeout,
-  MemoryTracker 
+  MemoryTracker,
+  StructuredLogger
 } from "./lib/security";
 import { generateTypeSafeClient } from "./client-generator";
 // `node:fs` is not available in Cloudflare Workers; file-system backups
@@ -418,6 +419,8 @@ export class NanoStore extends DurableObject {
   rlsEngine: RLSPolicyEngine;
   // Automatic Reactivity: Track queries per WebSocket for auto-refresh
   querySubscriptions: WeakMap<WebSocket, Map<string, { method: string; payload: any; tables: string[] }>>;
+  // PRODUCTION: Structured logger for observability
+  logger: StructuredLogger;
   
   // SECURITY: Configuration constants
   private static readonly MAX_SUBSCRIBERS_PER_TABLE = 10000;
@@ -430,6 +433,9 @@ export class NanoStore extends DurableObject {
     this.sql = ctx.storage.sql;
     this.subscribers = new Map();
     this.doId = ctx.id.toString();
+    
+    // PRODUCTION: Initialize structured logger with context
+    this.logger = new StructuredLogger({ doId: this.doId });
     
     // Initialize Memory Store for transient data
     this.memoryStore = new MemoryStore();
@@ -464,7 +470,7 @@ export class NanoStore extends DurableObject {
           const valueSize = JSON.stringify(value).length;
           this.memoryTracker.remove(valueSize);
         } catch (e) {
-          console.error(`Failed to flush debounced write for key ${key}:`, e);
+          this.logger.error('Failed to flush debounced write', e, { key });
         }
       }
     });
@@ -484,7 +490,7 @@ export class NanoStore extends DurableObject {
     // The DO can serve requests before initial sync completes.
     // For stricter consistency, use ctx.blockConcurrencyWhile() in production.
     this.performInitialSync().catch(e => {
-      console.error("[Sync Engine] Initial sync failed:", e);
+      this.logger.error('Initial sync failed', e);
     });
   }
 

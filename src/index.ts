@@ -237,6 +237,17 @@ export default {
                 "INSERT INTO api_keys (id, user_id, name, created_at, expires_at) VALUES (?, ?, ?, ?, ?)"
             ).bind(keyId, session.user.id, keyName, Date.now(), expiresAt).run();
 
+            // PRODUCTION: Audit log for API key creation
+            console.log(JSON.stringify({
+                level: 'audit',
+                action: 'api_key_created',
+                userId: session.user.id,
+                keyId: keyId.substring(0, 20) + '...', // Truncate for security
+                keyName,
+                expiresInDays,
+                timestamp: new Date().toISOString()
+            }));
+
             return SecurityHeaders.apply(
                 Response.json({ 
                     id: keyId, 
@@ -247,7 +258,13 @@ export default {
                 })
             );
         } catch (e: any) {
-            console.error("Failed to create API key:", e);
+            console.error(JSON.stringify({
+                level: 'error',
+                message: 'Failed to create API key',
+                userId: session.user.id,
+                error: e.message,
+                timestamp: new Date().toISOString()
+            }));
             return SecurityHeaders.apply(
                 new Response(`Failed to create API key: ${e.message}`, { status: 500 })
             );
@@ -329,10 +346,27 @@ export default {
                 "DELETE FROM api_keys WHERE id = ? AND user_id = ?"
             ).bind(body.id, session.user.id).run();
 
+            // PRODUCTION: Audit log for API key deletion
+            console.log(JSON.stringify({
+                level: 'audit',
+                action: 'api_key_deleted',
+                userId: session.user.id,
+                keyId: body.id.substring(0, 20) + '...', // Truncate for security
+                timestamp: new Date().toISOString()
+            }));
+
             return SecurityHeaders.apply(
                 Response.json({ success: true })
             );
         } catch (e: any) {
+            console.error(JSON.stringify({
+                level: 'error',
+                message: 'Failed to delete API key',
+                userId: session.user.id,
+                keyId: body.id.substring(0, 20) + '...',
+                error: e.message,
+                timestamp: new Date().toISOString()
+            }));
             return SecurityHeaders.apply(
                 Response.json({ error: e.message }, { status: 500 })
             );
