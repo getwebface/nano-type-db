@@ -986,30 +986,48 @@ export class NanoStore extends DurableObject {
 
     async backupToR2() {
       try {
-        // If running in Node (local dev), allow file-based backup. In the
-        // Cloudflare Workers runtime there is no `fs` module, so skip.
-        const runningInNode = typeof process !== "undefined" && (process as any).versions?.node;
-        if (!runningInNode) {
-          console.log("Backup skipped: running in Cloudflare Workers (no fs available). To enable, run locally in Node.");
+        // PRODUCTION FIX: Export as JSON instead of SQLite file
+        // Cloudflare Workers do not have a writable file system or fs module
+        // This approach works in both development and production
+        
+        if (!this.env.BACKUP_BUCKET) {
+          console.log("R2 Bucket not configured, skipping backup.");
           return;
         }
 
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const backupPath = `/tmp/backup-${timestamp}.db`;
-        // @ts-ignore: VACUUM INTO used for local SQLite file export
-        this.sql.exec(`VACUUM INTO '${backupPath}'`);
-        // Lazy require to avoid bundling `fs` into worker bundle
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const fs = require('fs');
-        const fileBuffer = fs.readFileSync(backupPath);
-
-        if (this.env.BACKUP_BUCKET) {
-         await this.env.BACKUP_BUCKET.put(`backup-${timestamp}.db`, fileBuffer);
-         console.log(`Backup uploaded: backup-${timestamp}.db`);
-        } else {
-         console.log("R2 Bucket not configured, skipping upload.");
+        
+        // Get all tables in the database
+        const tables = this.sql.exec(`
+          SELECT name FROM sqlite_master 
+          WHERE type='table' AND name NOT LIKE 'sqlite_%'
+        `).toArray();
+        
+        // Export data as JSON
+        const backup: Record<string, any> = {
+          timestamp: new Date().toISOString(),
+          doId: this.doId,
+          schema: {},
+          data: {}
+        };
+        
+        for (const tableRow of tables) {
+          const tableName = tableRow.name as string;
+          
+          // Get table schema
+          const schemaInfo = this.sql.exec(`PRAGMA table_info("${tableName}")`).toArray();
+          backup.schema[tableName] = schemaInfo;
+          
+          // Get table data
+          const tableData = this.sql.exec(`SELECT * FROM "${tableName}"`).toArray();
+          backup.data[tableName] = tableData;
         }
-        fs.unlinkSync(backupPath);
+        
+        // Upload JSON backup to R2
+        const backupJson = JSON.stringify(backup, null, 2);
+        await this.env.BACKUP_BUCKET.put(`backup-${timestamp}.json`, backupJson);
+        console.log(`JSON backup uploaded: backup-${timestamp}.json (${backupJson.length} bytes)`);
+        
       } catch (err) {
         console.error("Backup failed:", err);
       }
