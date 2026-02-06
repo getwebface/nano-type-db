@@ -565,10 +565,6 @@ export class NanoStore extends DurableObject {
    * Replicate data from Durable Object to D1 read replica
    * This enables horizontal scaling for read operations while maintaining
    * write consistency in the Durable Object.
-   * 
-   * @param table - The table name to replicate
-   * @param operation - The operation type: 'insert', 'update', or 'delete'
-   * @param data - The data to replicate (for insert/update) or the ID to delete
    */
   async replicateToD1(table: string, operation: 'insert' | 'update' | 'delete', data?: any) {
     if (!this.env.READ_REPLICA) {
@@ -576,49 +572,65 @@ export class NanoStore extends DurableObject {
       return;
     }
 
-    try {
-      // Add room/DO identifier to track which DO the data belongs to
+    // Helper to perform the actual query
+    const performQuery = async () => {
       const roomId = this.doId;
-
       switch (operation) {
         case 'insert':
         case 'update':
-          if (!data) {
-            console.error("Data required for insert/update operation");
-            return;
-          }
-          
-          // Dynamic replication for all user tables
-          const keys = Object.keys(data).filter(k => k !== 'room_id'); // Exclude room_id if present in data
+          if (!data) throw new Error(`Data required for ${operation} operation on table '${table}'`);
+          const keys = Object.keys(data).filter(k => k !== 'room_id');
           const columns = [...keys, 'room_id'];
           const placeholders = [...keys.map(() => '?'), '?'];
           const values = [...keys.map(k => data[k]), roomId];
           
-          const query = `INSERT OR REPLACE INTO "${table}" (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`;
-          
-          await this.env.READ_REPLICA.prepare(query).bind(...values).run();
+          await this.env.READ_REPLICA.prepare(
+            `INSERT OR REPLACE INTO "${table}" (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`
+          ).bind(...values).run();
           break;
 
         case 'delete':
-          if (!data || !data.id) {
-            console.error("ID required for delete operation");
-            return;
-          }
-          
-          // Delete from D1 with room_id constraint for safety
+          if (!data || !data.id) throw new Error(`ID required for delete operation on table '${table}'`);
           await this.env.READ_REPLICA.prepare(
             `DELETE FROM "${table}" WHERE id = ? AND room_id = ?`
           ).bind(data.id, roomId).run();
           break;
       }
+    };
+
+    try {
+      await performQuery();
       
-      // Update sync metrics
+      // Success - update metrics
       this.syncEngine.lastSyncTime = Date.now();
       this.syncEngine.totalSyncs++;
       this.syncEngine.isHealthy = true;
-      
-    } catch (e) {
-      // Log but don't fail the primary operation if replication fails
+
+    } catch (e: any) {
+      // 🟢 AUTO-FIX: Handle "no such table" error automatically
+      if (e.message && e.message.includes('no such table')) {
+        console.warn(`[Sync Engine] Table '${table}' missing in D1. Attempting auto-creation...`);
+        
+        try {
+          // 1. Force immediate schema replication
+          await this.replicateSchemaToD1();
+          
+          // 2. Retry the operation once
+          console.log(`[Sync Engine] Retrying operation on '${table}'...`);
+          await performQuery();
+          
+          console.log(`[Sync Engine] Auto-recovery successful for '${table}'`);
+          this.syncEngine.lastSyncTime = Date.now();
+          this.syncEngine.totalSyncs++;
+          this.syncEngine.isHealthy = true;
+          return; // Exit successfully
+        } catch (retryError: any) {
+          console.error(`[Sync Engine] Auto-recovery failed for '${table}':`, retryError);
+          // Fall through to normal error handling
+        }
+      }
+
+      // Standard error logging
       console.error(`D1 replication failed for ${operation} on ${table}:`, e);
       this.syncEngine.syncErrors++;
       this.syncEngine.isHealthy = false;
