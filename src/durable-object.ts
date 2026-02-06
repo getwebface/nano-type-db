@@ -654,6 +654,12 @@ export class NanoStore extends DurableObject {
       for (const table of tables) {
         const tableName = table.name;
         
+        // SECURITY: Validate table name before using in PRAGMA
+        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
+          console.warn(`Invalid table name for replication: ${tableName}`);
+          continue;
+        }
+        
         // Get table schema
         const tableInfo = this.sql.exec(`PRAGMA table_info(${tableName})`).toArray();
         
@@ -2547,6 +2553,15 @@ export class NanoStore extends DurableObject {
                         webSocket.send(JSON.stringify({ 
                             type: "error", 
                             error: "deleteTable requires tableName parameter" 
+                        }));
+                        break;
+                    }
+                    
+                    // SECURITY: Validate table name (alphanumeric and underscore only)
+                    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "error", 
+                            error: "Invalid table name" 
                         }));
                         break;
                     }

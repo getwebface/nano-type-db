@@ -264,7 +264,7 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
             const lines = text.split('\n').filter(line => line.trim());
             
             if (lines.length < 2) {
-                alert('CSV file is empty or invalid. Please provide a CSV file with headers and at least one row.');
+                alert('CSV file must contain a header row and at least one data row.');
                 return;
             }
 
@@ -306,7 +306,7 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
                     let value = values[idx] || '';
                     
                     // Try to parse as number
-                    if (value && !isNaN(Number(value)) && value !== '') {
+                    if (value && !isNaN(Number(value))) {
                         value = Number(value);
                     }
                     // Try to parse as boolean
@@ -377,13 +377,16 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
                 )
             ].join('\n');
             
+            // SECURITY: Sanitize table name for filename
+            const safeTableName = tableName.replace(/[^a-zA-Z0-9_-]/g, '_');
+            
             // Create and download file
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement('a');
             const url = URL.createObjectURL(blob);
             
             link.setAttribute('href', url);
-            link.setAttribute('download', `${tableName}_${new Date().toISOString().split('T')[0]}.csv`);
+            link.setAttribute('download', `${safeTableName}_${new Date().toISOString().split('T')[0]}.csv`);
             link.style.visibility = 'hidden';
             
             document.body.appendChild(link);
