@@ -860,6 +860,37 @@ export class NanoStore extends DurableObject {
     return schema.hasOwnProperty(tableName);
   }
 
+  /**
+   * SECURITY: Check if table exists and is a user-created table (not a system table)
+   * This replaces hard-coded table whitelists with dynamic validation
+   * while maintaining security by:
+   * 1. Ensuring table exists (prevents injection of arbitrary table names)
+   * 2. Excluding system tables (tables starting with _ or sqlite_*)
+   * 3. Combined with existing table name regex validation
+   */
+  isUserTable(tableName: string): boolean {
+    // First, validate the table name format to prevent SQL injection
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
+      return false;
+    }
+    
+    // Exclude system tables
+    if (tableName.startsWith('_') || tableName === 'sqlite_sequence' || tableName.startsWith('sqlite_')) {
+      return false;
+    }
+    
+    // Check if table exists in the schema
+    try {
+      const result = this.sql.exec(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+        tableName
+      ).toArray();
+      return result.length > 0;
+    } catch (e) {
+      return false;
+    }
+  }
+
     async backupToR2() {
       try {
         // If running in Node (local dev), allow file-based backup. In the
@@ -1557,10 +1588,10 @@ export class NanoStore extends DurableObject {
                             throw new Error('Invalid field name');
                         }
                         
-                        // SECURITY: Whitelist allowed tables to prevent arbitrary table access
-                        const allowedTables = ['tasks', 'users', 'projects']; // Add more as needed
-                        if (!allowedTables.includes(table)) {
-                            throw new Error(`Table '${table}' is not allowed for updates`);
+                        // SECURITY: Validate that table exists and is a user-created table
+                        // This replaces the hard-coded whitelist with dynamic validation
+                        if (!this.isUserTable(table)) {
+                            throw new Error(`Table '${table}' does not exist or is not accessible`);
                         }
                         
                         // SECURITY: Sanitize field name to prevent SQL injection
@@ -1582,7 +1613,7 @@ export class NanoStore extends DurableObject {
                         // Build parameterized update query
                         // SECURITY: Table and field names use string interpolation (not parameterizable in SQL)
                         // but are protected by:
-                        // 1. Table whitelist check (line 1503)
+                        // 1. Dynamic table existence check via isUserTable() (replaces hard-coded whitelist)
                         // 2. Field name regex validation (line 1509-1511)
                         // 3. Value is properly parameterized (prevents SQL injection)
                         // This is the standard approach for dynamic column updates in SQL
@@ -1640,10 +1671,10 @@ export class NanoStore extends DurableObject {
                             throw new Error('Batch size limited to 10000 rows');
                         }
                         
-                        // SECURITY: Whitelist allowed tables
-                        const allowedTables = ['tasks', 'users', 'projects'];
-                        if (!allowedTables.includes(table)) {
-                            throw new Error(`Table '${table}' is not allowed for batch insert`);
+                        // SECURITY: Validate that table exists and is a user-created table
+                        // This replaces the hard-coded whitelist with dynamic validation
+                        if (!this.isUserTable(table)) {
+                            throw new Error(`Table '${table}' does not exist or is not accessible`);
                         }
                         
                         // SECURITY: Get userId
@@ -1684,8 +1715,8 @@ export class NanoStore extends DurableObject {
                                     const placeholders = fields.map(() => '?').join(', ');
                                     const fieldNames = fields.join(', ');
                                     // SECURITY: Table and field names use string interpolation but are protected by:
-                                    // 1. Table whitelist validation (lines 1591-1595)
-                                    // 2. Field name validation (lines 1621-1624)
+                                    // 1. Dynamic table existence check via isUserTable() (replaces hard-coded whitelist)
+                                    // 2. Field name validation (regex check above)
                                     // 3. All values are parameterized (? placeholders)
                                     // This is safe because we control the field names from validated input
                                     const query = `INSERT INTO ${table} (${fieldNames}) VALUES (${placeholders}) RETURNING *`;
