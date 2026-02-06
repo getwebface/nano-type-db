@@ -57,6 +57,11 @@ export interface DatabaseContextType {
     setCursor: (userId: string, position: any) => void;
     setPresence: (userId: string, status: any) => void;
     getPsychicData: (key: string) => any;
+    manualReconnect: () => void;
+    reconnectInfo: { attempt: number; maxAttempts: number; nextRetryAt: number | null };
+    connectionQuality: { latency: number; pingsLost: number; totalPings: number };
+    wsDebug: boolean;
+    setWsDebug: (enabled: boolean) => void;
 }
 
 export interface ToastMessage {

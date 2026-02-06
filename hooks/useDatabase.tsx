@@ -15,10 +15,19 @@ const WS_PATH_PREFIX = IS_DEV ? '/__ws' : '';
 // Configuration constants
 const OPTIMISTIC_UPDATE_TIMEOUT = 10000; // 10 seconds
 const WS_CONNECTION_TIMEOUT = 10000; // 10 seconds for WebSocket to connect
-const WS_RECONNECT_INTERVAL = 3000; // 3 seconds between reconnection attempts
+const WS_RECONNECT_BASE_INTERVAL = 1000; // 1 second base for exponential backoff
+const WS_RECONNECT_MAX_INTERVAL = 30000; // 30 seconds max backoff
 const MAX_RECONNECT_ATTEMPTS = 5; // Maximum reconnection attempts
 const HEARTBEAT_INTERVAL = 30000; // 30 seconds - send ping to keep connection alive
 const HEARTBEAT_TIMEOUT = 5000; // 5 seconds - expect pong response
+
+/** Calculate reconnect delay with exponential backoff and jitter */
+function getReconnectDelay(attempt: number): number {
+    const exponentialDelay = WS_RECONNECT_BASE_INTERVAL * Math.pow(2, attempt - 1);
+    const cappedDelay = Math.min(exponentialDelay, WS_RECONNECT_MAX_INTERVAL);
+    const jitter = Math.random() * cappedDelay * 0.3; // 30% jitter
+    return cappedDelay + jitter;
+}
 
 const DatabaseContext = createContext<DatabaseContextType | null>(null);
 
@@ -39,6 +48,25 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const heartbeatTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const lastPongRef = useRef<number>(Date.now());
+
+    // Reconnection countdown state
+    const [reconnectInfo, setReconnectInfo] = useState<{ attempt: number; maxAttempts: number; nextRetryAt: number | null }>({
+        attempt: 0,
+        maxAttempts: MAX_RECONNECT_ATTEMPTS,
+        nextRetryAt: null
+    });
+    const reconnectCountdownRef = useRef<NodeJS.Timeout | null>(null);
+
+    // Connection quality metrics
+    const [connectionQuality, setConnectionQuality] = useState<{ latency: number; pingsLost: number; totalPings: number }>({
+        latency: 0,
+        pingsLost: 0,
+        totalPings: 0
+    });
+    const pingSentAtRef = useRef<number>(0);
+
+    // WebSocket debug mode
+    const [wsDebug, setWsDebug] = useState<boolean>(IS_DEV);
     
     const subscribedTablesRef = useRef<Set<string>>(new Set());
     
@@ -57,6 +85,88 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             setToasts(prev => prev.filter(t => t.id !== id));
         }, 3000);
     };
+
+    /** Debug logger - only logs when wsDebug is enabled */
+    const wsLog = useCallback((...args: any[]) => {
+        if (wsDebug) {
+            console.log('[WS Debug]', ...args);
+        }
+    }, [wsDebug]);
+
+    /** Schedule a reconnection with exponential backoff and countdown tracking */
+    const scheduleReconnect = useCallback((roomId: string, connectFn: (roomId: string) => void) => {
+        if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+            addToast('Maximum reconnection attempts reached. Use the reconnect button or refresh the page.', 'error');
+            setReconnectInfo({ attempt: reconnectAttemptsRef.current, maxAttempts: MAX_RECONNECT_ATTEMPTS, nextRetryAt: null });
+            return;
+        }
+
+        reconnectAttemptsRef.current++;
+        const delay = getReconnectDelay(reconnectAttemptsRef.current);
+        const nextRetryAt = Date.now() + delay;
+
+        wsLog(`Scheduling reconnect attempt ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS} in ${Math.round(delay)}ms`);
+
+        setReconnectInfo({
+            attempt: reconnectAttemptsRef.current,
+            maxAttempts: MAX_RECONNECT_ATTEMPTS,
+            nextRetryAt
+        });
+
+        addToast(`Connection lost. Reconnecting in ${Math.ceil(delay / 1000)}s (attempt ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})...`, 'info');
+
+        // Start countdown interval to update nextRetryAt for UI
+        if (reconnectCountdownRef.current) clearInterval(reconnectCountdownRef.current);
+        reconnectCountdownRef.current = setInterval(() => {
+            setReconnectInfo(prev => ({ ...prev, nextRetryAt: prev.nextRetryAt }));
+        }, 1000);
+
+        reconnectTimeoutRef.current = setTimeout(() => {
+            if (reconnectCountdownRef.current) {
+                clearInterval(reconnectCountdownRef.current);
+                reconnectCountdownRef.current = null;
+            }
+            setReconnectInfo(prev => ({ ...prev, nextRetryAt: null }));
+            connectFn(roomId);
+        }, delay);
+    }, [wsLog]);
+
+    /** Manually trigger a reconnection (resets attempt counter) */
+    const manualReconnect = useCallback(() => {
+        const roomId = currentRoomIdRef.current;
+        if (!roomId) return;
+
+        // Clear any pending reconnect timers
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = null;
+        }
+        if (reconnectCountdownRef.current) {
+            clearInterval(reconnectCountdownRef.current);
+            reconnectCountdownRef.current = null;
+        }
+
+        // Reset attempt counter for manual reconnect
+        reconnectAttemptsRef.current = 0;
+        setReconnectInfo({ attempt: 0, maxAttempts: MAX_RECONNECT_ATTEMPTS, nextRetryAt: null });
+        addToast('Manually reconnecting...', 'info');
+
+        // Close existing socket if any
+        if (socket) {
+            shouldReconnectRef.current = false;
+            socket.onclose = null;
+            socket.onerror = null;
+            socket.close();
+        }
+        shouldReconnectRef.current = true;
+        // connectRef will be set after connect is defined
+        if (connectRef.current) {
+            connectRef.current(roomId);
+        }
+    }, [socket]);
+
+    // Ref to hold the connect function for manual reconnect
+    const connectRef = useRef<((roomId: string) => void) | null>(null);
 
     const refreshSchema = useCallback(async () => {
         if (!currentRoomIdRef.current) return;
@@ -148,27 +258,19 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         // Set a connection timeout
         connectionTimeoutRef.current = setTimeout(() => {
             if (ws.readyState !== WebSocket.OPEN) {
+                wsLog('WebSocket connection timeout');
                 console.error('WebSocket connection timeout');
                 ws.close();
-                addToast('Connection timeout. Please try again.', 'error');
+                addToast('Connection timeout.', 'error');
                 setStatus('disconnected');
                 
-                // Attempt reconnection if not exceeded max attempts
-                if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
-                    reconnectAttemptsRef.current++;
-                    console.log(`Reconnection attempt ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS}`);
-                    
-                    reconnectTimeoutRef.current = setTimeout(() => {
-                        connect(roomId);
-                    }, WS_RECONNECT_INTERVAL + Math.random() * 2000);
-                } else {
-                    addToast('Maximum reconnection attempts reached. Please refresh the page.', 'error');
-                    reconnectAttemptsRef.current = 0;
-                }
+                // Attempt reconnection with exponential backoff
+                scheduleReconnect(roomId, connect);
             }
         }, WS_CONNECTION_TIMEOUT);
 
         ws.onopen = () => {
+            wsLog('Connected to DO');
             console.log('Connected to DO');
             
             // Clear connection timeout
@@ -180,6 +282,11 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             // Reset reconnection counter on successful connection
             reconnectAttemptsRef.current = 0;
             lastPongRef.current = Date.now();
+            setReconnectInfo({ attempt: 0, maxAttempts: MAX_RECONNECT_ATTEMPTS, nextRetryAt: null });
+            if (reconnectCountdownRef.current) {
+                clearInterval(reconnectCountdownRef.current);
+                reconnectCountdownRef.current = null;
+            }
             
             setStatus('connected');
             setIsConnected(true);
@@ -192,17 +299,24 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                 }
             }, 500);
             
-            // Start heartbeat to keep connection alive
+            // Start heartbeat to keep connection alive and track connection quality
             heartbeatIntervalRef.current = setInterval(() => {
                 if (ws.readyState === WebSocket.OPEN) {
+                    // Track ping sent time for latency measurement
+                    pingSentAtRef.current = Date.now();
                     // Send ping
                     ws.send(JSON.stringify({ action: 'ping' }));
+                    wsLog('Ping sent');
+                    
+                    setConnectionQuality(prev => ({ ...prev, totalPings: prev.totalPings + 1 }));
                     
                     // Set timeout to check for pong response
                     heartbeatTimeoutRef.current = setTimeout(() => {
                         const timeSinceLastPong = Date.now() - lastPongRef.current;
                         if (timeSinceLastPong > HEARTBEAT_INTERVAL + HEARTBEAT_TIMEOUT) {
+                            wsLog('Heartbeat timeout - connection may be dead');
                             console.warn('Heartbeat timeout - connection may be dead');
+                            setConnectionQuality(prev => ({ ...prev, pingsLost: prev.pingsLost + 1 }));
                             ws.close();
                         }
                     }, HEARTBEAT_TIMEOUT);
@@ -245,9 +359,15 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                 return;
             }
 
-            // Handle pong response for heartbeat
+            // Handle pong response for heartbeat and latency tracking
             if (data.type === 'pong') {
-                lastPongRef.current = Date.now();
+                const now = Date.now();
+                lastPongRef.current = now;
+                if (pingSentAtRef.current > 0) {
+                    const latency = now - pingSentAtRef.current;
+                    setConnectionQuality(prev => ({ ...prev, latency }));
+                    wsLog(`Pong received, latency: ${latency}ms`);
+                }
                 if (heartbeatTimeoutRef.current) {
                     clearTimeout(heartbeatTimeoutRef.current);
                     heartbeatTimeoutRef.current = null;
@@ -323,6 +443,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         };
 
         ws.onclose = (event) => {
+            wsLog('WebSocket closed:', event.code, event.reason);
             console.log('WebSocket closed:', event.code, event.reason);
             
             // Clear connection timeout
@@ -347,23 +468,17 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             setSocket(null);
             setSchema(null);
             
-            // Attempt reconnection if it was not a clean close and we should reconnect
-            if (shouldReconnectRef.current && event.code !== 1000 && reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
-                reconnectAttemptsRef.current++;
-                console.log(`Connection lost. Reconnecting (attempt ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})...`);
-                addToast(`Connection lost. Reconnecting...`, 'info');
-                
-                reconnectTimeoutRef.current = setTimeout(() => {
-                    connect(roomId);
-                }, WS_RECONNECT_INTERVAL + Math.random() * 2000);
-            } else if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
-                addToast('Connection lost. Please refresh the page.', 'error');
-                reconnectAttemptsRef.current = 0;
+            // Attempt reconnection with exponential backoff if it was not a clean close
+            if (shouldReconnectRef.current && event.code !== 1000) {
+                scheduleReconnect(roomId, connect);
             }
         };
 
         setSocket(ws);
-    }, [socket, refreshSchema]);
+    }, [socket, refreshSchema, scheduleReconnect, wsLog]);
+
+    // Keep connectRef in sync with connect for manual reconnect
+    connectRef.current = connect;
 
     const runQuery = useCallback((sql: string, tableContext?: string) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -738,6 +853,10 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                 clearTimeout(reconnectTimeoutRef.current);
             }
             
+            if (reconnectCountdownRef.current) {
+                clearInterval(reconnectCountdownRef.current);
+            }
+            
             if (connectionTimeoutRef.current) {
                 clearTimeout(connectionTimeoutRef.current);
             }
@@ -759,7 +878,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     }, []); // Empty dependency array ensures this only runs on unmount
 
     return (
-        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, addToast, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, performMutation, runReactiveQuery, rpc, socket, setCursor, setPresence, getPsychicData }}>
+        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, addToast, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, performMutation, runReactiveQuery, rpc, socket, setCursor, setPresence, getPsychicData, manualReconnect, reconnectInfo, connectionQuality, wsDebug, setWsDebug }}>
             {children}
         </DatabaseContext.Provider>
     );
