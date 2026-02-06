@@ -1799,36 +1799,22 @@ export class NanoStore extends DurableObject {
                         
                         this.logAction(method, { table, rowCount: rows.length });
                         
-                        // SCHEMA EVOLUTION: Auto-detect and add missing columns
+                        // SCHEMA VALIDATION: Prevent automatic column creation
+                        // Require users to explicitly map CSV columns to existing schema or create columns first
                         const currentInfo = this.sql.exec(`PRAGMA table_info("${table}")`).toArray();
                         const existingColumns = new Set(currentInfo.map((c: any) => c.name));
                         
-                        // Analyze the first row to find new columns
+                        // Analyze the first row to find unmapped columns
                         const sampleRow = rows[0];
-                        const newColumns = Object.keys(sampleRow)
-                            .map(k => this.sanitizeIdentifier(k))
-                            .filter(k => k !== 'id' && !existingColumns.has(k));
-
-                        // VALIDATE HEADERS ONCE
-                        // Check if incoming columns are valid against existing ones (or if we are adding them)
-                        // If strict mode is on or we want to prevent partial failures:
-                        // Here we just ensure we don't have widely invalid structure
-                         // No specific validation rule provided other than "Throw a single error if columns are invalid"
-                         // We can assume that if keys are not strings or empty, it's invalid
+                        const incomingColumns = Object.keys(sampleRow).map(k => this.sanitizeIdentifier(k));
+                        const unmappedColumns = incomingColumns.filter(k => k !== 'id' && !existingColumns.has(k));
                         
-                        // If we found columns in the CSV that aren't in the DB, create them!
-                        if (newColumns.length > 0) {
-                            console.log(`[Auto-Schema] Adding ${newColumns.length} missing columns to ${table}: ${newColumns.join(', ')}`);
-                            
-                            for (const col of newColumns) {
-                                try {
-                                    this.sql.exec(`ALTER TABLE "${table}" ADD COLUMN "${col}" TEXT`);
-                                } catch (alterErr: any) {
-                                    console.warn(`Failed to add column ${col}: ${alterErr.message}`);
-                                }
-                            }
-                            // Note: replicateSchemaToD1 doesn't exist yet, but we're keeping the concept
-                            // For now, schema changes will be synced on next full sync
+                        // PREVENT GHOST ROWS: Reject imports with unmapped columns
+                        // This prevents the scenario where User A imports "email, name" and User B imports "Email, FullName"
+                        // resulting in columns: email, name, Email, FullName
+                        if (unmappedColumns.length > 0) {
+                            const errorMsg = `Column mismatch detected. The following columns in your CSV do not exist in the table "${table}": ${unmappedColumns.join(', ')}. Please create these columns first or map them to existing columns. Existing columns: ${Array.from(existingColumns).join(', ')}`;
+                            throw new Error(errorMsg);
                         }
                         
                         const insertedRows: any[] = [];
