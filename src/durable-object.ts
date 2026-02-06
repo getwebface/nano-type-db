@@ -638,13 +638,9 @@ export class NanoStore extends DurableObject {
   }
 
   async replicateSchemaToD1() {
-    if (!this.env.READ_REPLICA) {
-      console.warn("D1 READ_REPLICA not available, skipping schema replication");
-      return;
-    }
+    if (!this.env.READ_REPLICA) return;
 
     try {
-      // Get all non-system tables with their CREATE statements
       const tables = this.sql.exec(`
         SELECT name, sql FROM sqlite_master 
         WHERE type='table' AND name NOT LIKE '_%' AND name != 'sqlite_sequence'
@@ -653,41 +649,30 @@ export class NanoStore extends DurableObject {
       for (const table of tables) {
         const tableName = table.name;
         let createSql = table.sql;
-        
-        // Skip if no SQL found
         if (!createSql) continue;
 
-        // SECURITY: Validate table name
-        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
-          console.warn(`Invalid table name for replication: ${tableName}`);
-          continue;
-        }
+        // Security check
+        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) continue;
         
-        // Ensure IF NOT EXISTS is present to prevent errors
+        // Ensure IF NOT EXISTS
         if (!createSql.toUpperCase().includes('IF NOT EXISTS')) {
             createSql = createSql.replace(/CREATE TABLE/i, 'CREATE TABLE IF NOT EXISTS');
         }
 
-        // 1. Create the table in D1 exactly as it exists in DO
+        // 1. Create table exactly as defined in DO
         await this.env.READ_REPLICA.exec(createSql);
 
-        // 2. Add room_id column for multi-tenancy (Safe ALTER)
-        // We use a try-catch because the column might already exist
+        // 2. Add room_id column safely
         try {
             await this.env.READ_REPLICA.prepare(`ALTER TABLE "${tableName}" ADD COLUMN room_id TEXT`).run();
         } catch (alterErr: any) {
-            // Ignore error if column already exists
-            if (!alterErr.message?.includes('duplicate column')) {
-                 console.log(`Note: room_id column might already exist for ${tableName}`);
-            }
+            // Ignore if column already exists
         }
         
-        // 3. Create index on room_id for performance
+        // 3. Create index
         try {
             await this.env.READ_REPLICA.exec(`CREATE INDEX IF NOT EXISTS idx_${tableName}_room_id ON "${tableName}" (room_id)`);
-        } catch (idxErr) {
-            console.warn(`Could not create index for ${tableName}:`, idxErr);
-        }
+        } catch (idxErr) {}
         
         console.log(`Schema replicated for table ${tableName}`);
       }
@@ -870,31 +855,41 @@ export class NanoStore extends DurableObject {
    * More efficient than individual syncs for bulk operations
    */
   async batchSyncToD1(table: string, rows: any[]): Promise<void> {
-    if (!this.env.READ_REPLICA || rows.length === 0) {
-      return;
-    }
+    if (!this.env.READ_REPLICA || rows.length === 0) return;
 
     try {
       const roomId = this.doId;
       
+      // Use the first row as the template to guarantee column order
+      const templateRow = rows[0];
+      const keys = Object.keys(templateRow).filter(k => k !== 'room_id');
+      
+      if (keys.length === 0) return;
+
+      const columns = [...keys, 'room_id'];
+      const columnStr = columns.map(c => `"${c}"`).join(', ');
+      const placeholderStr = columns.map(() => '?').join(', ');
+
       const statements = rows.map(row => {
-          const keys = Object.keys(row).filter(k => k !== 'room_id');
-          const columns = [...keys, 'room_id'];
-          const placeholders = [...keys.map(() => '?'), '?'];
-          const values = [...keys.map(k => row[k]), roomId];
+          // Map values securely against the fixed keys array
+          const values = [
+            ...keys.map(k => {
+              const val = row[k];
+              return val === undefined ? null : val;
+            }), 
+            roomId
+          ];
           
           return this.env.READ_REPLICA.prepare(
-            `INSERT OR REPLACE INTO "${table}" (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`
+            `INSERT OR REPLACE INTO "${table}" (${columnStr}) VALUES (${placeholderStr})`
           ).bind(...values);
       });
 
-      // Execute all statements in a batch
       await this.env.READ_REPLICA.batch(statements);
-      
       console.log(`[Sync Engine] Batch synced ${rows.length} rows to D1 table ${table}`);
     } catch (e) {
       console.error(`[Sync Engine] Batch sync failed for table ${table}:`, e);
-      throw e;
+      // Don't throw, allow DO to continue operating
     }
   }
 
@@ -3234,15 +3229,13 @@ export class NanoStore extends DurableObject {
   }
 
   async dispatchWebhooks(table: string, action: 'added' | 'modified' | 'deleted', row: any) {
-    // FIX: Ensure schema is correct before querying
+    // FIX: Self-heal the schema if columns are missing
     try {
-        // Attempt to add potentially missing columns if the table is old
-        // This is a "Lazy Migration" for existing Durable Objects
         try { this.sql.exec("ALTER TABLE _webhooks ADD COLUMN secret TEXT"); } catch (_) {}
         try { this.sql.exec("ALTER TABLE _webhooks ADD COLUMN failure_count INTEGER DEFAULT 0"); } catch (_) {}
         try { this.sql.exec("ALTER TABLE _webhooks ADD COLUMN last_triggered_at INTEGER"); } catch (_) {}
     } catch (e) {
-        // Ignore errors if columns exist
+        // Ignore errors if columns already exist
     }
 
     try {
