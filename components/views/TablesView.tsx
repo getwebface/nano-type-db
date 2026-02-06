@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useRealtimeQuery, useDatabase } from '../../hooks/useDatabase';
 import { DataGrid } from '../DataGrid';
+import { CsvImportModal } from '../DataGrid/CsvImportModal';
+import { parseCSV, sanitizeHeader } from '../../utils/csv';
 import { Table2, Plus, Trash2, Database, Upload } from 'lucide-react';
 import { ConfirmDialog } from '../Modal';
 
@@ -13,6 +15,10 @@ export const TablesView: React.FC = () => {
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [showCSVImportModal, setShowCSVImportModal] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  // CSV Import Wizard State
+  const [csvPreview, setCsvPreview] = useState<any>(null);
+  const [importing, setImporting] = useState(false);
   
   useEffect(() => {
     if (schema) {
@@ -104,100 +110,90 @@ export const TablesView: React.FC = () => {
 
   const handleCSVFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !file.name.endsWith('.csv')) {
-      addToast('Please select a valid CSV file', 'error');
-      return;
-    }
+    if (!file) return;
 
     try {
-      const text = await file.text();
-      const lines = text.split('\n').filter(line => line.trim());
-      
-      if (lines.length < 2) {
-        addToast('CSV file must contain a header row and at least one data row', 'error');
-        return;
-      }
+        // 1. Parse CSV locally first
+        const { headers: rawHeaders, rows: parsedRows } = await parseCSV(file);
 
-      // Parse CSV headers
-      const parseCSVLine = (line: string): string[] => {
-        const result: string[] = [];
-        let current = '';
-        let inQuotes = false;
-        
-        for (let i = 0; i < line.length; i++) {
-          const char = line[i];
-          if (char === '"') {
-            if (inQuotes && line[i + 1] === '"') {
-              current += '"';
-              i++;
-            } else {
-              inQuotes = !inQuotes;
-            }
-          } else if (char === ',' && !inQuotes) {
-            result.push(current.trim());
-            current = '';
-          } else {
-            current += char;
-          }
-        }
-        result.push(current.trim());
-        return result;
-      };
+        // 2. Prepare Preview Data
+        // Use sanitizeIdentifier (local) or sanitizeHeader (imported) - using local for consistency
+        const headers = rawHeaders.map(h => sanitizeIdentifier(h));
 
-      const rawHeaders = parseCSVLine(lines[0]);
-      const sanitizedHeaders = rawHeaders.map(h => sanitizeIdentifier(h));
-      
-      // Generate table name from file name
-      const suggestedTableName = sanitizeIdentifier(file.name.replace('.csv', ''));
-      
-      // Create columns from CSV headers
-      const columns = sanitizedHeaders.map(header => ({
-        name: header,
-        type: 'TEXT',
-        notNull: false
-      }));
-
-      // Create table with inferred schema
-      await rpc('createTable', {
-        tableName: suggestedTableName,
-        columns: columns
-      });
-
-      addToast(`Table "${suggestedTableName}" created successfully`, 'success');
-
-      // Parse and insert data
-      const rows = lines.slice(1).map(line => {
-        const values = parseCSVLine(line);
-        const row: Record<string, any> = {};
-        sanitizedHeaders.forEach((header, idx) => {
-          let value: any = values[idx] || '';
-          // Try to parse as number
-          if (value && !isNaN(Number(value))) {
-            value = Number(value);
-          } else if (value.toLowerCase() === 'true') {
-            value = true;
-          } else if (value.toLowerCase() === 'false') {
-            value = false;
-          }
-          row[header] = value;
+        // Map rows to objects
+        const rows = parsedRows.map(values => {
+            const row: Record<string, any> = {};
+            headers.forEach((header, idx) => {
+                let value: any = values[idx] || '';
+                // Basic type inference
+                if (value && !isNaN(Number(value))) {
+                    value = Number(value);
+                } else if (typeof value === 'string' && value.toLowerCase() === 'true') {
+                    value = true;
+                } else if (typeof value === 'string' && value.toLowerCase() === 'false') {
+                    value = false;
+                }
+                row[header] = value;
+            });
+            return row;
         });
-        return row;
-      });
 
-      // Batch insert the rows
-      await rpc('batchInsert', { table: suggestedTableName, rows });
-      
-      addToast(`Successfully imported ${rows.length} rows into "${suggestedTableName}"`, 'success');
-      setSelectedTable(suggestedTableName);
-      
+        // 3. Open Wizard instead of uploading
+        setCsvPreview({
+            headers,
+            headerMapping: [], // Optional: add mapping logic if needed
+            rows,
+            inferredTypes: {}, // Optional: add type inference logic
+            fileName: file.name
+        });
+
     } catch (error: any) {
-      console.error('CSV import failed:', error);
-      addToast('CSV import failed: ' + (error.message || 'Unknown error'), 'error');
+        addToast('CSV parsing failed: ' + error.message, 'error');
+    }
+
+    // Reset input
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleConfirmImport = async () => {
+    if (!csvPreview) return;
+    setImporting(true);
+    try {
+        // Create table if it doesn't exist (optional, logic depends on your flow)
+        // Perform batch insert
+        // Use selectedTable if available, otherwise derive from filename
+        const targetTable = selectedTable || sanitizeIdentifier(csvPreview.fileName.replace('.csv', ''));
+        
+        // Ensure we create the table first if it doesn't exist (or rely on batchInsert auto-creation if supported)
+        // Checks if table exists in schema
+        if (!schema || !schema[targetTable]) {
+             // Create columns from CSV headers
+            const columns = csvPreview.headers.map((header: string) => ({
+                name: header,
+                type: 'TEXT',
+                notNull: false
+            }));
+            
+            await rpc('createTable', {
+                tableName: targetTable,
+                columns: columns
+            });
+            addToast(`Table "${targetTable}" created`, 'success');
+        }
+
+        await rpc('batchInsert', { 
+            table: targetTable, 
+            rows: csvPreview.rows 
+        });
+        
+        addToast(`Successfully imported ${csvPreview.rows.length} rows into "${targetTable}"`, 'success');
+        setCsvPreview(null); // Close wizard
+        if (!selectedTable) setSelectedTable(targetTable);
+        
+    } catch (error: any) {
+        addToast('Import failed: ' + error.message, 'error');
     } finally {
-      // Reset file input
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
+        setImporting(false);
     }
   };
 
@@ -207,13 +203,22 @@ export const TablesView: React.FC = () => {
       <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col overflow-hidden">
         <div className="p-4 border-b border-slate-800 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Tables</h3>
-          <button
-            onClick={() => setShowCreateModal(true)}
-            className="p-1 hover:bg-slate-800 rounded transition-colors"
-            title="Create new table"
-          >
-            <Plus size={18} className="text-green-500" />
-          </button>
+          <div className="flex gap-1">
+            <button
+              onClick={handleCSVFileSelect}
+              className="p-1 hover:bg-slate-800 rounded transition-colors"
+              title="Import CSV"
+            >
+              <Upload size={18} className="text-blue-500" />
+            </button>
+            <button
+              onClick={() => setShowCreateModal(true)}
+              className="p-1 hover:bg-slate-800 rounded transition-colors"
+              title="Create new table"
+            >
+              <Plus size={18} className="text-green-500" />
+            </button>
+          </div>
         </div>
         
         <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
@@ -277,6 +282,14 @@ export const TablesView: React.FC = () => {
           )}
         </nav>
       </aside>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".csv"
+        onChange={handleCSVFileChange}
+        className="hidden"
+      />
 
       {/* Main Grid Area */}
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -457,6 +470,15 @@ export const TablesView: React.FC = () => {
         message={`Are you sure you want to delete the table "${deleteConfirm}"? This action cannot be undone.`}
         confirmLabel="Delete"
         confirmVariant="danger"
+      />
+
+      {/* CSV Import Wizard */}
+      <CsvImportModal
+        preview={csvPreview}
+        isImporting={importing}
+        tableName={selectedTable || (csvPreview ? sanitizeIdentifier(csvPreview.fileName.replace('.csv', '')) : "New Table")}
+        onClose={() => setCsvPreview(null)}
+        onConfirm={handleConfirmImport}
       />
     </div>
   );

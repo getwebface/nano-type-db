@@ -716,6 +716,11 @@ export class NanoStore extends DurableObject {
    * should pre-include room_id filtering to avoid modification issues.
    */
   async readFromD1(query: string, ...params: any[]): Promise<any[]> {
+    // FORCE LOCAL READ: For "Tables View" and "SqlConsole", we need immediate consistency.
+    // Reading from D1 replica introduces lag which makes new data "vanish" temporarily.
+    // Un-comment the block below only if offloading reads is strictly necessary and lag is acceptable.
+    
+    /*
     // Try D1 first for distributed reads
     if (this.env.READ_REPLICA) {
       try {
@@ -744,6 +749,7 @@ export class NanoStore extends DurableObject {
         console.warn("D1 read failed, falling back to DO SQLite:", e);
       }
     }
+    */
     
     // Fallback to DO SQLite if D1 is unavailable or fails
     this.trackUsage('reads');
@@ -898,9 +904,9 @@ export class NanoStore extends DurableObject {
     const tables = this.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name != 'sqlite_sequence'").toArray();
     const schema: Record<string, any[]> = {};
     for (const t of tables) {
-      // Include all user tables and explicitly allow _webhooks
-      if (t.name.startsWith('sqlite_') || (t.name.startsWith('_') && t.name !== '_webhooks')) {
-        continue; // Skip system tables except _webhooks
+      // Include all user tables (exclude system tables starting with _)
+      if (t.name.startsWith('sqlite_') || t.name.startsWith('_')) {
+        continue; // Skip system tables
       }
       const columns = this.sql.exec(`PRAGMA table_info("${t.name}")`).toArray();
       schema[t.name] = columns;
@@ -1826,45 +1832,46 @@ export class NanoStore extends DurableObject {
                             const chunk = rows.slice(i, Math.min(i + CHUNK_SIZE, rows.length));
                             
                             // Transaction for each chunk
-                            this.sql.exec('BEGIN TRANSACTION');
-                            
                             try {
-                                // Insert rows in this chunk
-                                for (const row of chunk) {
-                                    try {
-                                        // SECURITY: Sanitize field names (convert "Post Content" to "post_content")
-                                        const sanitizedRow: Record<string, any> = {};
-                                        for (const [key, value] of Object.entries(row)) {
-                                            const sanitizedKey = this.sanitizeIdentifier(key);
-                                            if (sanitizedKey) {
-                                                sanitizedRow[sanitizedKey] = value;
+                                this.ctx.storage.transactionSync(() => {
+                                    // Insert rows in this chunk
+                                    for (const row of chunk) {
+                                        try {
+                                            // SECURITY: Sanitize field names (convert "Post Content" to "post_content")
+                                            const sanitizedRow: Record<string, any> = {};
+                                            for (const [key, value] of Object.entries(row)) {
+                                                const sanitizedKey = this.sanitizeIdentifier(key);
+                                                if (sanitizedKey) {
+                                                    sanitizedRow[sanitizedKey] = value;
+                                                }
                                             }
+                                            
+                                            const fields = Object.keys(sanitizedRow);
+                                            if (fields.length === 0) continue;
+                                            
+                                            const values = Object.values(sanitizedRow);
+                                            
+                                            // Use quoted identifiers for safety
+                                            const placeholders = fields.map(() => '?').join(', ');
+                                            const fieldNames = fields.map(f => `"${f}"`).join(', ');
+                                            
+                                            const query = `INSERT INTO "${table}" (${fieldNames}) VALUES (${placeholders}) RETURNING *`;
+                                            
+                                            const result = this.sql.exec(query, ...values).toArray();
+                                            if (result.length > 0) {
+                                                insertedRows.push(result[0]);
+                                            }
+                                        } catch (rowError: any) {
+                                            console.error('Failed to insert row:', rowError.message);
+                                            // Continue with other rows in the chunk (inside transaction? usually partial failure kills the transaction)
+                                            // In the original code, rowError was caught inside the loop, allowing the loop to continue.
+                                            // However, if we are inside a transactionSync, does a caught error rollback?
+                                            // No, transactionSync only rolls back if the callback throws.
+                                            // Here we catch rowError, so the callback doesn't throw for single row fail.
                                         }
-                                        
-                                        const fields = Object.keys(sanitizedRow);
-                                        if (fields.length === 0) continue;
-                                        
-                                        const values = Object.values(sanitizedRow);
-                                        
-                                        // Use quoted identifiers for safety
-                                        const placeholders = fields.map(() => '?').join(', ');
-                                        const fieldNames = fields.map(f => `"${f}"`).join(', ');
-                                        
-                                        const query = `INSERT INTO "${table}" (${fieldNames}) VALUES (${placeholders}) RETURNING *`;
-                                        
-                                        const result = this.sql.exec(query, ...values).toArray();
-                                        if (result.length > 0) {
-                                            insertedRows.push(result[0]);
-                                        }
-                                    } catch (rowError: any) {
-                                        console.error('Failed to insert row:', rowError.message);
-                                        // Continue with other rows in the chunk
                                     }
-                                }
-                                
-                                this.sql.exec('COMMIT');
+                                });
                             } catch (chunkError: any) {
-                                this.sql.exec('ROLLBACK');
                                 console.error(`Batch chunk failed:`, chunkError);
                                 // Don't crash the whole request, just log and continue
                             }
@@ -2580,6 +2587,7 @@ export class NanoStore extends DurableObject {
                             console.log("Lazy migration: Fixing _webhooks table schema...");
                             try {
                                 // Add potentially missing columns safely
+                                try { this.sql.exec("ALTER TABLE _webhooks ADD COLUMN events TEXT DEFAULT ''"); } catch (_) {}
                                 try { this.sql.exec("ALTER TABLE _webhooks ADD COLUMN failure_count INTEGER DEFAULT 0"); } catch (_) {}
                                 try { this.sql.exec("ALTER TABLE _webhooks ADD COLUMN last_triggered_at INTEGER"); } catch (_) {}
                                 try { this.sql.exec("ALTER TABLE _webhooks ADD COLUMN active INTEGER DEFAULT 1"); } catch (_) {}
