@@ -1845,7 +1845,19 @@ export class NanoStore extends DurableObject {
                                                     sanitizedRow[sanitizedKey] = value;
                                                 }
                                             }
-                                            
+
+                                            // AUTOMATIC METADATA EXTRUSION: Inject user_id if column exists
+                                            // This ensures tasks/private data imported via CSV are owned by the importer
+                                            if (existingColumns.has('user_id') && !sanitizedRow['user_id']) {
+                                                sanitizedRow['user_id'] = userId;
+                                            }
+                                            if (existingColumns.has('owner_id') && !sanitizedRow['owner_id']) {
+                                                sanitizedRow['owner_id'] = userId;
+                                            }
+                                            if (existingColumns.has('created_at') && !sanitizedRow['created_at']) {
+                                                sanitizedRow['created_at'] = Date.now(); // or ISO string depending on schema
+                                            }
+
                                             const fields = Object.keys(sanitizedRow);
                                             if (fields.length === 0) continue;
                                             
@@ -2136,12 +2148,14 @@ export class NanoStore extends DurableObject {
                      const query = "SELECT * FROM tasks WHERE user_id = ? ORDER BY id LIMIT ? OFFSET ?";
                      const params: any[] = [userId, safeLimit, safeOffset];
                      
-                     const queriedTasks = await this.readFromD1(query, ...params);
+                     // FORCE LOCAL READ: Use this.sql.exec instead of readFromD1 to ensure immediate consistency
+                     this.trackUsage('reads');
+                     const queriedTasks = this.sql.exec(query, ...params).toArray();
                      
                      // Get total count for pagination
                      // Note: This matches the WHERE clause of the main query
                      const countQuery = "SELECT count(*) as total FROM tasks WHERE user_id = ?";
-                     const countResult = await this.readFromD1(countQuery, userId);
+                     const countResult = this.sql.exec(countQuery, userId).toArray(); // Local read
                      const total = countResult && countResult.length > 0 ? countResult[0].total : 0;
                     
                     // Apply RLS filtering (additional layer of security, though WHERE clause handles strict ownership)
