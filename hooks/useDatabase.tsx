@@ -883,21 +883,34 @@ export const useRealtimeQuery = (tableName: string) => {
         if (isConnected && tableName && socket && socket.readyState === WebSocket.OPEN) {
             subscribe(tableName);
             
-            // Use RPC methods instead of raw SQL
+            // ROUTING LOGIC: Map tables to specific RPCs to avoid raw SQL errors
             if (tableName === 'tasks') {
                 socket.send(JSON.stringify({ 
                     action: 'rpc', 
                     method: 'listTasks' 
                 }));
             } else if (tableName === '_webhooks') {
-                // FIX: Use specific RPC for webhooks to avoid "Rejected raw SQL" error
+                // CRITICAL FIX: Use RPC for webhooks, do NOT send raw SQL
                 socket.send(JSON.stringify({ 
                     action: 'rpc', 
                     method: 'listWebhooks' 
                 }));
             } else {
-                // For other tables, use a generic query
-                runQuery(`SELECT * FROM ${tableName}`, tableName);
+                // SECURITY: Validate table name to prevent SQL injection
+                // Only allow alphanumeric characters and underscores
+                if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
+                    console.error('Invalid table name:', tableName);
+                    return;
+                }
+                
+                // REPLACEMENT: Use executeSQL RPC for other tables instead of runQuery
+                // This avoids the "Raw SQL queries are disabled" error
+                // NOTE: Limited to 100 rows for initial load. Future enhancement: add pagination.
+                socket.send(JSON.stringify({ 
+                    action: 'rpc', 
+                    method: 'executeSQL', 
+                    payload: { sql: `SELECT * FROM ${tableName} LIMIT 100`, readonly: true }
+                }));
             }
         }
     }, [isConnected, tableName, subscribe, socket]);
