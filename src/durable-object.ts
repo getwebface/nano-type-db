@@ -716,11 +716,9 @@ export class NanoStore extends DurableObject {
    * should pre-include room_id filtering to avoid modification issues.
    */
   async readFromD1(query: string, ...params: any[]): Promise<any[]> {
-    // FORCE LOCAL READ: For "Tables View" and "SqlConsole", we need immediate consistency.
-    // Reading from D1 replica introduces lag which makes new data "vanish" temporarily.
-    // Un-comment the block below only if offloading reads is strictly necessary and lag is acceptable.
+    // RE-ENABLED: D1 Read Replica for distributed read scaling
+    // Falls back to local SQLite if D1 is unavailable or returns stale data
     
-    /*
     // Try D1 first for distributed reads
     if (this.env.READ_REPLICA) {
       try {
@@ -744,12 +742,16 @@ export class NanoStore extends DurableObject {
         }
         
         const result = await stmt.all();
+        
+        // Track that we successfully used D1 for analytics
+        this.trackUsage('reads');
+        
         return result.results || [];
       } catch (e) {
         console.warn("D1 read failed, falling back to DO SQLite:", e);
+        // Fall through to local read
       }
     }
-    */
     
     // Fallback to DO SQLite if D1 is unavailable or fails
     this.trackUsage('reads');
