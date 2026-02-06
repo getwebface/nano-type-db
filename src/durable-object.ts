@@ -663,22 +663,26 @@ export class NanoStore extends DurableObject {
           continue;
         }
         
-        // Transform schema for D1 multi-tenancy: Add room_id column
-        if (!createSql.includes('room_id')) {
-             const lastParenIndex = createSql.lastIndexOf(')');
-             if (lastParenIndex !== -1) {
-                 createSql = createSql.substring(0, lastParenIndex) + ", room_id TEXT)";
-             }
-        }
-        
-        // Ensure IF NOT EXISTS
+        // Ensure IF NOT EXISTS is present to prevent errors
         if (!createSql.toUpperCase().includes('IF NOT EXISTS')) {
             createSql = createSql.replace(/CREATE TABLE/i, 'CREATE TABLE IF NOT EXISTS');
         }
 
+        // 1. Create the table in D1 exactly as it exists in DO
         await this.env.READ_REPLICA.exec(createSql);
+
+        // 2. Add room_id column for multi-tenancy (Safe ALTER)
+        // We use a try-catch because the column might already exist
+        try {
+            await this.env.READ_REPLICA.prepare(`ALTER TABLE "${tableName}" ADD COLUMN room_id TEXT`).run();
+        } catch (alterErr: any) {
+            // Ignore error if column already exists
+            if (!alterErr.message?.includes('duplicate column')) {
+                 console.log(`Note: room_id column might already exist for ${tableName}`);
+            }
+        }
         
-        // Create index on room_id for performance
+        // 3. Create index on room_id for performance
         try {
             await this.env.READ_REPLICA.exec(`CREATE INDEX IF NOT EXISTS idx_${tableName}_room_id ON "${tableName}" (room_id)`);
         } catch (idxErr) {
@@ -3230,6 +3234,17 @@ export class NanoStore extends DurableObject {
   }
 
   async dispatchWebhooks(table: string, action: 'added' | 'modified' | 'deleted', row: any) {
+    // FIX: Ensure schema is correct before querying
+    try {
+        // Attempt to add potentially missing columns if the table is old
+        // This is a "Lazy Migration" for existing Durable Objects
+        try { this.sql.exec("ALTER TABLE _webhooks ADD COLUMN secret TEXT"); } catch (_) {}
+        try { this.sql.exec("ALTER TABLE _webhooks ADD COLUMN failure_count INTEGER DEFAULT 0"); } catch (_) {}
+        try { this.sql.exec("ALTER TABLE _webhooks ADD COLUMN last_triggered_at INTEGER"); } catch (_) {}
+    } catch (e) {
+        // Ignore errors if columns exist
+    }
+
     try {
       // Query active webhooks that match this event
       const eventName = `${table}.${action}`;
