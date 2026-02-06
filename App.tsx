@@ -36,9 +36,12 @@ const ConnectionScreen: React.FC<{ userTier: string }> = ({ userTier }) => {
         const params = new URLSearchParams(window.location.search);
         const roomIdFromUrl = params.get('room_id');
         if (roomIdFromUrl) {
-            handleSelectRoom(roomIdFromUrl);
+            // Don't update URL when restoring from URL - it's already there
+            setSelectedRoom(roomIdFromUrl);
+            connect(roomIdFromUrl);
         }
-    }, []);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []); // Only run on mount to restore state from URL
 
     if (isConnected && selectedRoom) {
         return <ProjectLayout roomId={selectedRoom} userTier={userTier} />;
