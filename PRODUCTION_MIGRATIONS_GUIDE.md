@@ -192,9 +192,9 @@ CSV import failed: Error: RPC call to batchInsert timed out
 
 **Solution:** The timeout has been increased from 10s to 60s for batch operations. For very large CSV imports:
 
-1. Split your CSV into smaller chunks (< 1000 rows per file)
-2. Import each chunk separately
-3. The batch insert now processes in chunks of 100 rows with progress updates
+1. The system now supports up to 10,000 rows per batch
+2. Imports are processed in chunks of 100 rows with progress updates
+3. If still experiencing timeouts, split your CSV into smaller files (< 5,000 rows recommended for optimal performance)
 
 ## Database Architecture
 

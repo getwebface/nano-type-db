@@ -1627,8 +1627,8 @@ export class NanoStore extends DurableObject {
                                     const placeholders = fields.map(() => '?').join(', ');
                                     const fieldNames = fields.join(', ');
                                     // SECURITY: Table and field names use string interpolation but are protected by:
-                                    // 1. Table whitelist (line 1593)
-                                    // 2. Field name validation (lines 1621-1625)
+                                    // 1. Table whitelist (lines 1591-1598)
+                                    // 2. Field name validation (lines 1621-1624)
                                     // 3. All values are parameterized (? placeholders)
                                     // This is safe because we control the field names from validated input
                                     const query = `INSERT INTO ${table} (${fieldNames}) VALUES (${placeholders}) RETURNING *`;

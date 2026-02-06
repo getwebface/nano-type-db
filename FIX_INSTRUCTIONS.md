@@ -108,9 +108,9 @@ After applying the fix:
    - Progress updates should appear during import
 
 3. **Test Large CSV:**
-   - Import a CSV with 1,000+ rows
-   - Should process in chunks
-   - Should not timeout
+   - Import a CSV with up to 10,000 rows
+   - Should process in chunks of 100 rows
+   - Should not timeout (60s limit)
 
 ## Support
 
