@@ -640,9 +640,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                     // Check if this response is for our request
                     if (response.requestId === requestId) {
                         // Clear the timeout
-                        if (timeoutId !== null) {
-                            clearTimeout(timeoutId);
-                        }
+                        clearTimeout(timeoutId);
                         
                         // Remove the listener
                         socket.removeEventListener('message', handleResponse);
@@ -671,6 +669,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             
             // Timeout after 10 seconds
             timeoutId = setTimeout(() => {
+                timeoutId = null;
                 socket.removeEventListener('message', handleResponse);
                 reject(new Error(`RPC call to ${method} timed out`));
             }, 10000);
