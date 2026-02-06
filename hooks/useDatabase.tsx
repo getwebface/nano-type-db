@@ -605,6 +605,71 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         }));
     }, [socket]);
 
+    /**
+     * Generic RPC call - returns a Promise that resolves with the result
+     */
+    const rpc = useCallback((method: string, payload: any): Promise<any> => {
+        return new Promise((resolve, reject) => {
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                reject(new Error("Not connected to database"));
+                return;
+            }
+            
+            // Generate a unique request ID
+            // Use crypto.randomUUID() if available, otherwise fall back to a more robust method
+            let requestId: string;
+            if (crypto.randomUUID) {
+                requestId = crypto.randomUUID();
+            } else if (crypto.getRandomValues) {
+                // More robust fallback using crypto.getRandomValues
+                const buffer = new Uint8Array(16);
+                crypto.getRandomValues(buffer);
+                requestId = Array.from(buffer, byte => byte.toString(16).padStart(2, '0')).join('');
+            } else {
+                // Last resort fallback (not cryptographically secure)
+                requestId = `rpc_${Date.now()}_${Math.random()}`;
+            }
+            
+            // Create a one-time listener for the response
+            const handleResponse = (event: MessageEvent) => {
+                try {
+                    const response = JSON.parse(event.data);
+                    
+                    // Check if this response is for our request
+                    if (response.requestId === requestId) {
+                        // Remove the listener
+                        socket.removeEventListener('message', handleResponse);
+                        
+                        if (response.type === 'query_result' || response.type === 'rpc_result') {
+                            resolve(response);
+                        } else if (response.type === 'error' || response.type === 'rpc_error') {
+                            reject(new Error(response.error || 'RPC call failed'));
+                        }
+                    }
+                } catch (e) {
+                    // Ignore parse errors for other messages
+                }
+            };
+            
+            // Add listener
+            socket.addEventListener('message', handleResponse);
+            
+            // Send the RPC request with requestId
+            socket.send(JSON.stringify({
+                action: 'rpc',
+                method,
+                payload,
+                requestId
+            }));
+            
+            // Timeout after 10 seconds
+            setTimeout(() => {
+                socket.removeEventListener('message', handleResponse);
+                reject(new Error(`RPC call to ${method} timed out`));
+            }, 10000);
+        });
+    }, [socket]);
+
     // Psychic Auto-Sensor: Global input listener
     useEffect(() => {
         if (!psychic || !socket || socket.readyState !== WebSocket.OPEN) return;
@@ -675,7 +740,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     }, []); // Empty dependency array ensures this only runs on unmount
 
     return (
-        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, performMutation, runReactiveQuery, socket, setCursor, setPresence, getPsychicData }}>
+        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, performMutation, runReactiveQuery, rpc, socket, setCursor, setPresence, getPsychicData }}>
             {children}
         </DatabaseContext.Provider>
     );

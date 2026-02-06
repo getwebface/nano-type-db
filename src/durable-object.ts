@@ -1481,6 +1481,185 @@ export class NanoStore extends DurableObject {
                     }
                     break;
                 
+                // Generic updateRow for inline editing
+                case "updateRow": {
+                    try {
+                        this.trackUsage('writes');
+                        
+                        const { table, id, field, value } = data.payload || {};
+                        
+                        // SECURITY: Input validation
+                        if (!table || typeof table !== 'string') {
+                            throw new Error('Invalid table name');
+                        }
+                        if (!id || (typeof id !== 'number' && typeof id !== 'string')) {
+                            throw new Error('Invalid row id');
+                        }
+                        if (!field || typeof field !== 'string') {
+                            throw new Error('Invalid field name');
+                        }
+                        
+                        // SECURITY: Whitelist allowed tables to prevent arbitrary table access
+                        const allowedTables = ['tasks', 'users', 'projects']; // Add more as needed
+                        if (!allowedTables.includes(table)) {
+                            throw new Error(`Table '${table}' is not allowed for updates`);
+                        }
+                        
+                        // SECURITY: Sanitize field name to prevent SQL injection
+                        // Only allow alphanumeric and underscore
+                        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field)) {
+                            throw new Error('Invalid field name format');
+                        }
+                        
+                        // SECURITY: Get userId for Row Level Security
+                        const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                        
+                        // Rate limit check
+                        if (!this.checkRateLimit(userId, "updateRow", 100, 60000)) {
+                            throw new Error('Rate limit exceeded. Please slow down.');
+                        }
+                        
+                        this.logAction(method, data.payload);
+                        
+                        // Build parameterized update query
+                        // SECURITY: Table and field names use string interpolation (not parameterizable in SQL)
+                        // but are protected by:
+                        // 1. Table whitelist check (line 1503)
+                        // 2. Field name regex validation (line 1509-1511)
+                        // 3. Value is properly parameterized (prevents SQL injection)
+                        // This is the standard approach for dynamic column updates in SQL
+                        const query = `UPDATE ${table} SET ${field} = ? WHERE id = ? RETURNING *`;
+                        const result = this.sql.exec(query, value, id).toArray();
+                        
+                        if (result.length === 0) {
+                            throw new Error(`No row found with id ${id}`);
+                        }
+                        
+                        const updatedRow = result[0];
+                        
+                        // Replicate to D1 (async, non-blocking)
+                        this.ctx.waitUntil(this.replicateToD1(table, 'update', updatedRow));
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_success", 
+                            action: "updateRow",
+                            updateId: data.updateId,
+                            requestId: data.requestId,
+                            data: updatedRow
+                        }));
+                        
+                        // Broadcast update to subscribers
+                        this.broadcastUpdate(table, "modified", updatedRow);
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_error", 
+                            action: "updateRow",
+                            error: e.message,
+                            updateId: data.updateId,
+                            requestId: data.requestId
+                        }));
+                    }
+                    break;
+                }
+                
+                // Batch insert for CSV import
+                case "batchInsert": {
+                    try {
+                        this.trackUsage('writes');
+                        
+                        const { table, rows } = data.payload || {};
+                        
+                        // SECURITY: Input validation
+                        if (!table || typeof table !== 'string') {
+                            throw new Error('Invalid table name');
+                        }
+                        if (!Array.isArray(rows) || rows.length === 0) {
+                            throw new Error('Rows must be a non-empty array');
+                        }
+                        
+                        // SECURITY: Limit batch size to prevent DoS
+                        if (rows.length > 1000) {
+                            throw new Error('Batch size limited to 1000 rows');
+                        }
+                        
+                        // SECURITY: Whitelist allowed tables
+                        const allowedTables = ['tasks', 'users', 'projects'];
+                        if (!allowedTables.includes(table)) {
+                            throw new Error(`Table '${table}' is not allowed for batch insert`);
+                        }
+                        
+                        // SECURITY: Get userId
+                        const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                        
+                        // Rate limit check (stricter for batch operations)
+                        if (!this.checkRateLimit(userId, "batchInsert", 10, 60000)) {
+                            throw new Error('Rate limit exceeded. Please slow down.');
+                        }
+                        
+                        this.logAction(method, { table, rowCount: rows.length });
+                        
+                        const insertedRows: any[] = [];
+                        
+                        // Insert rows one by one
+                        // TODO: Optimize with a single multi-value INSERT statement
+                        for (const row of rows) {
+                            try {
+                                const fields = Object.keys(row);
+                                const values = Object.values(row);
+                                
+                                // SECURITY: Validate field names
+                                for (const field of fields) {
+                                    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field)) {
+                                        throw new Error(`Invalid field name: ${field}`);
+                                    }
+                                }
+                                
+                                const placeholders = fields.map(() => '?').join(', ');
+                                const fieldNames = fields.join(', ');
+                                // SECURITY: Table and field names use string interpolation but are protected by:
+                                // 1. Table whitelist (line 1581)
+                                // 2. Field name validation (lines 1610-1615)
+                                // 3. All values are parameterized (? placeholders)
+                                // This is safe because we control the field names from validated input
+                                const query = `INSERT INTO ${table} (${fieldNames}) VALUES (${placeholders}) RETURNING *`;
+                                
+                                const result = this.sql.exec(query, ...values).toArray();
+                                if (result.length > 0) {
+                                    insertedRows.push(result[0]);
+                                    
+                                    // Replicate to D1 (async)
+                                    this.ctx.waitUntil(this.replicateToD1(table, 'insert', result[0]));
+                                }
+                            } catch (rowError: any) {
+                                console.error('Failed to insert row:', rowError.message);
+                                // Continue with other rows
+                            }
+                        }
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_success", 
+                            action: "batchInsert",
+                            updateId: data.updateId,
+                            requestId: data.requestId,
+                            data: { inserted: insertedRows.length, total: rows.length }
+                        }));
+                        
+                        // Broadcast all inserted rows
+                        for (const row of insertedRows) {
+                            this.broadcastUpdate(table, "added", row);
+                        }
+                    } catch (e: any) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "mutation_error", 
+                            action: "batchInsert",
+                            error: e.message,
+                            updateId: data.updateId,
+                            requestId: data.requestId
+                        }));
+                    }
+                    break;
+                }
+                
                 case "search": {
                     this.trackUsage('ai_ops'); // It's an AI op
                     const query = data.payload?.query;
@@ -1787,7 +1966,8 @@ export class NanoStore extends DurableObject {
                     webSocket.send(JSON.stringify({ 
                         type: "query_result", 
                         data: presence, 
-                        originalSql: "getPresence" 
+                        originalSql: "getPresence",
+                        requestId: data.requestId // Include requestId for promise-based RPC
                     }));
                     break;
                 }

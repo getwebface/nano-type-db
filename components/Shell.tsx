@@ -243,7 +243,11 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                     {/* Psychic Search Demo */}
                     <PsychicSearch />
                     
-                    <DataGrid data={data} tableName={selectedTable} />
+                    <DataGrid 
+                        data={data} 
+                        tableName={selectedTable} 
+                        schema={schema?.[selectedTable]}
+                    />
                 </div>
 
                 <div className="h-auto">
