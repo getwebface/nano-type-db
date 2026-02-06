@@ -11,7 +11,7 @@ import { ProjectSettings } from '../views/ProjectSettings';
 type ViewState = 'overview' | 'data' | 'sql' | 'webhooks' | 'settings';
 
 export const ProjectLayout: React.FC<{ roomId: string; onExit?: () => void }> = ({ roomId, onExit }) => {
-  const [currentView, setCurrentView] = useState<ViewState>('data');
+  const [currentView, setCurrentView] = useState<ViewState>('overview');
   const { status, usageStats, rpc } = useDatabase();
   const [presenceData, setPresenceData] = useState<any[]>([]);
 

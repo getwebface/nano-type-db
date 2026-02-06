@@ -16,7 +16,7 @@ export const DataExplorer: React.FC = () => {
         setSelectedTable(tables[0]);
       }
     }
-  }, [schema]);
+  }, [schema, selectedTable]);
 
   const data = useRealtimeQuery(selectedTable);
   const tableList = schema ? Object.keys(schema) : [];

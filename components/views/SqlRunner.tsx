@@ -1,9 +1,21 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { SqlConsole } from '../SqlConsole';
 import { Terminal } from 'lucide-react';
+import { useDatabase } from '../../hooks/useDatabase';
 
 export const SqlRunner: React.FC = () => {
-  const [currentTable, setCurrentTable] = useState<string>('tasks');
+  const { schema } = useDatabase();
+  const [currentTable, setCurrentTable] = useState<string>('');
+
+  // Set initial table from schema
+  useEffect(() => {
+    if (schema) {
+      const tables = Object.keys(schema);
+      if (tables.length > 0 && !currentTable) {
+        setCurrentTable(tables[0]);
+      }
+    }
+  }, [schema, currentTable]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
