@@ -1745,7 +1745,8 @@ export class NanoStore extends DurableObject {
                                     const fields = Object.keys(sanitizedRow);
                                     const values = Object.values(sanitizedRow);
                                     
-                                    // SECURITY: Validate sanitized field names
+                                    // Note: Field names are already sanitized by sanitizeIdentifier()
+                                    // The regex validation below should always pass, but serves as a final safety check
                                     for (const field of fields) {
                                         if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field)) {
                                             throw new Error(`Invalid field name: ${field}`);

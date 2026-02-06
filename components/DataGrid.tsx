@@ -316,7 +316,7 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
             const headerMapping = rawHeaders.map((raw, idx) => ({
                 original: raw,
                 sanitized: headers[idx]
-            })).filter(h => h.original !== h.sanitized);
+            })).filter(mapping => mapping.original !== mapping.sanitized);
             
             const rows = lines.slice(1).map(line => {
                 const values = parseCSVLine(line);
