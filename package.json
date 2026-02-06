@@ -8,6 +8,10 @@
     "build": "vite build",
     "preview": "vite preview",
     "migrate": "node scripts/migrate.js",
+    "migrate:enhanced": "node scripts/migrate-enhanced.js",
+    "migrate:status": "node scripts/migrate-enhanced.js status",
+    "migrate:up": "node scripts/migrate-enhanced.js up",
+    "migrate:down": "node scripts/migrate-enhanced.js down",
     "generate-client": "tsx scripts/generate-client-typed.ts"
   },
   "dependencies": {
