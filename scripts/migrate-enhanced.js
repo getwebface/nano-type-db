@@ -144,6 +144,25 @@ function ensureMigrationsTable(database) {
 }
 
 /**
+ * Get the appropriate database for a migration based on file name
+ */
+function getDatabaseForMigration(migration) {
+  const isAuthMigration = migration.file.includes('api_keys') || 
+                          migration.file.includes('rooms') || 
+                          migration.file.includes('permissions') ||
+                          migration.file.includes('user_tier');
+  
+  return isAuthMigration ? AUTH_DATABASE_NAME : DATABASE_NAME;
+}
+
+/**
+ * Sanitize string for SQL command (escape single quotes)
+ */
+function sanitizeForSQL(str) {
+  return str.replace(/'/g, "''");
+}
+
+/**
  * Apply a migration to the database
  */
 function applyMigration(migration, database) {
@@ -162,8 +181,9 @@ function applyMigration(migration, database) {
   const applyCommand = `wrangler d1 execute ${database} ${localFlag} --file=${migration.filePath}`;
   execSync(applyCommand, { encoding: 'utf-8', stdio: 'inherit' });
   
-  // Record in _migrations table
-  const recordCommand = `wrangler d1 execute ${database} ${localFlag} --command="INSERT INTO _migrations (version, name, applied_at) VALUES (${migration.version}, '${migration.name}', ${Date.now()})"`;
+  // Record in _migrations table with sanitized name
+  const sanitizedName = sanitizeForSQL(migration.name);
+  const recordCommand = `wrangler d1 execute ${database} ${localFlag} --command="INSERT INTO _migrations (version, name, applied_at) VALUES (${migration.version}, '${sanitizedName}', ${Date.now()})"`;
   execSync(recordCommand, { encoding: 'utf-8', stdio: 'pipe' });
   
   logger.info('Migration applied successfully', {
@@ -233,7 +253,6 @@ async function migrateUp() {
     return;
   }
   
-  // Determine which database to use based on migration file name
   for (const migration of migrations) {
     // Skip if target version is set and this migration is beyond it
     if (targetVersion !== null && migration.version > targetVersion) {
@@ -241,12 +260,7 @@ async function migrateUp() {
     }
     
     // Determine database based on file name
-    const database = migration.file.includes('api_keys') || 
-                     migration.file.includes('rooms') || 
-                     migration.file.includes('permissions') ||
-                     migration.file.includes('user_tier')
-      ? AUTH_DATABASE_NAME 
-      : DATABASE_NAME;
+    const database = getDatabaseForMigration(migration);
     
     // Ensure _migrations table exists
     ensureMigrationsTable(database);
@@ -304,12 +318,7 @@ async function migrateDown() {
     }
     
     // Determine database based on file name
-    const database = migration.file.includes('api_keys') || 
-                     migration.file.includes('rooms') || 
-                     migration.file.includes('permissions') ||
-                     migration.file.includes('user_tier')
-      ? AUTH_DATABASE_NAME 
-      : DATABASE_NAME;
+    const database = getDatabaseForMigration(migration);
     
     // Check if actually applied
     const applied = await getAppliedMigrations(database);

@@ -2789,17 +2789,22 @@ export class NanoStore extends DurableObject {
     this.subscribers.forEach((sockets) => {
       for (const socket of sockets) {
         try {
-          if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+          // Only close sockets that are in OPEN state
+          // CONNECTING state will throw an error if we try to close
+          if (socket.readyState === WebSocket.OPEN) {
             socket.close(1001, 'Server shutdown');
             count++;
+          } else if (socket.readyState === WebSocket.CONNECTING) {
+            // For CONNECTING sockets, just remove them from tracking
+            // They will timeout naturally or close when connection is established
+            this.logger.warn('WebSocket still connecting during shutdown - will timeout', {
+              readyState: socket.readyState
+            });
           }
         } catch (e) {
-          console.error(JSON.stringify({
-            type: 'shutdown_error',
-            action: 'websocket_close_failed',
-            error: e instanceof Error ? e.message : String(e),
-            timestamp: new Date().toISOString()
-          }));
+          this.logger.error('Failed to close WebSocket', e, {
+            readyState: socket.readyState
+          });
         }
       }
       sockets.clear();
