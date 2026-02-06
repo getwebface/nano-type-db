@@ -48,6 +48,14 @@ function execD1File(database, filePath) {
  * Check if a table exists in a database
  */
 function tableExists(database, tableName) {
+  // SECURITY: Validate table name to prevent SQL injection
+  // This validation MUST occur before any SQL query using tableName
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
+    console.error(`Invalid table name: ${tableName}`);
+    return false;
+  }
+  
+  // SECURITY: tableName is validated above with regex - safe to interpolate
   const result = execD1Command(database, `SELECT name FROM sqlite_master WHERE type='table' AND name='${tableName}'`);
   if (!result.success) {
     return false;
@@ -156,4 +164,4 @@ console.log('\n✨ Database health check complete!');
 console.log('\n📋 Next steps:');
 console.log('   1. If issues were fixed, test your application');
 console.log('   2. If issues persist, check PRODUCTION_MIGRATIONS_GUIDE.md');
-console.log('   3. Run migrations: npm run migrate:enhanced up ' + locationFlag);
+console.log('   3. Run migrations: npm run migrate:enhanced up -- ' + locationFlag);
