@@ -1636,8 +1636,8 @@ export class NanoStore extends DurableObject {
                         }
                         
                         // SECURITY: Limit batch size to prevent DoS
-                        if (rows.length > 1000) {
-                            throw new Error('Batch size limited to 1000 rows');
+                        if (rows.length > 10000) {
+                            throw new Error('Batch size limited to 10000 rows');
                         }
                         
                         // SECURITY: Whitelist allowed tables
@@ -1657,40 +1657,65 @@ export class NanoStore extends DurableObject {
                         this.logAction(method, { table, rowCount: rows.length });
                         
                         const insertedRows: any[] = [];
+                        // PERFORMANCE: Process in chunks to avoid blocking the event loop
+                        // Chunk size of 100 rows balances:
+                        // - Progress update frequency (every 100 rows)
+                        // - Event loop responsiveness (prevents blocking)
+                        // - Network overhead (not too many progress messages)
+                        const CHUNK_SIZE = 100;
                         
-                        // Insert rows one by one
-                        // TODO: Optimize with a single multi-value INSERT statement
-                        for (const row of rows) {
-                            try {
-                                const fields = Object.keys(row);
-                                const values = Object.values(row);
-                                
-                                // SECURITY: Validate field names
-                                for (const field of fields) {
-                                    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field)) {
-                                        throw new Error(`Invalid field name: ${field}`);
-                                    }
-                                }
-                                
-                                const placeholders = fields.map(() => '?').join(', ');
-                                const fieldNames = fields.join(', ');
-                                // SECURITY: Table and field names use string interpolation but are protected by:
-                                // 1. Table whitelist (line 1581)
-                                // 2. Field name validation (lines 1610-1615)
-                                // 3. All values are parameterized (? placeholders)
-                                // This is safe because we control the field names from validated input
-                                const query = `INSERT INTO ${table} (${fieldNames}) VALUES (${placeholders}) RETURNING *`;
-                                
-                                const result = this.sql.exec(query, ...values).toArray();
-                                if (result.length > 0) {
-                                    insertedRows.push(result[0]);
+                        // Process rows in chunks to provide progress updates
+                        for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+                            const chunk = rows.slice(i, Math.min(i + CHUNK_SIZE, rows.length));
+                            
+                            // Insert rows in this chunk
+                            for (const row of chunk) {
+                                try {
+                                    const fields = Object.keys(row);
+                                    const values = Object.values(row);
                                     
-                                    // Replicate to D1 (async)
-                                    this.ctx.waitUntil(this.replicateToD1(table, 'insert', result[0]));
+                                    // SECURITY: Validate field names
+                                    for (const field of fields) {
+                                        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field)) {
+                                            throw new Error(`Invalid field name: ${field}`);
+                                        }
+                                    }
+                                    
+                                    const placeholders = fields.map(() => '?').join(', ');
+                                    const fieldNames = fields.join(', ');
+                                    // SECURITY: Table and field names use string interpolation but are protected by:
+                                    // 1. Table whitelist validation (lines 1591-1595)
+                                    // 2. Field name validation (lines 1621-1624)
+                                    // 3. All values are parameterized (? placeholders)
+                                    // This is safe because we control the field names from validated input
+                                    const query = `INSERT INTO ${table} (${fieldNames}) VALUES (${placeholders}) RETURNING *`;
+                                    
+                                    const result = this.sql.exec(query, ...values).toArray();
+                                    if (result.length > 0) {
+                                        insertedRows.push(result[0]);
+                                        
+                                        // Replicate to D1 (async)
+                                        this.ctx.waitUntil(this.replicateToD1(table, 'insert', result[0]));
+                                    }
+                                } catch (rowError: any) {
+                                    console.error('Failed to insert row:', rowError.message);
+                                    // Continue with other rows
                                 }
-                            } catch (rowError: any) {
-                                console.error('Failed to insert row:', rowError.message);
-                                // Continue with other rows
+                            }
+                            
+                            // Send progress update for each chunk (except the last one)
+                            if (i + CHUNK_SIZE < rows.length) {
+                                webSocket.send(JSON.stringify({ 
+                                    type: "batch_progress",
+                                    action: "batchInsert",
+                                    updateId: data.updateId,
+                                    requestId: data.requestId,
+                                    data: { 
+                                        inserted: insertedRows.length, 
+                                        total: rows.length,
+                                        progress: Math.round((insertedRows.length / rows.length) * 100)
+                                    }
+                                }));
                             }
                         }
                         
