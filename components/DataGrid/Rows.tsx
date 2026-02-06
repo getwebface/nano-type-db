@@ -62,9 +62,9 @@ export const GridRow: React.FC<{
     tableName: string;
     schema?: ColumnDefinition[];
     onUpdate: (rowId: any, field: string, value: any) => void;
-    onDelete?: (rowId: any) => void;
+    onDeleteClick?: (rowId: any) => void;
     renderRowActions?: (row: any) => React.ReactNode;
-}> = ({ row, headers, tableName, schema, onUpdate, onDelete, renderRowActions }) => {
+}> = ({ row, headers, tableName, schema, onUpdate, onDeleteClick, renderRowActions }) => {
     const isOptimistic = row._optimistic;
     const [showActions, setShowActions] = useState(false);
     const [showEditModal, setShowEditModal] = useState(false);
@@ -126,11 +126,9 @@ export const GridRow: React.FC<{
                             <Edit2 size={16} />
                         </button>
                         {renderRowActions && renderRowActions(row)}
-                        {onDelete && (
+                        {onDeleteClick && (
                             <button
-                                onClick={() => {
-                                    if(confirm('Are you sure you want to delete this row?')) onDelete(row.id);
-                                }}
+                                onClick={() => onDeleteClick(row.id)}
                                 className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-red-900/20 rounded transition-colors"
                                 title="Delete Row"
                             >
