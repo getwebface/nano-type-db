@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Plus, Loader2, Filter, ArrowUpDown, Upload, Download, Check, X, ChevronDown, Calendar, FileJson } from 'lucide-react';
 import { useDatabase } from '../hooks/useDatabase';
 import { ColumnDefinition } from '../types';
+import { ConfirmDialog } from './Modal';
 
 interface DataGridProps {
     data: any[] | null;
@@ -200,13 +201,23 @@ const GhostRow: React.FC<{
 };
 
 export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tableName = 'table_name', schema }) => {
-    const { rpc } = useDatabase();
+    const { rpc, addToast } = useDatabase();
     const [filters, setFilters] = useState<Array<{ column: string; operator: string; value: string }>>([]);
     const [sortColumn, setSortColumn] = useState<string | null>(null);
     const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
     const [showFilters, setShowFilters] = useState(false);
     const [isDragging, setIsDragging] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    // CSV import wizard state
+    const [csvPreview, setCsvPreview] = useState<{
+        headers: string[];
+        headerMapping: { original: string; sanitized: string }[];
+        rows: Record<string, any>[];
+        inferredTypes: Record<string, string>;
+        fileName: string;
+    } | null>(null);
+    const [importProgress, setImportProgress] = useState(false);
 
     const handleCellUpdate = async (rowId: any, field: string, value: any) => {
         try {
@@ -264,7 +275,7 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
             const lines = text.split('\n').filter(line => line.trim());
             
             if (lines.length < 2) {
-                alert('CSV file must contain a header row and at least one data row.');
+                addToast('CSV file must contain a header row and at least one data row.', 'error');
                 return;
             }
 
@@ -323,7 +334,7 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
                 const row: Record<string, any> = {};
                 headers.forEach((header, idx) => {
                     // Convert values to appropriate types
-                    let value = values[idx] || '';
+                    let value: any = values[idx] || '';
                     
                     // Try to parse as number
                     if (value && !isNaN(Number(value))) {
@@ -342,45 +353,57 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
                 return row;
             });
 
-            // Build confirmation message with header sanitization info
-            let confirmMessage = `Import ${rows.length} rows into table "${tableName}"?\n\n`;
-            
-            if (headerMapping.length > 0) {
-                confirmMessage += 'Column names will be sanitized:\n';
-                headerMapping.forEach(({ original, sanitized }) => {
-                    confirmMessage += `  "${original}" → "${sanitized}"\n`;
-                });
-                confirmMessage += '\n';
+            // Infer column types from data
+            const inferredTypes: Record<string, string> = {};
+            for (const header of headers) {
+                const sampleValues = rows.slice(0, 50).map(r => r[header]).filter(v => v !== '' && v !== null && v !== undefined);
+                if (sampleValues.every(v => typeof v === 'number' && Number.isInteger(v))) {
+                    inferredTypes[header] = 'INTEGER';
+                } else if (sampleValues.every(v => typeof v === 'number')) {
+                    inferredTypes[header] = 'REAL';
+                } else if (sampleValues.every(v => typeof v === 'boolean')) {
+                    inferredTypes[header] = 'BOOLEAN';
+                } else {
+                    inferredTypes[header] = 'TEXT';
+                }
             }
-            
-            confirmMessage += `Columns: ${headers.join(', ')}\n\n`;
-            confirmMessage += `This will add ${rows.length} new record(s) to the table.`;
 
-            // Show confirmation dialog with import preview
-            const confirmImport = confirm(confirmMessage);
-            
-            if (!confirmImport) {
-                return;
-            }
+            // Show preview wizard instead of blocking confirm()
+            setCsvPreview({ headers, headerMapping, rows, inferredTypes, fileName: file.name });
+        } catch (error: any) {
+            console.error('CSV parse failed:', error);
+            addToast('CSV parse failed: ' + (error.message || 'Unknown error'), 'error');
+        }
+    };
+
+    const handleConfirmImport = async () => {
+        if (!csvPreview) return;
+        const { rows } = csvPreview;
+
+        try {
+            setImportProgress(true);
 
             // Batch insert
             const result = await rpc('batchInsert', { table: tableName, rows });
             
-            // Show success message
+            // Show success toast
             if (result && result.data) {
-                alert(`✓ Successfully imported ${result.data.inserted} of ${result.data.total} rows`);
+                addToast(`Successfully imported ${result.data.inserted} of ${result.data.total} rows`, 'success');
             } else {
-                alert(`✓ Successfully imported ${rows.length} rows`);
+                addToast(`Successfully imported ${rows.length} rows`, 'success');
             }
         } catch (error: any) {
             console.error('CSV import failed:', error);
-            alert('CSV import failed: ' + (error.message || 'Unknown error'));
+            addToast('CSV import failed: ' + (error.message || 'Unknown error'), 'error');
+        } finally {
+            setCsvPreview(null);
+            setImportProgress(false);
         }
     };
 
     const handleCSVExport = () => {
         if (!data || data.length === 0) {
-            alert('No data to export');
+            addToast('No data to export', 'error');
             return;
         }
 
@@ -426,7 +449,7 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
             URL.revokeObjectURL(url);
         } catch (error: any) {
             console.error('CSV export failed:', error);
-            alert('CSV export failed: ' + (error.message || 'Unknown error'));
+            addToast('CSV export failed: ' + (error.message || 'Unknown error'), 'error');
         }
     };
 
@@ -623,6 +646,110 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
                     <p className="text-sm text-slate-400 mb-6">
                         Start by adding your first record below or import a CSV file.
                     </p>
+                </div>
+            )}
+
+            {/* CSV Import Preview Wizard */}
+            {csvPreview && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                    <div className="bg-slate-900 border border-slate-700 rounded-lg max-w-3xl w-full max-h-[80vh] overflow-hidden flex flex-col">
+                        <div className="p-6 border-b border-slate-800 flex items-center justify-between">
+                            <div>
+                                <h2 className="text-xl font-bold text-white">Import CSV Preview</h2>
+                                <p className="text-sm text-slate-400 mt-1">
+                                    {csvPreview.fileName} — {csvPreview.rows.length} rows into "{tableName}"
+                                </p>
+                            </div>
+                            <button onClick={() => setCsvPreview(null)} className="p-1 hover:bg-slate-800 rounded transition-colors text-slate-400 hover:text-white">
+                                <X size={18} />
+                            </button>
+                        </div>
+                        
+                        <div className="p-6 overflow-y-auto flex-1 space-y-4">
+                            {/* Column mapping info */}
+                            {csvPreview.headerMapping.length > 0 && (
+                                <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                                    <p className="text-sm font-medium text-yellow-400 mb-2">Column names will be sanitized:</p>
+                                    <div className="space-y-1">
+                                        {csvPreview.headerMapping.map(({ original, sanitized }) => (
+                                            <p key={original} className="text-xs text-slate-300 font-mono">
+                                                "{original}" → "{sanitized}"
+                                            </p>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Schema summary */}
+                            <div>
+                                <p className="text-sm font-medium text-slate-300 mb-2">Columns & Inferred Types</p>
+                                <div className="flex flex-wrap gap-2">
+                                    {csvPreview.headers.map(h => (
+                                        <span key={h} className="text-xs font-mono text-slate-400 bg-slate-800 px-2 py-1 rounded border border-slate-700">
+                                            {h}: <span className="text-green-400">{csvPreview.inferredTypes[h]}</span>
+                                        </span>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* Data preview table */}
+                            <div>
+                                <p className="text-sm font-medium text-slate-300 mb-2">Data Preview (first 5 rows)</p>
+                                <div className="overflow-x-auto rounded border border-slate-700">
+                                    <table className="w-full text-left text-xs text-slate-400">
+                                        <thead className="bg-slate-800 text-slate-300 uppercase">
+                                            <tr>
+                                                {csvPreview.headers.map(h => (
+                                                    <th key={h} className="px-3 py-2 border-b border-slate-700">{h}</th>
+                                                ))}
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-800 bg-slate-900">
+                                            {csvPreview.rows.slice(0, 5).map((row, idx) => (
+                                                <tr key={idx}>
+                                                    {csvPreview.headers.map(h => (
+                                                        <td key={h} className="px-3 py-2 max-w-[200px] truncate">{String(row[h] ?? '')}</td>
+                                                    ))}
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                {csvPreview.rows.length > 5 && (
+                                    <p className="text-xs text-slate-500 mt-1">...and {csvPreview.rows.length - 5} more rows</p>
+                                )}
+                            </div>
+
+                            {/* Import progress */}
+                            {importProgress && (
+                                <div className="flex items-center gap-2">
+                                    <Loader2 size={16} className="animate-spin text-green-500" />
+                                    <span className="text-sm text-slate-300">Importing...</span>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="p-6 border-t border-slate-800 flex justify-end gap-3">
+                            <button
+                                onClick={() => setCsvPreview(null)}
+                                disabled={importProgress}
+                                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors disabled:opacity-50"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={handleConfirmImport}
+                                disabled={importProgress}
+                                className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center gap-2"
+                            >
+                                {importProgress ? (
+                                    <><Loader2 size={16} className="animate-spin" /> Importing...</>
+                                ) : (
+                                    <><Upload size={16} /> Import {csvPreview.rows.length} Rows</>
+                                )}
+                            </button>
+                        </div>
+                    </div>
                 </div>
             )}
         </div>

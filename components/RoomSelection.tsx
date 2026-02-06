@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { RoomCard } from './RoomCard';
 import { Plus, Loader2, AlertCircle } from 'lucide-react';
+import { ConfirmDialog } from './Modal';
 
 interface Room {
     id: string;
@@ -21,6 +22,7 @@ export const RoomSelection: React.FC<RoomSelectionProps> = ({ onSelectRoom }) =>
     const [creating, setCreating] = useState(false);
     const [newRoomId, setNewRoomId] = useState('');
     const [newRoomName, setNewRoomName] = useState('');
+    const [deleteConfirmRoom, setDeleteConfirmRoom] = useState<string | null>(null);
 
     useEffect(() => {
         loadRooms();
@@ -77,9 +79,13 @@ export const RoomSelection: React.FC<RoomSelectionProps> = ({ onSelectRoom }) =>
     };
 
     const handleDeleteRoom = async (roomId: string) => {
-        if (!confirm(`Are you sure you want to delete room "${roomId}"? This action cannot be undone.`)) {
-            return;
-        }
+        setDeleteConfirmRoom(roomId);
+    };
+
+    const confirmDeleteRoom = async () => {
+        if (!deleteConfirmRoom) return;
+        const roomId = deleteConfirmRoom;
+        setDeleteConfirmRoom(null);
 
         try {
             setError(null);
@@ -225,6 +231,16 @@ export const RoomSelection: React.FC<RoomSelectionProps> = ({ onSelectRoom }) =>
                     </div>
                 </div>
             )}
+
+            <ConfirmDialog
+                isOpen={!!deleteConfirmRoom}
+                onConfirm={confirmDeleteRoom}
+                onCancel={() => setDeleteConfirmRoom(null)}
+                title="Delete Database"
+                message={`Are you sure you want to delete room "${deleteConfirmRoom}"? This action cannot be undone.`}
+                confirmLabel="Delete"
+                confirmVariant="danger"
+            />
         </div>
     );
 };
