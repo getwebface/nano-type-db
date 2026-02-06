@@ -247,10 +247,9 @@ const ACTIONS = {
   scheduleCron: { params: ["name", "schedule", "rpcMethod", "rpcPayload?"] },
   listCronJobs: { params: [] },
   // Audit Log Export
-  exportAuditLog: { params: ["format?"] }
+  exportAuditLog: { params: ["format?"] },
   // Webhook Management
   createWebhook: { params: ["url", "events", "secret?"] },
-  listWebhooks: { params: [] },
   updateWebhook: { params: ["id", "url?", "events?", "active?"] },
   deleteWebhook: { params: ["id"] }
 };
@@ -1258,9 +1257,11 @@ export class NanoStore extends DurableObject {
                         // 1. Insert into DB (Primary operation - must succeed)
                         // Set vector_status to 'pending' initially (will be updated to 'indexed' or 'failed')
                         // RLS: owner_id is always set to authenticated userId, cannot be overridden
+                        // Store both owner_id and user_id for compatibility
                         const result = this.sql.exec(
-                            "INSERT INTO tasks (title, status, vector_status, owner_id) VALUES (?, 'pending', 'pending', ?) RETURNING *", 
+                            "INSERT INTO tasks (title, status, vector_status, owner_id, user_id) VALUES (?, 'pending', 'pending', ?, ?) RETURNING *", 
                             title,
+                            ownerId,
                             userId
                         ).toArray();
                         const newTask = result[0];
@@ -1286,13 +1287,8 @@ export class NanoStore extends DurableObject {
                                     this.sql.exec("UPDATE tasks SET vector_status = 'failed' WHERE id = ?", newTask.id);
                                 }
                             })());
-                        } else if (newTask && this.env.AI && this.env.VECTOR_INDEX) {
-                            // Fallback: Generate Embedding & Store (Secondary operation - best effort)
-                            // Vector Consistency: Track status in database to allow retry jobs
-                        // 3. Generate Embedding & Store (Secondary operation - best effort)
-                        // Vector Consistency: Track status in database to allow retry jobs
-                        // PRODUCTION FIX: Use Cloudflare Queue for reliable AI processing with retry
-                        if (newTask && this.env.EMBEDDING_QUEUE) {
+                        } else if (newTask && this.env.EMBEDDING_QUEUE) {
+                            // PRODUCTION FIX: Use Cloudflare Queue for reliable AI processing with retry
                             // Push embedding job to queue (will retry on failure with exponential backoff)
                             await this.env.EMBEDDING_QUEUE.send({
                                 taskId: newTask.id,
@@ -1671,11 +1667,10 @@ export class NanoStore extends DurableObject {
                      const query = "SELECT * FROM tasks ORDER BY id LIMIT ? OFFSET ?";
                      const params: any[] = [safeLimit, safeOffset];
                      
-                     const tasks = await this.readFromD1(query, ...params);
-                     
-                     // Apply RLS filtering (additional layer of security)
-                     const userId = request.headers.get("X-User-ID") || "anonymous";
-                     const filteredTasks = this.rlsEngine.filterRows('tasks', userId, tasks);
+                    const queriedTasks = await this.readFromD1(query, ...params);
+                    
+                    // Apply RLS filtering (additional layer of security)
+                    const filteredTasks = this.rlsEngine.filterRows('tasks', userId, queriedTasks);
                      // ROW LEVEL SECURITY: Filter tasks by user permissions
                      // First, check if user has explicit read permissions for tasks table
                      let hasReadPermission = false;
@@ -1691,19 +1686,15 @@ export class NanoStore extends DurableObject {
                          console.warn("Permission check failed:", e.message);
                      }
                      
-                     // Permission model:
-                     // - If user has explicit read permission (can_read = true), show ALL tasks in the room
-                     // - Otherwise, show only tasks created by this user (user_id filter)
-                     const tasks = hasReadPermission 
-                         ? await this.readFromD1("SELECT * FROM tasks ORDER BY id LIMIT ? OFFSET ?", safeLimit, safeOffset)
-                         : await this.readFromD1("SELECT * FROM tasks WHERE user_id = ? ORDER BY id LIMIT ? OFFSET ?", userId, safeLimit, safeOffset);
-                     
-                     webSocket.send(JSON.stringify({ 
-                         type: "query_result", 
-                         data: filteredTasks, 
-                         originalSql: "listTasks",
-                         pagination: { limit: safeLimit, offset: safeOffset }
-                     }));
+                    // Permission model:
+                    // - If user has explicit read permission (can_read = true), show ALL tasks in the room
+                    // - Otherwise, show only tasks created by this user (user_id filter)
+                    webSocket.send(JSON.stringify({ 
+                      type: "query_result", 
+                      data: filteredTasks, 
+                      originalSql: "listTasks",
+                      pagination: { limit: safeLimit, offset: safeOffset }
+                    }));
                      break;
                 }
 
