@@ -55,7 +55,6 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         maxAttempts: MAX_RECONNECT_ATTEMPTS,
         nextRetryAt: null
     });
-    const reconnectCountdownRef = useRef<NodeJS.Timeout | null>(null);
 
     // Connection quality metrics
     const [connectionQuality, setConnectionQuality] = useState<{ latency: number; pingsLost: number; totalPings: number }>({
@@ -115,17 +114,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
 
         addToast(`Connection lost. Reconnecting in ${Math.ceil(delay / 1000)}s (attempt ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})...`, 'info');
 
-        // Start countdown interval to update nextRetryAt for UI
-        if (reconnectCountdownRef.current) clearInterval(reconnectCountdownRef.current);
-        reconnectCountdownRef.current = setInterval(() => {
-            setReconnectInfo(prev => ({ ...prev, nextRetryAt: prev.nextRetryAt }));
-        }, 1000);
-
         reconnectTimeoutRef.current = setTimeout(() => {
-            if (reconnectCountdownRef.current) {
-                clearInterval(reconnectCountdownRef.current);
-                reconnectCountdownRef.current = null;
-            }
             setReconnectInfo(prev => ({ ...prev, nextRetryAt: null }));
             connectFn(roomId);
         }, delay);
@@ -140,10 +129,6 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         if (reconnectTimeoutRef.current) {
             clearTimeout(reconnectTimeoutRef.current);
             reconnectTimeoutRef.current = null;
-        }
-        if (reconnectCountdownRef.current) {
-            clearInterval(reconnectCountdownRef.current);
-            reconnectCountdownRef.current = null;
         }
 
         // Reset attempt counter for manual reconnect
@@ -261,7 +246,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                 wsLog('WebSocket connection timeout');
                 console.error('WebSocket connection timeout');
                 ws.close();
-                addToast('Connection timeout.', 'error');
+                addToast('Connection timeout. Reconnecting...', 'error');
                 setStatus('disconnected');
                 
                 // Attempt reconnection with exponential backoff
@@ -283,10 +268,6 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             reconnectAttemptsRef.current = 0;
             lastPongRef.current = Date.now();
             setReconnectInfo({ attempt: 0, maxAttempts: MAX_RECONNECT_ATTEMPTS, nextRetryAt: null });
-            if (reconnectCountdownRef.current) {
-                clearInterval(reconnectCountdownRef.current);
-                reconnectCountdownRef.current = null;
-            }
             
             setStatus('connected');
             setIsConnected(true);
@@ -851,10 +832,6 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             
             if (reconnectTimeoutRef.current) {
                 clearTimeout(reconnectTimeoutRef.current);
-            }
-            
-            if (reconnectCountdownRef.current) {
-                clearInterval(reconnectCountdownRef.current);
             }
             
             if (connectionTimeoutRef.current) {
