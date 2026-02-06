@@ -845,9 +845,14 @@ export class NanoStore extends DurableObject {
   }
 
   getSchema() {
-    const tables = this.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_%' ESCAPE '\\' AND name != 'sqlite_sequence'").toArray();
+    // Get all user tables (excluding system tables, but include _webhooks)
+    const tables = this.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name != 'sqlite_sequence'").toArray();
     const schema: Record<string, any[]> = {};
     for (const t of tables) {
+      // Include all user tables and explicitly allow _webhooks
+      if (t.name.startsWith('sqlite_') || (t.name.startsWith('_') && t.name !== '_webhooks')) {
+        continue; // Skip system tables except _webhooks
+      }
       const columns = this.sql.exec(`PRAGMA table_info("${t.name}")`).toArray();
       schema[t.name] = columns;
     }
