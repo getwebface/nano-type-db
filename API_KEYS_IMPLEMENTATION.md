@@ -164,7 +164,7 @@ Potential improvements for future iterations:
 3. **Key Expiration**: Optional expiration dates for keys
 4. **Audit Logging**: Detailed logs of API key usage
 5. **Key Rotation**: Automated key rotation capabilities
-6. **UI Improvements**: Replace native prompt/confirm with custom modals
+6. **UI Improvements**: ~~Replace native prompt/confirm with custom modals~~ ✅ Done
 7. **Usage Analytics**: Detailed usage statistics per key
 8. **IP Restrictions**: Allow keys to be restricted to specific IPs
 
@@ -174,7 +174,7 @@ The implementation received a code review with the following feedback:
 
 1. **last_used_at Update**: Uses `ctx.waitUntil()` which is best-effort. This is acceptable for usage tracking as it's not critical. A comment has been added to document this behavior.
 
-2. **Native Dialogs**: Uses browser `prompt()` and `confirm()` for key naming and deletion. While functional, these could be replaced with custom modals in a future UI polish iteration.
+2. **Native Dialogs**: ~~Uses browser `prompt()` and `confirm()` for key naming and deletion.~~ Replaced with React-based `PromptDialog` and `ConfirmDialog` modal components.
 
 3. **Security Scan**: CodeQL analysis found 0 security vulnerabilities.
 

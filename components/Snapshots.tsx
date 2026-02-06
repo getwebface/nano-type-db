@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Database, Download, RotateCcw, Loader2, Clock, HardDrive } from 'lucide-react';
+import { ConfirmDialog } from './Modal';
 
 interface Backup {
     key: string;
@@ -13,6 +14,7 @@ export const Snapshots: React.FC = () => {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [restoring, setRestoring] = useState<string | null>(null);
+    const [restoreConfirm, setRestoreConfirm] = useState<string | null>(null);
 
     // Get current room ID from URL params or localStorage
     const getRoomId = () => {
@@ -46,9 +48,13 @@ export const Snapshots: React.FC = () => {
     };
 
     const handleRestore = async (backupKey: string) => {
-        if (!confirm(`Are you sure you want to restore from backup ${backupKey}? This will replace all current data.`)) {
-            return;
-        }
+        setRestoreConfirm(backupKey);
+    };
+
+    const confirmRestore = async () => {
+        if (!restoreConfirm) return;
+        const backupKey = restoreConfirm;
+        setRestoreConfirm(null);
 
         setRestoring(backupKey);
         try {
@@ -65,10 +71,10 @@ export const Snapshots: React.FC = () => {
                 throw new Error(data.error || 'Restore failed');
             }
 
-            alert('Restore completed successfully. Refreshing page...');
+            setError(null);
             window.location.reload();
         } catch (err: any) {
-            alert(`Restore failed: ${err.message}`);
+            setError(`Restore failed: ${err.message}`);
             console.error('Failed to restore backup:', err);
         } finally {
             setRestoring(null);
@@ -177,6 +183,16 @@ export const Snapshots: React.FC = () => {
                     ))}
                 </div>
             )}
+
+            <ConfirmDialog
+                isOpen={!!restoreConfirm}
+                onConfirm={confirmRestore}
+                onCancel={() => setRestoreConfirm(null)}
+                title="Restore Backup"
+                message={`Are you sure you want to restore from backup ${restoreConfirm}? This will replace all current data.`}
+                confirmLabel="Restore"
+                confirmVariant="danger"
+            />
         </div>
     );
 };

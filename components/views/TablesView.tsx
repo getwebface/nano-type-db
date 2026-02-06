@@ -2,13 +2,15 @@ import React, { useState, useEffect } from 'react';
 import { useRealtimeQuery, useDatabase } from '../../hooks/useDatabase';
 import { DataGrid } from '../DataGrid';
 import { Table2, Plus, Trash2, Database } from 'lucide-react';
+import { ConfirmDialog } from '../Modal';
 
 export const TablesView: React.FC = () => {
-  const { schema, rpc } = useDatabase();
+  const { schema, rpc, addToast } = useDatabase();
   const [selectedTable, setSelectedTable] = useState<string>('');
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newTableName, setNewTableName] = useState('');
   const [newTableColumns, setNewTableColumns] = useState([{ name: 'name', type: 'TEXT', notNull: false }]);
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   
   useEffect(() => {
     if (schema) {
@@ -24,12 +26,12 @@ export const TablesView: React.FC = () => {
 
   const handleCreateTable = async () => {
     if (!newTableName.trim()) {
-      alert('Please enter a table name');
+      addToast('Please enter a table name', 'error');
       return;
     }
 
     if (newTableColumns.length === 0 || !newTableColumns[0].name) {
-      alert('Please add at least one column');
+      addToast('Please add at least one column', 'error');
       return;
     }
 
@@ -45,14 +47,18 @@ export const TablesView: React.FC = () => {
       setSelectedTable(newTableName);
     } catch (error) {
       console.error('Failed to create table:', error);
-      alert('Failed to create table: ' + (error as Error).message);
+      addToast('Failed to create table: ' + (error as Error).message, 'error');
     }
   };
 
   const handleDeleteTable = async (tableName: string) => {
-    if (!confirm(`Are you sure you want to delete the table "${tableName}"? This action cannot be undone.`)) {
-      return;
-    }
+    setDeleteConfirm(tableName);
+  };
+
+  const confirmDeleteTable = async () => {
+    if (!deleteConfirm) return;
+    const tableName = deleteConfirm;
+    setDeleteConfirm(null);
 
     try {
       await rpc('deleteTable', { tableName });
@@ -61,7 +67,7 @@ export const TablesView: React.FC = () => {
       }
     } catch (error) {
       console.error('Failed to delete table:', error);
-      alert('Failed to delete table: ' + (error as Error).message);
+      addToast('Failed to delete table: ' + (error as Error).message, 'error');
     }
   };
 
@@ -291,6 +297,17 @@ export const TablesView: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Delete Table Confirmation */}
+      <ConfirmDialog
+        isOpen={!!deleteConfirm}
+        onConfirm={confirmDeleteTable}
+        onCancel={() => setDeleteConfirm(null)}
+        title="Delete Table"
+        message={`Are you sure you want to delete the table "${deleteConfirm}"? This action cannot be undone.`}
+        confirmLabel="Delete"
+        confirmVariant="danger"
+      />
     </div>
   );
 };

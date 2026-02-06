@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Key, Copy, Plus, Trash, Check, Download, FileCode } from 'lucide-react';
+import { ConfirmDialog, PromptDialog } from './Modal';
 
 interface ApiKey {
     id: string;
@@ -24,6 +25,10 @@ export const ApiKeys: React.FC = () => {
     const [keys, setKeys] = useState<ApiKey[]>([]);
     const [loading, setLoading] = useState(false);
     const [copiedId, setCopiedId] = useState<string | null>(null);
+    const [errorMessage, setErrorMessage] = useState<string | null>(null);
+    const [showNamePrompt, setShowNamePrompt] = useState(false);
+    const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+    const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
     const fetchKeys = async () => {
         try {
@@ -43,11 +48,11 @@ export const ApiKeys: React.FC = () => {
             } else {
                 const errorData = await parseJsonResponse(res, 'Failed to fetch API keys');
                 console.error('Failed to fetch API keys:', errorData.error || res.statusText);
-                alert(`Error: ${errorData.error || 'Failed to fetch API keys'}`);
+                setErrorMessage(errorData.error || 'Failed to fetch API keys');
             }
         } catch (e) {
             console.error('Failed to fetch API keys', e);
-            alert('Network error: Failed to fetch API keys. Please check your connection.');
+            setErrorMessage('Network error: Failed to fetch API keys. Please check your connection.');
         }
     };
 
@@ -55,10 +60,7 @@ export const ApiKeys: React.FC = () => {
         fetchKeys();
     }, []);
 
-    const generateKey = async () => {
-        const name = prompt('Enter a name for this API key (e.g., "Production Website"):');
-        if (!name) return;
-
+    const generateKey = async (name: string) => {
         setLoading(true);
         try {
             const res = await fetch(`${HTTP_URL}/api/keys/generate`, {
@@ -74,24 +76,28 @@ export const ApiKeys: React.FC = () => {
                 await navigator.clipboard.writeText(newKey.id);
                 setCopiedId(newKey.id);
                 setTimeout(() => setCopiedId(null), 2000);
-                alert(`API key created successfully! The key has been copied to your clipboard.\n\nKey: ${newKey.id}\nExpires in: ${newKey.expires_in_days} days`);
+                setSuccessMessage(`API key created and copied to clipboard!\n\nKey: ${newKey.id}\nExpires in: ${newKey.expires_in_days} days`);
             } else {
                 const errorData = await parseJsonResponse(res, 'Failed to generate API key');
                 console.error('Failed to generate API key:', errorData.error || res.statusText);
-                alert(`Error: ${errorData.error || 'Failed to generate API key'}`);
+                setErrorMessage(errorData.error || 'Failed to generate API key');
             }
         } catch (e) {
             console.error('Failed to generate API key', e);
-            alert('Network error: Failed to generate API key. Please check your connection.');
+            setErrorMessage('Network error: Failed to generate API key. Please check your connection.');
         } finally {
             setLoading(false);
         }
     };
 
     const deleteKey = async (id: string) => {
-        if (!confirm('Are you sure you want to delete this API key? This action cannot be undone.')) {
-            return;
-        }
+        setDeleteConfirmId(id);
+    };
+
+    const confirmDeleteKey = async () => {
+        if (!deleteConfirmId) return;
+        const id = deleteConfirmId;
+        setDeleteConfirmId(null);
 
         try {
             const res = await fetch(`${HTTP_URL}/api/keys/delete`, {
@@ -101,17 +107,16 @@ export const ApiKeys: React.FC = () => {
             });
 
             if (res.ok) {
-                const data = await res.json();
                 setKeys(keys.filter(k => k.id !== id));
-                alert(data.message || 'API key deleted successfully');
+                setSuccessMessage('API key deleted successfully');
             } else {
                 const errorData = await parseJsonResponse(res, 'Failed to delete API key');
                 console.error('Failed to delete API key:', errorData.error || res.statusText);
-                alert(`Error: ${errorData.error || 'Failed to delete API key'}`);
+                setErrorMessage(errorData.error || 'Failed to delete API key');
             }
         } catch (e) {
             console.error('Failed to delete API key', e);
-            alert('Network error: Failed to delete API key. Please check your connection.');
+            setErrorMessage('Network error: Failed to delete API key. Please check your connection.');
         }
     };
 
@@ -195,7 +200,7 @@ export const ApiKeys: React.FC = () => {
                     </p>
                 </div>
                 <button 
-                    onClick={generateKey}
+                    onClick={() => setShowNamePrompt(true)}
                     disabled={loading}
                     className="bg-green-600 hover:bg-green-700 px-3 py-1.5 rounded text-sm font-bold flex gap-2 items-center disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
@@ -261,6 +266,42 @@ export const ApiKeys: React.FC = () => {
                 </div>
             )}
             </div>
+
+            {/* Error/Success banners */}
+            {errorMessage && (
+                <div className="p-4 bg-red-900/20 border border-red-500/50 rounded-lg flex items-center justify-between">
+                    <p className="text-sm text-red-400">{errorMessage}</p>
+                    <button onClick={() => setErrorMessage(null)} className="text-red-400 hover:text-white text-xs ml-4">Dismiss</button>
+                </div>
+            )}
+            {successMessage && (
+                <div className="p-4 bg-green-900/20 border border-green-500/50 rounded-lg flex items-center justify-between">
+                    <p className="text-sm text-green-400 whitespace-pre-wrap">{successMessage}</p>
+                    <button onClick={() => setSuccessMessage(null)} className="text-green-400 hover:text-white text-xs ml-4">Dismiss</button>
+                </div>
+            )}
+
+            {/* Prompt for API key name */}
+            <PromptDialog
+                isOpen={showNamePrompt}
+                onConfirm={(name) => { setShowNamePrompt(false); generateKey(name); }}
+                onCancel={() => setShowNamePrompt(false)}
+                title="Create API Key"
+                message='Enter a name for this API key:'
+                placeholder='e.g., "Production Website"'
+                confirmLabel="Generate Key"
+            />
+
+            {/* Delete confirmation */}
+            <ConfirmDialog
+                isOpen={!!deleteConfirmId}
+                onConfirm={confirmDeleteKey}
+                onCancel={() => setDeleteConfirmId(null)}
+                title="Delete API Key"
+                message="Are you sure you want to delete this API key? This action cannot be undone."
+                confirmLabel="Delete"
+                confirmVariant="danger"
+            />
         </div>
     );
 };

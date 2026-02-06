@@ -44,6 +44,7 @@ export interface DatabaseContextType {
     subscribe: (table: string) => void;
     lastResult: QueryResult | null;
     toasts: ToastMessage[];
+    addToast: (message: string, type?: 'success' | 'info' | 'error') => void;
     schema: Schema | null;
     refreshSchema: () => void;
     usageStats: UsageStat[];

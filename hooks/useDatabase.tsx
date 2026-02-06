@@ -657,9 +657,9 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                         // Remove the listener
                         socket.removeEventListener('message', handleResponse);
                         
-                        if (response.type === 'query_result' || response.type === 'rpc_result') {
+                        if (response.type === 'query_result' || response.type === 'rpc_result' || response.type === 'mutation_success') {
                             resolve(response);
-                        } else if (response.type === 'error' || response.type === 'rpc_error') {
+                        } else if (response.type === 'error' || response.type === 'rpc_error' || response.type === 'mutation_error') {
                             reject(new Error(response.error || 'RPC call failed'));
                         }
                     }
@@ -759,7 +759,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     }, []); // Empty dependency array ensures this only runs on unmount
 
     return (
-        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, performMutation, runReactiveQuery, rpc, socket, setCursor, setPresence, getPsychicData }}>
+        <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, addToast, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, performMutation, runReactiveQuery, rpc, socket, setCursor, setPresence, getPsychicData }}>
             {children}
         </DatabaseContext.Provider>
     );
