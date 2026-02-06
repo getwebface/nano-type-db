@@ -268,6 +268,18 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                 return;
             }
 
+            // Handle schema_update message for reactive schema changes
+            if (data.type === 'schema_update') {
+                console.log('📊 Schema Update - Refreshing schema');
+                if (data.schema) {
+                    setSchema(data.schema);
+                } else {
+                    // Fallback: fetch schema from HTTP endpoint
+                    refreshSchema();
+                }
+                return;
+            }
+
             if (data.type === 'query_result') {
                 if (data.originalSql === 'getUsage') {
                     setUsageStats(data.data);
@@ -775,14 +787,20 @@ export const useRealtimeQuery = (tableName: string) => {
         if (isConnected && tableName && socket && socket.readyState === WebSocket.OPEN) {
             subscribe(tableName);
             
-            // Use RPC method instead of raw SQL
+            // Use RPC methods instead of raw SQL
             if (tableName === 'tasks') {
                 socket.send(JSON.stringify({ 
                     action: 'rpc', 
                     method: 'listTasks' 
                 }));
+            } else if (tableName === '_webhooks') {
+                // FIX: Use specific RPC for webhooks to avoid "Rejected raw SQL" error
+                socket.send(JSON.stringify({ 
+                    action: 'rpc', 
+                    method: 'listWebhooks' 
+                }));
             } else {
-                // For other tables, use a generic query (if needed in the future)
+                // For other tables, use a generic query
                 runQuery(`SELECT * FROM ${tableName}`, tableName);
             }
         }
