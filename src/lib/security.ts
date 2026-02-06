@@ -571,3 +571,95 @@ export class MemoryTracker {
     this.currentSize = 0;
   }
 }
+
+/**
+ * PRODUCTION: Structured Logger for Observability
+ * Provides consistent, parseable JSON logging for production monitoring
+ */
+export class StructuredLogger {
+  private context: Record<string, any>;
+
+  constructor(context: Record<string, any> = {}) {
+    this.context = context;
+  }
+
+  /**
+   * Log informational message
+   */
+  info(message: string, metadata: Record<string, any> = {}): void {
+    console.log(JSON.stringify({
+      level: 'info',
+      message,
+      ...this.context,
+      ...metadata,
+      timestamp: new Date().toISOString()
+    }));
+  }
+
+  /**
+   * Log warning message
+   */
+  warn(message: string, metadata: Record<string, any> = {}): void {
+    console.warn(JSON.stringify({
+      level: 'warn',
+      message,
+      ...this.context,
+      ...metadata,
+      timestamp: new Date().toISOString()
+    }));
+  }
+
+  /**
+   * Log error message
+   */
+  error(message: string, error?: Error | unknown, metadata: Record<string, any> = {}): void {
+    console.error(JSON.stringify({
+      level: 'error',
+      message,
+      error: error instanceof Error ? {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+      } : String(error),
+      ...this.context,
+      ...metadata,
+      timestamp: new Date().toISOString()
+    }));
+  }
+
+  /**
+   * Log security audit event (authentication, authorization, API key usage)
+   */
+  audit(action: string, userId: string, metadata: Record<string, any> = {}): void {
+    console.log(JSON.stringify({
+      level: 'audit',
+      action,
+      userId,
+      ...this.context,
+      ...metadata,
+      timestamp: new Date().toISOString()
+    }));
+  }
+
+  /**
+   * Log performance metric
+   */
+  metric(name: string, value: number, unit: string = 'ms', metadata: Record<string, any> = {}): void {
+    console.log(JSON.stringify({
+      level: 'metric',
+      metric: name,
+      value,
+      unit,
+      ...this.context,
+      ...metadata,
+      timestamp: new Date().toISOString()
+    }));
+  }
+
+  /**
+   * Create child logger with additional context
+   */
+  child(additionalContext: Record<string, any>): StructuredLogger {
+    return new StructuredLogger({ ...this.context, ...additionalContext });
+  }
+}

@@ -5,7 +5,8 @@ import {
   RateLimiter, 
   InputValidator, 
   QueryTimeout,
-  MemoryTracker 
+  MemoryTracker,
+  StructuredLogger
 } from "./lib/security";
 import { generateTypeSafeClient } from "./client-generator";
 // `node:fs` is not available in Cloudflare Workers; file-system backups
@@ -418,6 +419,8 @@ export class NanoStore extends DurableObject {
   rlsEngine: RLSPolicyEngine;
   // Automatic Reactivity: Track queries per WebSocket for auto-refresh
   querySubscriptions: WeakMap<WebSocket, Map<string, { method: string; payload: any; tables: string[] }>>;
+  // PRODUCTION: Structured logger for observability
+  logger: StructuredLogger;
   
   // SECURITY: Configuration constants
   private static readonly MAX_SUBSCRIBERS_PER_TABLE = 10000;
@@ -430,6 +433,9 @@ export class NanoStore extends DurableObject {
     this.sql = ctx.storage.sql;
     this.subscribers = new Map();
     this.doId = ctx.id.toString();
+    
+    // PRODUCTION: Initialize structured logger with context
+    this.logger = new StructuredLogger({ doId: this.doId });
     
     // Initialize Memory Store for transient data
     this.memoryStore = new MemoryStore();
@@ -464,7 +470,7 @@ export class NanoStore extends DurableObject {
           const valueSize = JSON.stringify(value).length;
           this.memoryTracker.remove(valueSize);
         } catch (e) {
-          console.error(`Failed to flush debounced write for key ${key}:`, e);
+          this.logger.error('Failed to flush debounced write', e, { key });
         }
       }
     });
@@ -484,7 +490,7 @@ export class NanoStore extends DurableObject {
     // The DO can serve requests before initial sync completes.
     // For stricter consistency, use ctx.blockConcurrencyWhile() in production.
     this.performInitialSync().catch(e => {
-      console.error("[Sync Engine] Initial sync failed:", e);
+      this.logger.error('Initial sync failed', e);
     });
   }
 
@@ -2412,8 +2418,31 @@ export class NanoStore extends DurableObject {
   }
 
   webSocketClose(webSocket: WebSocket, code: number, reason: string, wasClean: boolean) {
-    console.log("WebSocket closed:", code, reason);
+    console.log(JSON.stringify({
+      type: 'websocket_close',
+      code,
+      reason,
+      wasClean,
+      timestamp: new Date().toISOString()
+    }));
+    
+    // Remove from all table subscriptions
     this.subscribers.forEach((set) => set.delete(webSocket));
+    
+    // Cleanup query subscriptions for automatic reactivity
+    if (this.querySubscriptions.has(webSocket)) {
+      this.querySubscriptions.delete(webSocket);
+    }
+    
+    // Cleanup user ID tracking
+    if (this.webSocketUserIds.has(webSocket)) {
+      this.webSocketUserIds.delete(webSocket);
+    }
+    
+    // Cleanup psychic cache
+    if (this.psychicSentCache.has(webSocket)) {
+      this.psychicSentCache.delete(webSocket);
+    }
     
     // Cleanup semantic subscriptions for this WebSocket to prevent memory leaks
     const keysToDelete: string[] = [];
@@ -2429,13 +2458,51 @@ export class NanoStore extends DurableObject {
     // Delete the subscriptions
     keysToDelete.forEach(key => {
       this.memoryStore.delete(key);
-      console.log(`Cleaned up semantic subscription: ${key}`);
+      console.log(JSON.stringify({
+        type: 'cleanup',
+        action: 'semantic_subscription_removed',
+        key,
+        timestamp: new Date().toISOString()
+      }));
     });
   }
 
   webSocketError(webSocket: WebSocket, error: unknown) {
-    console.error("WebSocket error:", error);
+    console.error(JSON.stringify({
+      type: 'websocket_error',
+      error: error instanceof Error ? error.message : String(error),
+      timestamp: new Date().toISOString()
+    }));
+    
+    // Remove from all table subscriptions
     this.subscribers.forEach((set) => set.delete(webSocket));
+    
+    // Cleanup query subscriptions
+    if (this.querySubscriptions.has(webSocket)) {
+      this.querySubscriptions.delete(webSocket);
+    }
+    
+    // Cleanup user ID tracking
+    if (this.webSocketUserIds.has(webSocket)) {
+      this.webSocketUserIds.delete(webSocket);
+    }
+    
+    // Cleanup psychic cache
+    if (this.psychicSentCache.has(webSocket)) {
+      this.psychicSentCache.delete(webSocket);
+    }
+    
+    // Cleanup semantic subscriptions
+    const keysToDelete: string[] = [];
+    for (const key of this.memoryStore.keys()) {
+      if (key.startsWith('semantic_sub:')) {
+        const subscription = this.memoryStore.get(key);
+        if (subscription && subscription.socket === webSocket) {
+          keysToDelete.push(key);
+        }
+      }
+    }
+    keysToDelete.forEach(key => this.memoryStore.delete(key));
   }
 
   getPrimaryKey(tableName: string): string {
@@ -2659,5 +2726,90 @@ export class NanoStore extends DurableObject {
         }
       }
     });
+  }
+
+  /**
+   * PRODUCTION: Graceful shutdown and resource cleanup
+   * Flushes pending writes and cleans up resources
+   * Called during error recovery or explicit shutdown
+   */
+  async gracefulShutdown(): Promise<void> {
+    console.log(JSON.stringify({
+      type: 'shutdown',
+      action: 'starting_graceful_shutdown',
+      timestamp: new Date().toISOString()
+    }));
+
+    try {
+      // 1. Flush debounced writes to SQLite
+      if (this.debouncedWriter) {
+        this.debouncedWriter.destroy();
+        console.log(JSON.stringify({
+          type: 'shutdown',
+          action: 'debounced_writer_flushed',
+          timestamp: new Date().toISOString()
+        }));
+      }
+
+      // 2. Close all WebSocket connections gracefully
+      const closedCount = this.closeAllWebSockets();
+      console.log(JSON.stringify({
+        type: 'shutdown',
+        action: 'websockets_closed',
+        count: closedCount,
+        timestamp: new Date().toISOString()
+      }));
+
+      // 3. Cleanup rate limiters
+      this.cleanupRateLimiters();
+
+      // 4. Clear memory store (cursors, presence, etc.)
+      this.memoryStore.clear();
+
+      console.log(JSON.stringify({
+        type: 'shutdown',
+        action: 'graceful_shutdown_complete',
+        timestamp: new Date().toISOString()
+      }));
+    } catch (e) {
+      console.error(JSON.stringify({
+        type: 'shutdown_error',
+        error: e instanceof Error ? e.message : String(e),
+        timestamp: new Date().toISOString()
+      }));
+    }
+  }
+
+  /**
+   * Close all WebSocket connections
+   * Returns the number of connections closed
+   */
+  private closeAllWebSockets(): number {
+    let count = 0;
+    this.subscribers.forEach((sockets) => {
+      for (const socket of sockets) {
+        try {
+          // Only close sockets that are in OPEN state
+          // CONNECTING state will throw an error if we try to close
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.close(1001, 'Server shutdown');
+            count++;
+          } else if (socket.readyState === WebSocket.CONNECTING) {
+            // For CONNECTING sockets, just remove them from tracking
+            // They will timeout naturally or close when connection is established
+            this.logger.warn('WebSocket still connecting during shutdown - will timeout', {
+              readyState: socket.readyState
+            });
+          }
+        } catch (e) {
+          this.logger.error('Failed to close WebSocket', e, {
+            readyState: socket.readyState
+          });
+        }
+      }
+      sockets.clear();
+    });
+    this.subscribers.clear();
+    return count;
   }
 }
