@@ -1014,9 +1014,14 @@ export class NanoStore extends DurableObject {
         };
         
         for (const tableRow of tables) {
-          const tableName = tableRow.name as string;
+          const tableName = this.sanitizeIdentifier(tableRow.name as string);
           
-          // Get table schema
+          if (!tableName) {
+            console.warn(`Skipping invalid table name: ${tableRow.name}`);
+            continue;
+          }
+          
+          // Get table schema - safe to use quoted identifier after sanitization
           const schemaInfo = this.sql.exec(`PRAGMA table_info("${tableName}")`).toArray();
           backup.schema[tableName] = schemaInfo;
           
@@ -2946,13 +2951,11 @@ export class NanoStore extends DurableObject {
                             }
                         }
                         
-                        // Create the prompt for the AI
+                        // Create the system prompt for the AI
                         const systemPrompt = schemaContext + 
                             "\nYou help users understand their database, explore tables, and answer questions about their data. " +
                             "Provide helpful, concise responses about the schema, data structure, and general database concepts. " +
                             "If the user asks about specific data, suggest they use the query or search features.";
-                        
-                        const fullPrompt = `${systemPrompt}\n\nUser: ${message}\n\nAssistant:`;
                         
                         // Call Workers AI (Llama 3)
                         const response = await this.env.AI.run('@cf/meta/llama-3-8b-instruct', {

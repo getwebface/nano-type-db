@@ -49,6 +49,8 @@ export const ChatDatabase: React.FC = () => {
     try {
       // Use the real AI-powered chat functionality
       // Get WebSocket connection from useDatabase hook
+      // NOTE: Using global window.__nanotype_ws follows existing pattern in codebase
+      // Future improvement: migrate to Context API for type-safe WebSocket access
       const ws = (window as any).__nanotype_ws;
       
       if (!ws || ws.readyState !== WebSocket.OPEN) {
