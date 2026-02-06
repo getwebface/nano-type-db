@@ -213,10 +213,10 @@ class RLSPolicyEngine {
 // 1. Define the Manifest explicitly
 // Added 'search' to actions
 const ACTIONS = {
-  createTask: { params: ["title", "owner_id?"] }, // Added owner_id for RLS
+  createTask: { params: ["title"] }, // RLS: owner_id always derived from authenticated user
   completeTask: { params: ["id"] },
   deleteTask: { params: ["id"] },
-  listTasks: { params: ["limit?", "offset?", "owner_id?"] }, // Added owner_id for RLS filtering
+  listTasks: { params: ["limit?", "offset?"] }, // RLS: filtering enforced server-side
   search: { params: ["query"] },
   getUsage: { params: [] },
   getAuditLog: { params: [] },
@@ -239,7 +239,7 @@ const ACTIONS = {
   streamIntent: { params: ["text"] },
   // File Storage (R2 Integration)
   getUploadUrl: { params: ["filename", "contentType"] },
-  listFiles: { params: ["owner_id?"] },
+  listFiles: { params: [] }, // RLS: filtering enforced server-side
   // Webhooks
   registerWebhook: { params: ["url", "event", "headers?"] },
   listWebhooks: { params: [] },
@@ -1254,11 +1254,9 @@ export class NanoStore extends DurableObject {
                         
                         this.logAction(method, data.payload);
                         
-                        // RLS: Get owner_id from payload (for user ownership)
-                        const ownerId = data.payload?.owner_id || userId;
-                        
                         // 1. Insert into DB (Primary operation - must succeed)
                         // Set vector_status to 'pending' initially (will be updated to 'indexed' or 'failed')
+                        // RLS: owner_id is always set to authenticated userId, cannot be overridden
                         // Store both owner_id and user_id for compatibility
                         const result = this.sql.exec(
                             "INSERT INTO tasks (title, status, vector_status, owner_id, user_id) VALUES (?, 'pending', 'pending', ?, ?) RETURNING *", 
@@ -1656,7 +1654,6 @@ export class NanoStore extends DurableObject {
                      // Support pagination to avoid loading large datasets (max 1000 per page)
                      const limitRaw = data.payload?.limit;
                      const offsetRaw = data.payload?.offset;
-                     const ownerIdFilter = data.payload?.owner_id; // RLS filter
                      
                      // Parse and validate pagination parameters (could be strings from payload)
                      const limit = limitRaw ? parseInt(String(limitRaw), 10) : 100; // Default 100 rows
@@ -1666,17 +1663,9 @@ export class NanoStore extends DurableObject {
                      const safeLimit = Math.min(Math.max(1, limit), 1000); // Between 1-1000
                      const safeOffset = Math.max(0, offset); // Non-negative
                      
-                     // Build query with RLS filtering
-                     let query = "SELECT * FROM tasks";
-                     const params: any[] = [];
-                     
-                     if (ownerIdFilter) {
-                         query += " WHERE owner_id = ?";
-                         params.push(ownerIdFilter);
-                     }
-                     
-                     query += " ORDER BY id LIMIT ? OFFSET ?";
-                     params.push(safeLimit, safeOffset);
+                     // RLS: Query all tasks, filtering will be applied by RLS engine
+                     const query = "SELECT * FROM tasks ORDER BY id LIMIT ? OFFSET ?";
+                     const params: any[] = [safeLimit, safeOffset];
                      
                     const queriedTasks = await this.readFromD1(query, ...params);
                     
