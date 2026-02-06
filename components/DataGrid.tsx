@@ -217,7 +217,7 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
         inferredTypes: Record<string, string>;
         fileName: string;
     } | null>(null);
-    const [importProgress, setImportProgress] = useState<{ inserted: number; total: number } | null>(null);
+    const [importProgress, setImportProgress] = useState(false);
 
     const handleCellUpdate = async (rowId: any, field: string, value: any) => {
         try {
@@ -381,7 +381,7 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
         const { rows } = csvPreview;
 
         try {
-            setImportProgress({ inserted: 0, total: rows.length });
+            setImportProgress(true);
 
             // Batch insert
             const result = await rpc('batchInsert', { table: tableName, rows });
@@ -397,7 +397,7 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
             addToast('CSV import failed: ' + (error.message || 'Unknown error'), 'error');
         } finally {
             setCsvPreview(null);
-            setImportProgress(null);
+            setImportProgress(false);
         }
     };
 
@@ -722,19 +722,9 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
 
                             {/* Import progress */}
                             {importProgress && (
-                                <div className="space-y-2">
-                                    <div className="flex items-center gap-2">
-                                        <Loader2 size={16} className="animate-spin text-green-500" />
-                                        <span className="text-sm text-slate-300">
-                                            Importing... {importProgress.inserted} / {importProgress.total}
-                                        </span>
-                                    </div>
-                                    <div className="w-full bg-slate-800 rounded-full h-2">
-                                        <div
-                                            className="bg-green-500 h-2 rounded-full transition-all"
-                                            style={{ width: `${Math.round((importProgress.inserted / importProgress.total) * 100)}%` }}
-                                        />
-                                    </div>
+                                <div className="flex items-center gap-2">
+                                    <Loader2 size={16} className="animate-spin text-green-500" />
+                                    <span className="text-sm text-slate-300">Importing...</span>
                                 </div>
                             )}
                         </div>
@@ -742,14 +732,14 @@ export const DataGrid: React.FC<DataGridProps> = ({ data, isLoading = false, tab
                         <div className="p-6 border-t border-slate-800 flex justify-end gap-3">
                             <button
                                 onClick={() => setCsvPreview(null)}
-                                disabled={!!importProgress}
+                                disabled={importProgress}
                                 className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors disabled:opacity-50"
                             >
                                 Cancel
                             </button>
                             <button
                                 onClick={handleConfirmImport}
-                                disabled={!!importProgress}
+                                disabled={importProgress}
                                 className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center gap-2"
                             >
                                 {importProgress ? (

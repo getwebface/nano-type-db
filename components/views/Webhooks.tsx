@@ -104,27 +104,26 @@ export const WebhooksView: React.FC = () => {
       <div className="flex-1 overflow-auto p-8 bg-slate-900">
         {schema && schema['_webhooks'] ? (
           <>
-            {/* Secret visibility toggle hints */}
             {webhooksData && webhooksData.length > 0 && webhooksData.some((r: any) => r.secret) && (
-              <div className="mb-4 flex items-center gap-2 text-xs text-slate-500">
-                <EyeOff size={14} />
-                <span>Secrets are hidden. Click the eye icon on a row to reveal.</span>
-              </div>
-            )}
-            {webhooksData && webhooksData.length > 0 && (
-              <div className="mb-4 flex flex-wrap gap-2">
-                {webhooksData.map((_: any, idx: number) => (
-                  webhooksData[idx]?.secret ? (
-                    <button
-                      key={idx}
-                      onClick={() => toggleSecretVisibility(idx)}
-                      className="text-xs text-slate-400 hover:text-white flex items-center gap-1 bg-slate-800 px-2 py-1 rounded border border-slate-700"
-                    >
-                      {showSecrets.has(idx) ? <EyeOff size={12} /> : <Eye size={12} />}
-                      Row {idx + 1} secret
-                    </button>
-                  ) : null
-                ))}
+              <div className="mb-4 space-y-2">
+                <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <EyeOff size={14} />
+                  <span>Secrets are hidden. Click to reveal.</span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {webhooksData.map((_: any, idx: number) => (
+                    webhooksData[idx]?.secret ? (
+                      <button
+                        key={idx}
+                        onClick={() => toggleSecretVisibility(idx)}
+                        className="text-xs text-slate-400 hover:text-white flex items-center gap-1 bg-slate-800 px-2 py-1 rounded border border-slate-700"
+                      >
+                        {showSecrets.has(idx) ? <EyeOff size={12} /> : <Eye size={12} />}
+                        Row {idx + 1} secret
+                      </button>
+                    ) : null
+                  ))}
+                </div>
               </div>
             )}
             <DataGrid 

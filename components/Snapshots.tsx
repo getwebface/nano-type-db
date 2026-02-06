@@ -71,7 +71,6 @@ export const Snapshots: React.FC = () => {
                 throw new Error(data.error || 'Restore failed');
             }
 
-            setError(null);
             window.location.reload();
         } catch (err: any) {
             setError(`Restore failed: ${err.message}`);
