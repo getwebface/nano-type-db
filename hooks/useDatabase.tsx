@@ -631,12 +631,17 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             }
             
             // Create a one-time listener for the response
+            let timeoutId: ReturnType<typeof setTimeout> | null = null;
+            
             const handleResponse = (event: MessageEvent) => {
                 try {
                     const response = JSON.parse(event.data);
                     
                     // Check if this response is for our request
                     if (response.requestId === requestId) {
+                        // Clear the timeout
+                        clearTimeout(timeoutId);
+                        
                         // Remove the listener
                         socket.removeEventListener('message', handleResponse);
                         
@@ -662,6 +667,9 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                 requestId
             }));
             
+            // Timeout after 10 seconds
+            timeoutId = setTimeout(() => {
+                timeoutId = null;
             // Timeout configuration: longer for batch operations
             const timeout = method === 'batchInsert' ? 60000 : 10000; // 60s for batch, 10s for others
             setTimeout(() => {
