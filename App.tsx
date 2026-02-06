@@ -10,7 +10,7 @@ import { LogOut, Settings } from 'lucide-react';
 
 type AppView = 'rooms' | 'settings' | 'shell';
 
-const ConnectionScreen: React.FC = () => {
+const ConnectionScreen: React.FC<{ userTier: string }> = ({ userTier }) => {
     const { connect, isConnected } = useDatabase();
     const [currentView, setCurrentView] = useState<AppView>('rooms');
     const [selectedRoom, setSelectedRoom] = useState<string>('');
@@ -27,7 +27,7 @@ const ConnectionScreen: React.FC = () => {
     };
 
     if (isConnected && selectedRoom) {
-        return <ProjectLayout roomId={selectedRoom} />;
+        return <ProjectLayout roomId={selectedRoom} userTier={userTier} />;
     }
 
     if (currentView === 'settings') {
@@ -95,7 +95,7 @@ function App() {
     return (
         <DatabaseProvider psychic={isPro}>
             <Toaster />
-            <ConnectionScreen />
+            <ConnectionScreen userTier={userTier} />
         </DatabaseProvider>
     );
 }

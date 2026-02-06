@@ -10,7 +10,7 @@ import { ProjectSettings } from '../views/ProjectSettings';
 
 type ViewState = 'overview' | 'data' | 'sql' | 'webhooks' | 'settings';
 
-export const ProjectLayout: React.FC<{ roomId: string; onExit?: () => void }> = ({ roomId, onExit }) => {
+export const ProjectLayout: React.FC<{ roomId: string; onExit?: () => void; userTier?: string }> = ({ roomId, onExit, userTier }) => {
   const [currentView, setCurrentView] = useState<ViewState>('overview');
   const { status, usageStats, rpc } = useDatabase();
   const [presenceData, setPresenceData] = useState<any[]>([]);
@@ -60,6 +60,7 @@ export const ProjectLayout: React.FC<{ roomId: string; onExit?: () => void }> = 
           status={status} 
           presenceData={presenceData}
           onExit={onExit}
+          userTier={userTier}
         />
         
         <div className="flex-1 overflow-hidden">
