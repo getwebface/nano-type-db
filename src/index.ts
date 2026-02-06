@@ -9,6 +9,25 @@ const assetManifest = JSON.parse(manifestJSON);
 
 export { NanoStore, NanoStore as DataStore };
 
+// =========================================================================
+// CONSTANTS
+// =========================================================================
+
+// API Key Management
+const MAX_API_KEY_EXPIRATION_DAYS = 365;
+const DEFAULT_API_KEY_EXPIRATION_DAYS = 90;
+const MAX_API_KEYS_PAGE_SIZE = 100;
+const DEFAULT_API_KEYS_PAGE_SIZE = 100;
+
+// Webhook Management
+const WEBHOOK_SECRET_PREFIX = 'whsec_';
+const WEBHOOK_EVENT_PATTERN = /^(\*|[a-zA-Z0-9_]+\.\*|\*\.[a-zA-Z0-9_]+|[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+)(,(\*|[a-zA-Z0-9_]+\.\*|\*\.[a-zA-Z0-9_]+|[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+))*$/;
+
+// Utility function to generate secure webhook secret
+function generateWebhookSecret(): string {
+  return `${WEBHOOK_SECRET_PREFIX}${crypto.randomUUID().replace(/-/g, '')}`;
+}
+
 /**
  * PRODUCTION: Environment variable validation
  * Validates that all required bindings and configuration are present
@@ -234,7 +253,8 @@ export default {
         // SECURITY: Sanitize key name using InputValidator
         let keyName: string;
         try {
-            keyName = InputValidator.sanitizeString(body.name || "Unnamed Key", 100, false) || "Unnamed Key";
+            const sanitized = InputValidator.sanitizeString(body.name || "Unnamed Key", 100, false);
+            keyName = sanitized && sanitized.length > 0 ? sanitized : "Unnamed Key";
         } catch (e: any) {
             return SecurityHeaders.apply(
                 new Response(JSON.stringify({ error: `Invalid key name: ${e.message}` }), { 
@@ -249,7 +269,7 @@ export default {
         
         // SECURITY: Validate and set expiration date
         // Ensure expiresInDays is positive (default: 90 days, max: 365 days)
-        let expiresInDays = 90; // default
+        let expiresInDays = DEFAULT_API_KEY_EXPIRATION_DAYS;
         if (body.expiresInDays !== undefined) {
             const daysInput = Number(body.expiresInDays);
             if (isNaN(daysInput) || daysInput <= 0) {
@@ -260,9 +280,9 @@ export default {
                     })
                 );
             }
-            if (daysInput > 365) {
+            if (daysInput > MAX_API_KEY_EXPIRATION_DAYS) {
                 return SecurityHeaders.apply(
-                    new Response(JSON.stringify({ error: "expiresInDays cannot exceed 365 days" }), { 
+                    new Response(JSON.stringify({ error: `expiresInDays cannot exceed ${MAX_API_KEY_EXPIRATION_DAYS} days` }), { 
                         status: 400,
                         headers: { 'Content-Type': 'application/json' }
                     })
@@ -373,7 +393,7 @@ export default {
         try {
             // Get pagination parameters from query string
             const includeExpired = url.searchParams.get('includeExpired') === 'true';
-            const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10), 100);
+            const limit = Math.min(parseInt(url.searchParams.get('limit') || String(DEFAULT_API_KEYS_PAGE_SIZE), 10), MAX_API_KEYS_PAGE_SIZE);
             const offset = parseInt(url.searchParams.get('offset') || '0', 10);
 
             // Build query based on filters
@@ -641,8 +661,7 @@ export default {
         const events = InputValidator.sanitizeString(body.events || '*', 200, false) || '*';
         
         // Validate event pattern
-        const validEventPattern = /^(\*|[a-zA-Z0-9_]+\.\*|\*\.[a-zA-Z0-9_]+|[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+)(,(\*|[a-zA-Z0-9_]+\.\*|\*\.[a-zA-Z0-9_]+|[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+))*$/;
-        if (!validEventPattern.test(events)) {
+        if (!WEBHOOK_EVENT_PATTERN.test(events)) {
             return SecurityHeaders.apply(
                 new Response(JSON.stringify({ 
                     error: "Invalid event pattern. Use formats like: *, table.*, *.action, or table.action" 
@@ -657,7 +676,7 @@ export default {
         let secret = body.secret;
         if (!secret || typeof secret !== 'string' || secret.trim().length === 0) {
             // Generate a secure random secret if not provided
-            secret = `whsec_${crypto.randomUUID().replace(/-/g, '')}`;
+            secret = generateWebhookSecret();
         } else {
             // Validate provided secret
             secret = InputValidator.sanitizeString(secret, 200, false);
@@ -854,8 +873,7 @@ export default {
 
         // Validate events if provided
         if (body.events) {
-            const validEventPattern = /^(\*|[a-zA-Z0-9_]+\.\*|\*\.[a-zA-Z0-9_]+|[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+)(,(\*|[a-zA-Z0-9_]+\.\*|\*\.[a-zA-Z0-9_]+|[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+))*$/;
-            if (!validEventPattern.test(body.events)) {
+            if (!WEBHOOK_EVENT_PATTERN.test(body.events)) {
                 return SecurityHeaders.apply(
                     new Response(JSON.stringify({ 
                         error: "Invalid event pattern. Use formats like: *, table.*, *.action, or table.action" 

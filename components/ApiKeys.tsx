@@ -11,6 +11,15 @@ interface ApiKey {
 
 const HTTP_URL = `${window.location.protocol}//${window.location.host}`;
 
+// Helper function to parse JSON response with fallback
+const parseJsonResponse = async (res: Response, defaultError: string = 'An error occurred') => {
+    try {
+        return await res.json();
+    } catch {
+        return { error: defaultError };
+    }
+};
+
 export const ApiKeys: React.FC = () => {
     const [keys, setKeys] = useState<ApiKey[]>([]);
     const [loading, setLoading] = useState(false);
@@ -32,7 +41,7 @@ export const ApiKeys: React.FC = () => {
                     setKeys([]);
                 }
             } else {
-                const errorData = await res.json().catch(() => ({ error: 'Failed to fetch API keys' }));
+                const errorData = await parseJsonResponse(res, 'Failed to fetch API keys');
                 console.error('Failed to fetch API keys:', errorData.error || res.statusText);
                 alert(`Error: ${errorData.error || 'Failed to fetch API keys'}`);
             }
@@ -67,7 +76,7 @@ export const ApiKeys: React.FC = () => {
                 setTimeout(() => setCopiedId(null), 2000);
                 alert(`API key created successfully! The key has been copied to your clipboard.\n\nKey: ${newKey.id}\nExpires in: ${newKey.expires_in_days} days`);
             } else {
-                const errorData = await res.json().catch(() => ({ error: 'Failed to generate API key' }));
+                const errorData = await parseJsonResponse(res, 'Failed to generate API key');
                 console.error('Failed to generate API key:', errorData.error || res.statusText);
                 alert(`Error: ${errorData.error || 'Failed to generate API key'}`);
             }
@@ -96,7 +105,7 @@ export const ApiKeys: React.FC = () => {
                 setKeys(keys.filter(k => k.id !== id));
                 alert(data.message || 'API key deleted successfully');
             } else {
-                const errorData = await res.json().catch(() => ({ error: 'Failed to delete API key' }));
+                const errorData = await parseJsonResponse(res, 'Failed to delete API key');
                 console.error('Failed to delete API key:', errorData.error || res.statusText);
                 alert(`Error: ${errorData.error || 'Failed to delete API key'}`);
             }
