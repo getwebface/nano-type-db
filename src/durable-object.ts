@@ -2898,6 +2898,89 @@ export class NanoStore extends DurableObject {
                     break;
                 }
 
+                case "chatWithDatabase": {
+                    this.trackUsage('ai_ops');
+                    
+                    const { message } = data.payload || {};
+                    
+                    // Input validation
+                    if (!message || typeof message !== 'string') {
+                        webSocket.send(JSON.stringify({ 
+                            type: "chat_error",
+                            error: "Message is required"
+                        }));
+                        break;
+                    }
+                    
+                    if (message.length > 1000) {
+                        webSocket.send(JSON.stringify({ 
+                            type: "chat_error",
+                            error: "Message too long: maximum 1000 characters"
+                        }));
+                        break;
+                    }
+                    
+                    try {
+                        if (!this.env.AI) {
+                            webSocket.send(JSON.stringify({ 
+                                type: "chat_response",
+                                response: "AI is not available. Please configure the AI binding."
+                            }));
+                            break;
+                        }
+                        
+                        // Get current schema for context
+                        const schema = this.getSchema();
+                        const tableNames = Object.keys(schema);
+                        
+                        // Build schema context for the AI
+                        let schemaContext = "You are a helpful database assistant. Here is the current database schema:\n\n";
+                        
+                        if (tableNames.length === 0) {
+                            schemaContext += "No tables exist in the database yet.\n";
+                        } else {
+                            for (const tableName of tableNames) {
+                                const columns = schema[tableName];
+                                schemaContext += `Table: ${tableName}\n`;
+                                schemaContext += `Columns: ${columns.map(c => `${c.name} (${c.type})`).join(', ')}\n\n`;
+                            }
+                        }
+                        
+                        // Create the prompt for the AI
+                        const systemPrompt = schemaContext + 
+                            "\nYou help users understand their database, explore tables, and answer questions about their data. " +
+                            "Provide helpful, concise responses about the schema, data structure, and general database concepts. " +
+                            "If the user asks about specific data, suggest they use the query or search features.";
+                        
+                        const fullPrompt = `${systemPrompt}\n\nUser: ${message}\n\nAssistant:`;
+                        
+                        // Call Workers AI (Llama 3)
+                        const response = await this.env.AI.run('@cf/meta/llama-3-8b-instruct', {
+                            messages: [
+                                { role: 'system', content: systemPrompt },
+                                { role: 'user', content: message }
+                            ],
+                            max_tokens: 512,
+                            temperature: 0.7
+                        });
+                        
+                        const aiResponse = response.response || "I'm sorry, I couldn't generate a response.";
+                        
+                        webSocket.send(JSON.stringify({ 
+                            type: "chat_response",
+                            response: aiResponse
+                        }));
+                        
+                    } catch (e: any) {
+                        console.error("Chat with database error:", e);
+                        webSocket.send(JSON.stringify({ 
+                            type: "chat_error",
+                            error: `Failed to process chat: ${e.message}`
+                        }));
+                    }
+                    break;
+                }
+
                 default:
                     this.sendError(webSocket, "UNKNOWN_METHOD", `Unknown RPC method: ${method}`);
                     break;

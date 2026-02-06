@@ -42,33 +42,58 @@ export const ChatDatabase: React.FC = () => {
     };
 
     setMessages(prev => [...prev, userMessage]);
+    const currentInput = input;
     setInput('');
     setIsLoading(true);
 
     try {
-      // Simulate AI response - in a real implementation, this would call Workers AI
-      // For now, we'll provide some intelligent responses based on the schema
-      const tableNames = schema ? Object.keys(schema) : [];
-      let response = '';
-
-      if (input.toLowerCase().includes('table')) {
-        response = `You have ${tableNames.length} table(s): ${tableNames.join(', ')}. Which one would you like to explore?`;
-      } else if (input.toLowerCase().includes('schema')) {
-        if (tableNames.length > 0) {
-          const firstTable = tableNames[0];
-          const columns = schema?.[firstTable] || [];
-          response = `The schema for "${firstTable}" includes these columns: ${columns.map(c => `${c.name} (${c.type})`).join(', ')}`;
-        } else {
-          response = "No tables found in your database yet.";
-        }
-      } else if (input.toLowerCase().includes('semantic') || input.toLowerCase().includes('reflex')) {
-        response = "Semantic Reflex allows you to subscribe to events based on meaning using AI embeddings. You can set up semantic topics to match data based on similarity scores rather than exact matches.";
-      } else if (input.toLowerCase().includes('vector')) {
-        response = "Vectorization is available for semantic search capabilities. Your data can be embedded as vectors to enable similarity-based queries and AI-powered search.";
-      } else {
-        response = `I understand you're asking about: "${input}". I can help with table information, schema details, semantic reflex features, and vectorization analytics. What specific aspect would you like to explore?`;
+      // Use the real AI-powered chat functionality
+      // Get WebSocket connection from useDatabase hook
+      const ws = (window as any).__nanotype_ws;
+      
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        throw new Error("WebSocket not connected. Please refresh the page.");
       }
-
+      
+      // Set up one-time listener for the response
+      const responsePromise = new Promise<string>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error("Request timeout"));
+        }, 30000); // 30 second timeout
+        
+        const messageHandler = (event: MessageEvent) => {
+          try {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === "chat_response") {
+              clearTimeout(timeout);
+              ws.removeEventListener('message', messageHandler);
+              resolve(data.response);
+            } else if (data.type === "chat_error") {
+              clearTimeout(timeout);
+              ws.removeEventListener('message', messageHandler);
+              reject(new Error(data.error));
+            }
+          } catch (e) {
+            // Ignore parse errors for other messages
+          }
+        };
+        
+        ws.addEventListener('message', messageHandler);
+      });
+      
+      // Send RPC request to backend
+      ws.send(JSON.stringify({
+        action: "rpc",
+        method: "chatWithDatabase",
+        payload: {
+          message: currentInput
+        }
+      }));
+      
+      // Wait for response
+      const response = await responsePromise;
+      
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
@@ -82,7 +107,7 @@ export const ChatDatabase: React.FC = () => {
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: 'Sorry, I encountered an error processing your request. Please try again.',
+        content: `Sorry, I encountered an error: ${error instanceof Error ? error.message : 'Unknown error'}. Please try again.`,
         timestamp: new Date()
       };
       setMessages(prev => [...prev, errorMessage]);
