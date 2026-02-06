@@ -17,9 +17,11 @@ The WebSocket connection system has been significantly enhanced to provide bette
 ### 2. **Automatic Reconnection**
 
 - **Smart Reconnection**: Automatically attempts to reconnect on connection loss
-- **Fixed Interval**: Uses a consistent 3-second interval between reconnection attempts
+- **Exponential Backoff**: Uses exponential backoff with jitter (1s base, 30s max) for reconnection intervals
 - **Max Attempts**: Limits reconnection attempts to 5 to prevent infinite loops
 - **Clean Close Detection**: Only reconnects on abnormal closures (not user-initiated disconnects)
+- **Manual Reconnect**: Users can manually trigger reconnection at any time
+- **Countdown Display**: Shows seconds remaining until the next reconnection attempt
 
 ### 3. **Connection Health Monitoring (Heartbeat)**
 
@@ -70,7 +72,8 @@ handleSession(webSocket: WebSocket) {
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `WS_CONNECTION_TIMEOUT` | 10 seconds | Maximum time to wait for connection |
-| `WS_RECONNECT_INTERVAL` | 3 seconds | Time between reconnection attempts |
+| `WS_RECONNECT_BASE_INTERVAL` | 1 second | Base interval for exponential backoff |
+| `WS_RECONNECT_MAX_INTERVAL` | 30 seconds | Maximum backoff interval |
 | `MAX_RECONNECT_ATTEMPTS` | 5 | Maximum number of reconnection tries |
 | `HEARTBEAT_INTERVAL` | 30 seconds | Time between ping messages |
 | `HEARTBEAT_TIMEOUT` | 5 seconds | Maximum time to wait for pong |
@@ -98,11 +101,11 @@ handleSession(webSocket: WebSocket) {
 
 ## Future Enhancements
 
-- [ ] Add connection quality metrics (latency, packet loss)
-- [ ] Implement exponential backoff for reconnection intervals (currently uses fixed 3s interval)
-- [ ] Add option to manually reconnect
-- [ ] Show reconnection progress/countdown
-- [ ] Add WebSocket debugging mode for development
+- [x] Add connection quality metrics (latency, packet loss)
+- [x] Implement exponential backoff for reconnection intervals (currently uses fixed 3s interval)
+- [x] Add option to manually reconnect
+- [x] Show reconnection progress/countdown
+- [x] Add WebSocket debugging mode for development
 
 ## Troubleshooting
 

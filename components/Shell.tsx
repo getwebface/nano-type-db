@@ -6,11 +6,23 @@ import { PsychicSearch } from './PsychicSearch';
 import { ApiKeys } from './ApiKeys';
 import { Snapshots } from './Snapshots';
 import { Analytics } from './Analytics';
-import { Layout, Table2, HardDrive, Circle, Plus, Loader2, Activity, Settings, Database, Users } from 'lucide-react';
+import { Layout, Table2, HardDrive, Circle, Plus, Loader2, Activity, Settings, Database, Users, RefreshCw, Wifi } from 'lucide-react';
 import { VisualSchemaEditor } from './VisualSchemaEditor';
 
+/** Displays seconds remaining until next reconnection attempt */
+const ReconnectCountdown: React.FC<{ nextRetryAt: number }> = ({ nextRetryAt }) => {
+    const [secondsLeft, setSecondsLeft] = useState(Math.max(0, Math.ceil((nextRetryAt - Date.now()) / 1000)));
+    useEffect(() => {
+        const timer = setInterval(() => {
+            setSecondsLeft(Math.max(0, Math.ceil((nextRetryAt - Date.now()) / 1000)));
+        }, 500);
+        return () => clearInterval(timer);
+    }, [nextRetryAt]);
+    return <span className="text-xs text-yellow-400 animate-pulse">Retrying in {secondsLeft}s</span>;
+};
+
 export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
-    const { schema, usageStats, status, rpc } = useDatabase();
+    const { schema, usageStats, status, rpc, manualReconnect, reconnectInfo, connectionQuality } = useDatabase();
     const [selectedTable, setSelectedTable] = useState<string>('tasks');
     const [activeView, setActiveView] = useState<'tables' | 'settings'>('tables');
     const [settingsTab, setSettingsTab] = useState<'api-keys' | 'snapshots' | 'analytics'>('api-keys');
@@ -81,6 +93,35 @@ export const Shell: React.FC<{ roomId: string }> = ({ roomId }) => {
                             {status}
                         </span>
                     </div>
+                    
+                    {/* Reconnection info and manual reconnect */}
+                    {status === 'disconnected' && (
+                        <div className="mt-2 space-y-1">
+                            {reconnectInfo.nextRetryAt && (
+                                <div className="flex items-center gap-2">
+                                    <ReconnectCountdown nextRetryAt={reconnectInfo.nextRetryAt} />
+                                    <span className="text-xs text-slate-600">
+                                        ({reconnectInfo.attempt}/{reconnectInfo.maxAttempts})
+                                    </span>
+                                </div>
+                            )}
+                            <button
+                                onClick={manualReconnect}
+                                className="flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 transition-colors"
+                            >
+                                <RefreshCw size={10} />
+                                Reconnect
+                            </button>
+                        </div>
+                    )}
+                    
+                    {/* Connection quality indicator */}
+                    {status === 'connected' && connectionQuality.latency > 0 && (
+                        <div className="flex items-center gap-2 mt-1 text-xs text-slate-600">
+                            <Wifi size={10} />
+                            <span>{connectionQuality.latency}ms</span>
+                        </div>
+                    )}
                     
                     {/* Active Users Presence */}
                     {presenceData.length > 0 && (
