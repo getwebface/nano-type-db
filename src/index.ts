@@ -196,7 +196,7 @@ export default {
         backendPaths.has(url.pathname) ||
         // Ensure API routes (like /api/keys) are handled by the backend
         url.pathname.startsWith("/api/") ||
-        request.headers.get("Upgrade") === "websocket";
+        (request.headers.get("Upgrade")?.toLowerCase() === "websocket");
 
     if (!isBackendPath) {
        try {
