@@ -1,77 +1,48 @@
+import Papa from 'papaparse';
 
-// Sanitize headers to be valid SQL column names
+// Keep your existing sanitizer, it's useful for SQL safety
 export const sanitizeHeader = (header: string): string => {
     let sanitized = header.trim().toLowerCase();
-    // Replace non-alphanumeric chars with underscore
     sanitized = sanitized.replace(/[^a-z0-9_]/g, '_');
-    // Ensure it starts with a letter or underscore
     if (!/^[a-z_]/.test(sanitized)) {
         sanitized = `_${sanitized}`;
     }
-    // Remove duplicate underscores
-    sanitized = sanitized.replace(/_+/g, '_');
-    return sanitized;
+    return sanitized.replace(/_+/g, '_');
 };
 
-// Improved CSV parser that handles quoted values with commas
-export const parseCSVLine = (line: string): string[] => {
-    const result: string[] = [];
-    let current = '';
-    let inQuotes = false;
-    
-    for (let i = 0; i < line.length; i++) {
-        const char = line[i];
-        
-        if (char === '"') {
-            // Handle escaped quotes ("")
-            if (inQuotes && line[i + 1] === '"') {
-                current += '"';
-                i++; // Skip next quote
-            } else {
-                inQuotes = !inQuotes;
-            }
-        } else if (char === ',' && !inQuotes) {
-            result.push(current.trim());
-            current = '';
-        } else {
-            current += char;
-        }
-    }
-    
-    result.push(current.trim());
-    return result;
-};
-
-export const parseCSV = async (file: File): Promise<{
+export const parseCSV = (file: File): Promise<{
     headers: string[];
-    rows: string[][];
+    rows: any[]; // PapaParse returns array of arrays or objects
 }> => {
-    const text = await file.text();
-    const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
-    
-    if (lines.length === 0) {
-        throw new Error("CSV file is empty");
-    }
-    
-    const headers = parseCSVLine(lines[0]);
-    const rows = lines.slice(1).map(parseCSVLine);
-    
-    return { headers, rows };
+    return new Promise((resolve, reject) => {
+        Papa.parse(file, {
+            skipEmptyLines: true,
+            complete: (results) => {
+                // Validate data
+                if (!results.data || results.data.length === 0) {
+                    reject(new Error("CSV file is empty"));
+                    return;
+                }
+
+                // Extract headers and rows
+                // PapaParse results.data is an array of rows. 
+                // Row 0 is usually headers if header: false (default)
+                const rawHeaders = results.data[0] as string[];
+                const rows = results.data.slice(1) as any[];
+
+                resolve({ headers: rawHeaders, rows });
+            },
+            error: (error) => {
+                reject(error);
+            }
+        });
+    });
 };
 
 export const generateCSV = (headers: string[], rows: any[]): string => {
-    const csvContent = [
-        headers.join(','),
-        ...rows.map(row => headers.map(header => {
-            const value = row[header];
-            if (value === null || value === undefined) return '';
-            const stringValue = String(value);
-            // Escape quotes and wrap in quotes if contains comma or quote
-            if (stringValue.includes(',') || stringValue.includes('"')) {
-                return `"${stringValue.replace(/"/g, '""')}"`;
-            }
-            return stringValue;
-        }).join(','))
-    ].join('\n');
-    return csvContent;
+    // PapaParse can also unparse (JSON -> CSV)
+    return Papa.unparse({
+        fields: headers,
+        data: rows
+    });
 };

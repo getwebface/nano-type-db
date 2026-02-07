@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useRealtimeQuery, useDatabase } from '../../hooks/useDatabase';
-import { SpreadsheetDataGrid } from '../DataGrid';
+import { GlideTable } from '../DataGrid/GlideTable';
 import { CsvImportModal } from '../DataGrid/CsvImportModal';
 import { parseCSV, sanitizeHeader } from '../../utils/csv';
 import { Table2, Plus, Trash2, Database, Upload } from 'lucide-react';
@@ -314,12 +314,10 @@ export const TablesView: React.FC = () => {
             </header>
 
             <div className="flex-1 overflow-auto p-8 bg-slate-900">
-              <SpreadsheetDataGrid 
-                data={data} 
-                total={total}
-                loadMore={loadMore}
-                tableName={selectedTable} 
-                schema={schema?.[selectedTable]}
+              <GlideTable 
+                data={data || []}
+                tableName={selectedTable}
+                schema={schema?.[selectedTable] || []}
               />
             </div>
           </>
