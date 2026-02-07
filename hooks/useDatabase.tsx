@@ -177,12 +177,8 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         if (apiKey) {
             url.searchParams.set('key', apiKey);
         }
-        const sessionToken = sessionData?.session?.token?.trim();
-        if (sessionToken) {
-            url.searchParams.set('session_token', sessionToken);
-        }
         return url.toString();
-    }, [BASE_WS_URL, resolvedRoomId, apiKey, sessionData?.session?.token]);
+    }, [BASE_WS_URL, resolvedRoomId, apiKey]);
 
     const partySocket = useWebSocket(wsUrl, undefined, {
         enabled: Boolean(resolvedRoomId),

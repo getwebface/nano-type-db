@@ -78,9 +78,15 @@ function App() {
     const { data: session, isPending } = authClient.useSession();
     const [userTier, setUserTier] = useState<string>('free');
 
-    // Fetch user tier when session is available
+    // Fetch user tier when session is available and clean up URL tokens
     React.useEffect(() => {
         if (session?.user?.id) {
+            const url = new URL(window.location.href);
+            if (url.searchParams.has('session_token')) {
+                url.searchParams.delete('session_token');
+                window.history.replaceState({}, '', url);
+            }
+
             // Fetch user tier from the server
             // The endpoint authenticates the session and extracts the user ID
             fetch(`/api/user-tier`)
