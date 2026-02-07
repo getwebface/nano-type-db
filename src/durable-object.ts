@@ -85,6 +85,25 @@ export class NanoStore extends DurableObject {
         return new Response("NanoStore DO Ready", { status: 200 });
     }
 
+    private isUserTable(tableName: string): boolean {
+        // 1. Validate format (Alphanumeric + underscore only)
+        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) return false;
+        
+        // 2. Block system tables
+        if (tableName.startsWith('_') || tableName.startsWith('sqlite_')) return false;
+        
+        // 3. Check existence in SQLite
+        try {
+            const result = this.sql.exec(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name = ?", 
+                tableName
+            ).toArray();
+            return result.length > 0;
+        } catch {
+            return false;
+        }
+    }
+
     async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
         try {
             const text = typeof message === 'string' ? message : new TextDecoder().decode(message);
@@ -158,24 +177,58 @@ export class NanoStore extends DurableObject {
                             }
                             case 'batchInsert': {
                                 const { table, rows } = payload.payload;
+                                
+                                // 1. Security Check
+                                if (!this.isUserTable(table)) {
+                                    throw new Error(`Table '${table}' does not exist or is not accessible`);
+                                }
+
                                 if (!rows || rows.length === 0) {
                                     responseData = { inserted: 0, total: 0 };
                                     break;
                                 }
                                 
                                 const keys = Object.keys(rows[0]);
+                                // Validate keys to prevent SQL injection via column names
+                                if (!keys.every(k => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(k))) {
+                                    throw new Error("Invalid column names in CSV");
+                                }
+
                                 const placeholders = keys.map(() => '?').join(',');
-                                const stmt = this.sql.prepare(`INSERT INTO ${table} (${keys.join(',')}) VALUES (${placeholders})`);
+                                const stmt = this.sql.prepare(`INSERT INTO "${table}" (${keys.join(',')}) VALUES (${placeholders})`);
                                 
+                                // 2. Chunked Processing
+                                const CHUNK_SIZE = 100; // Process 100 rows at a time
                                 let inserted = 0;
-                                for (const row of rows) {
-                                    try {
-                                        stmt.run(...keys.map(k => row[k]));
-                                        inserted++;
-                                    } catch (e) {
-                                        console.error('Insert failed row:', e);
+                                
+                                for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+                                    const chunk = rows.slice(i, i + CHUNK_SIZE);
+                                    
+                                    // Process chunk
+                                    for (const row of chunk) {
+                                        try {
+                                            stmt.run(...keys.map(k => row[k]));
+                                            inserted++;
+                                        } catch (e) {
+                                            console.error('Insert failed row:', e);
+                                        }
+                                    }
+
+                                    // 3. Yield to Event Loop
+                                    // This prevents the "Infinite Spinner" by letting the DO handle 
+                                    // pings and other messages between chunks.
+                                    if (i + CHUNK_SIZE < rows.length) {
+                                        await new Promise(resolve => setTimeout(resolve, 0));
+                                        
+                                        // Optional: Send progress update to client
+                                        ws.send(JSON.stringify({
+                                            type: 'import_progress',
+                                            current: i + chunk.length,
+                                            total: rows.length
+                                        }));
                                     }
                                 }
+                                
                                 responseData = { data: { inserted, total: rows.length } };
                                 break;
                             }
