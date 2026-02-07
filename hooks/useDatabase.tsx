@@ -164,22 +164,28 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
 
     const BASE_WS_URL = `${WS_PROTOCOL}://${HOST}/${WS_BASE_PATH}`;
 
+    const resolvedRoomId = useMemo(() => {
+        if (roomId) return roomId;
+        return new URLSearchParams(window.location.search).get('room_id') || '';
+    }, [roomId]);
+
     const wsUrl = useMemo(() => {
         const url = new URL(BASE_WS_URL);
-        if (roomId) {
-            url.searchParams.set('room_id', roomId);
+        if (resolvedRoomId) {
+            url.searchParams.set('room_id', resolvedRoomId);
         }
         if (apiKey) {
             url.searchParams.set('key', apiKey);
         }
-        if (sessionData?.session?.token) {
-            url.searchParams.set('session_token', sessionData.session.token);
+        const sessionToken = sessionData?.session?.token?.trim();
+        if (sessionToken) {
+            url.searchParams.set('session_token', sessionToken);
         }
         return url.toString();
-    }, [BASE_WS_URL, roomId, apiKey, sessionData?.session?.token]);
+    }, [BASE_WS_URL, resolvedRoomId, apiKey, sessionData?.session?.token]);
 
     const partySocket = useWebSocket(wsUrl, undefined, {
-        enabled: Boolean(roomId),
+        enabled: Boolean(resolvedRoomId),
         onOpen: () => {
             wsLog('Connected to WebSocket');
             setStatus('connected');
