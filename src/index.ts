@@ -1506,17 +1506,14 @@ export default {
          const newUrl = new URL(request.url);
          newUrl.pathname = "/connect"; // Match the DO's expected path
          
-         // 🔴 FIX: Explicitly preserve the WebSocket handshake headers
-         const wsHeaders = new Headers(newHeaders);
-         wsHeaders.set("Upgrade", "websocket");
-         wsHeaders.set("Connection", "Upgrade");
-
-         // Create fresh request with the forced headers
-         const wsRequest = new Request(newUrl.toString(), {
-             headers: wsHeaders,
-             method: request.method
-         });
+         // 🔴 FIX: Use the original request as the init object to preserve
+         // internal WebSocket state, but override URL and headers.
+         const wsRequest = new Request(newUrl.toString(), request);
          
+         // Add the authenticated headers to the *new* request
+         wsRequest.headers.set("X-User-ID", session.user.id);
+         wsRequest.headers.set("X-Room-ID", roomId);
+
          return stub.fetch(wsRequest);
        } catch (error: any) {
          console.error("WebSocket upgrade failed:", error);

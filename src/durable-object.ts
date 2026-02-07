@@ -1717,13 +1717,10 @@ export class NanoStore extends DurableObject {
 
   handleSession(webSocket: WebSocket, userId: string) {
     // ✅ NEW WAY: Register with the Durable Object system to use Hibernation API
-    // This connects the WebSocket to the webSocketMessage(), webSocketClose(), and 
-    // webSocketError() class methods defined below (lines 710, 1417, 1439)
-    this.ctx.acceptWebSocket(webSocket);
+    // Pass the userId as a tag so we can filter/broadcast by user easily
+    this.ctx.acceptWebSocket(webSocket, [userId]);
     
-    // SECURITY: Store userId for this WebSocket connection for RLS
-    // NATIVE FIX: Use WebSocket Tags and Attachments to survive hibernation
-    this.ctx.setWebSocketTag(webSocket, userId);
+    // SECURITY: Store userId in the attachment for RLS checks (survives hibernation)
     webSocket.serializeAttachment(userId);
 
     // Send reset message when DO wakes up (handleSession starts)
