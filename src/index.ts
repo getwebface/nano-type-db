@@ -129,26 +129,6 @@ roomsApp.get("/list", async (c) => {
 
 app.route("/api/rooms", roomsApp);
 
-// =========================================
-// WebSocket & DO Routes
-// =========================================
-app.get("/connect", async (c) => {
-    // Check for WebSocket Upgrade
-    if (c.req.header("Upgrade") !== "websocket") {
-        return c.json({ error: "Expected WebSocket Upgrade" }, 426);
-    }
-
-    const roomId = c.req.query("room_id");
-    if (!roomId) return c.json({ error: "Missing room_id" }, 400);
-
-    // Get Durable Object
-    const id = c.env.DATA_STORE.idFromName(roomId); // Using name for room mapping
-    const stub = c.env.DATA_STORE.get(id);
-
-    // Handoff to DO
-    return stub.fetch(c.req.raw);
-});
-
 // Proxy Schema Request
 app.get("/schema", async (c) => {
     const roomId = c.req.query("room_id");
@@ -158,6 +138,49 @@ app.get("/schema", async (c) => {
     const stub = c.env.DATA_STORE.get(id);
     return stub.fetch(c.req.raw);
 });
+
+// User Tier Endpoint
+app.get("/api/user-tier", async (c) => {
+    const auth = createAuth(c.env);
+    const session = await auth.api.getSession({ headers: c.req.raw.headers });
+    if (!session?.user?.id) {
+        return c.json({ error: "Unauthorized" }, 401);
+    }
+
+    try {
+        const userTier = await c.env.AUTH_DB.prepare(
+            "SELECT tier FROM user WHERE id = ?"
+        ).bind(session.user.id).first();
+
+        return c.json({ 
+            tier: userTier?.tier || 'free'
+        });
+    } catch (e: any) {
+        return c.json({ error: e.message }, 500);
+    }
+});
+
+// WebSocket Handler Helper
+const handleWebSocket = async (c: any) => {
+    // Check for WebSocket Upgrade
+    if (c.req.header("Upgrade") !== "websocket") {
+        return c.json({ error: "Expected WebSocket Upgrade" }, 426);
+    }
+
+    const roomId = c.req.query("room_id");
+    if (!roomId) return c.json({ error: "Missing room_id" }, 400);
+
+    // Get Durable Object
+    const id = c.env.DATA_STORE.idFromName(roomId);
+    const stub = c.env.DATA_STORE.get(id);
+
+    // Handoff to DO
+    return stub.fetch(c.req.raw);
+};
+
+// WebSocket & DO Routes
+app.get("/connect", handleWebSocket);
+app.get("/websocket", handleWebSocket);
 
 // Static Assets Fallback
 app.get("*", async (c) => {
