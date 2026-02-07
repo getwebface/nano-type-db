@@ -30,9 +30,30 @@ npm run db:fix:remote  # Requires CLOUDFLARE_API_TOKEN
 
 For detailed migration documentation, see [PRODUCTION_MIGRATIONS_GUIDE.md](./PRODUCTION_MIGRATIONS_GUIDE.md).
 
+### Schema & Migrations
+
+**Source of Truth:** `src/db/schema.ts`
+
+We use **Drizzle ORM** as the single schema authority. Do not manually create or edit `.sql` files in `migrations/` — they are generated artifacts.
+
+#### How to Change the Schema
+
+1.  **Modify `src/db/schema.ts`**: Add your tables or columns here using Drizzle types.
+2.  **Generate Migration**:
+    ```bash
+    npx drizzle-kit generate
+    ```
+    This creates the SQL file in `migrations/` automatically.
+3.  **Apply Migration**:
+    ```bash
+    npm run migrate:up -- --local   # Local
+    npm run migrate:up -- --remote  # Production
+    ```
+
 ### Common Database Commands
 
 ```bash
+npx drizzle-kit generate          # Generate migrations from src/db/schema.ts
 npm run migrate:status          # Check migration status
 npm run migrate:up -- --local   # Apply migrations (local)
 npm run migrate:up -- --remote  # Apply migrations (production)

@@ -1,42 +1,48 @@
 import { DurableObject } from "cloudflare:workers";
 import type { DurableObjectState } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/sqlite-proxy";
-import { tasks, webhooks } from "./db/schema";
+import { sql } from "drizzle-orm";
+import * as schema from "./db/schema";
 import { WebSocketMessageSchema } from "./lib/models";
-import { eq } from "drizzle-orm";
+
+// Table Registry: Maps string names to Drizzle Schema Objects.
+// This allows type-safe Drizzle operations for known tables
+// while falling back to raw SQL only for dynamic user-created tables.
+const TableMap: Record<string, any> = {
+    tasks: schema.tasks,
+    _webhooks: schema.webhooks,
+};
 
 export class NanoStore extends DurableObject {
-    private db: ReturnType<typeof drizzle>;
-    private sql: any; // Cloudflare SqlStorage
+    private db: ReturnType<typeof drizzle<typeof schema>>;
+    private sql: any; // Native Cloudflare SqlStorage
 
     constructor(ctx: DurableObjectState, env: Env) {
         super(ctx, env);
         this.sql = ctx.storage.sql;
 
-        // Initialize Drizzle with sqlite-proxy for synchronous DO storage
-        this.db = drizzle(async (sql, params, method) => {
+        // Proxy Drizzle Async -> DO Synchronous Storage
+        this.db = drizzle(async (sqlQuery, params, method) => {
             try {
-                const cursor = this.sql.exec(sql, ...params);
-                const rows = cursor.toArray();
+                const cursor = this.sql.exec(sqlQuery, ...params);
                 
-                // SQLite specific implementation for result metadata is limited in DOs currently
-                // handling based on method type if needed
                 if (method === "run") {
-                    return { rows: [], changes: 0, lastInsertRowid: 0 }; 
+                    return { rows: [] }; 
                 }
+                
+                const rows = cursor.toArray();
                 return { rows: rows };
             } catch (e: any) {
                 console.error("Drizzle Proxy Error:", e.message);
                 throw e;
             }
-        });
+        }, { schema });
 
-        // Initialize Schema (Ghost-Busting: Explicit Schema Init)
         this.initializeSchema();
     }
 
     private initializeSchema() {
-        // Ensure core tables exist
+        // DDL for schema creation — the only acceptable use of raw SQL for static tables.
         this.sql.exec(`
             CREATE TABLE IF NOT EXISTS tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,6 +63,14 @@ export class NanoStore extends DurableObject {
                 failure_count INTEGER DEFAULT 0
             );
         `);
+        this.sql.exec(`
+            CREATE TABLE IF NOT EXISTS _usage (
+                date TEXT PRIMARY KEY, 
+                reads INTEGER DEFAULT 0, 
+                writes INTEGER DEFAULT 0, 
+                ai_ops INTEGER DEFAULT 0
+            )
+        `);
     }
 
     async fetch(request: Request): Promise<Response> {
@@ -73,6 +87,7 @@ export class NanoStore extends DurableObject {
             return new Response(null, { status: 101, webSocket: client });
         }
 
+        // Keep legacy schema endpoint for now, but frontend should prefer Hono RPC
         if (url.pathname === "/schema") {
             return Response.json({
                 tables: [
@@ -85,48 +100,29 @@ export class NanoStore extends DurableObject {
         return new Response("NanoStore DO Ready", { status: 200 });
     }
 
-    private isUserTable(tableName: string): boolean {
-        // 1. Validate format (Alphanumeric + underscore only)
-        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) return false;
-        
-        // 2. Block system tables
-        if (tableName.startsWith('_') || tableName.startsWith('sqlite_')) return false;
-        
-        // 3. Check existence in SQLite
-        try {
-            const result = this.sql.exec(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name = ?", 
-                tableName
-            ).toArray();
-            return result.length > 0;
-        } catch {
-            return false;
-        }
-    }
-
     async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
         try {
             const text = typeof message === 'string' ? message : new TextDecoder().decode(message);
             const json = JSON.parse(text);
 
-            // Zod Validation
+            // Zod Validation Firewall
             const result = WebSocketMessageSchema.safeParse(json);
             if (!result.success) {
                 console.error("Invalid WS message:", result.error);
                 ws.send(JSON.stringify({ 
                     type: 'error', 
                     error: 'Invalid message format', 
-                    details: result.error.extractErrors() 
+                    details: result.error.issues 
                 }));
                 return;
             }
 
             const payload = result.data;
 
-            // Handle Actions
             switch (payload.action) {
                 case 'create_task':
-                    await this.db.insert(tasks).values({
+                    // Type-Safe Drizzle Insert
+                    await this.db.insert(schema.tasks).values({
                         title: payload.data.title,
                         status: payload.data.status || 'pending',
                         ownerId: payload.data.ownerId || 'anonymous'
@@ -148,11 +144,11 @@ export class NanoStore extends DurableObject {
                             case 'streamIntent':
                                 responseData = { status: 'mock_stream' };
                                 break;
-                            case 'createTable':{
+
+                            // --- DDL Operations (Kept as Raw SQL per "Anti-Ghost" Rules) ---
+                            case 'createTable': {
                                 const { tableName, columns } = payload.payload;
-                                // Sanitize table name (basic)
                                 const safeTableName = tableName.replace(/[^a-zA-Z0-9_]/g, '');
-                                
                                 const colDefs = columns.map((c: any) => {
                                     const safeColName = c.name.replace(/[^a-zA-Z0-9_]/g, '');
                                     let def = `"${safeColName}" ${c.type}`;
@@ -160,118 +156,123 @@ export class NanoStore extends DurableObject {
                                     if (c.notNull) def += ' NOT NULL';
                                     return def;
                                 }).join(', ');
-                                
-                                try {
-                                    this.sql.exec(`CREATE TABLE IF NOT EXISTS "${safeTableName}" (${colDefs})`);
-                                    responseData = { success: true, table: safeTableName };
-                                } catch (e: any) {
-                                    throw new Error(`Failed to create table: ${e.message}`);
-                                }
+                                this.sql.exec(`CREATE TABLE IF NOT EXISTS "${safeTableName}" (${colDefs})`);
+                                responseData = { success: true, table: safeTableName };
                                 break;
                             }
                             case 'deleteTable': {
                                 const { tableName } = payload.payload;
-                                this.sql.exec(`DROP TABLE IF EXISTS ${tableName}`);
+                                const safeTableName = tableName.replace(/[^a-zA-Z0-9_]/g, '');
+                                this.sql.exec(`DROP TABLE IF EXISTS "${safeTableName}"`);
                                 responseData = { success: true };
                                 break;
                             }
+
+                            // --- DML Operations (Refactored to Drizzle) ---
+
                             case 'batchInsert': {
                                 const { table, rows } = payload.payload;
-                                
-                                // 1. Security Check
-                                if (!this.isUserTable(table)) {
-                                    throw new Error(`Table '${table}' does not exist or is not accessible`);
-                                }
-
                                 if (!rows || rows.length === 0) {
                                     responseData = { inserted: 0, total: 0 };
                                     break;
                                 }
-                                
-                                const keys = Object.keys(rows[0]);
-                                // Validate keys to prevent SQL injection via column names
-                                if (!keys.every(k => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(k))) {
-                                    throw new Error("Invalid column names in CSV");
-                                }
 
-                                const placeholders = keys.map(() => '?').join(',');
-                                const stmt = this.sql.prepare(`INSERT INTO "${table}" (${keys.join(',')}) VALUES (${placeholders})`);
-                                
-                                // 2. Chunked Processing
-                                const CHUNK_SIZE = 100; // Process 100 rows at a time
-                                let inserted = 0;
-                                
-                                for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
-                                    const chunk = rows.slice(i, i + CHUNK_SIZE);
+                                // Check if table is in our Registry for type-safe Drizzle insert
+                                const knownTable = TableMap[table];
+
+                                if (knownTable) {
+                                    // Type-Safe Drizzle Batch Insert for known tables
+                                    await this.db.insert(knownTable).values(rows).run();
+                                    responseData = { data: { inserted: rows.length, total: rows.length } };
+                                } else {
+                                    // Fallback: Raw SQL for dynamic user-created tables not in schema.ts
+                                    const keys = Object.keys(rows[0]);
+                                    if (!keys.every(k => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(k))) {
+                                        throw new Error("Invalid column names in CSV");
+                                    }
+
+                                    const placeholders = keys.map(() => '?').join(',');
+                                    const stmt = this.sql.prepare(`INSERT INTO "${table}" (${keys.map(k => `"${k}"`).join(',')}) VALUES (${placeholders})`);
                                     
-                                    // Process chunk
-                                    for (const row of chunk) {
-                                        try {
-                                            stmt.run(...keys.map(k => row[k]));
-                                            inserted++;
-                                        } catch (e) {
-                                            console.error('Insert failed row:', e);
+                                    let inserted = 0;
+                                    const CHUNK_SIZE = 100;
+                                    for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+                                        const chunk = rows.slice(i, i + CHUNK_SIZE);
+                                        for (const row of chunk) {
+                                            try {
+                                                stmt.run(...keys.map(k => row[k]));
+                                                inserted++;
+                                            } catch (e) {
+                                                console.error('Insert failed row:', e);
+                                            }
+                                        }
+
+                                        if (i + CHUNK_SIZE < rows.length) {
+                                            await new Promise(resolve => setTimeout(resolve, 0));
+                                            ws.send(JSON.stringify({
+                                                type: 'import_progress',
+                                                current: i + chunk.length,
+                                                total: rows.length
+                                            }));
                                         }
                                     }
+                                    responseData = { data: { inserted, total: rows.length } };
+                                }
+                                break;
+                            }
 
-                                    // 3. Yield to Event Loop
-                                    // This prevents the "Infinite Spinner" by letting the DO handle 
-                                    // pings and other messages between chunks.
-                                    if (i + CHUNK_SIZE < rows.length) {
-                                        await new Promise(resolve => setTimeout(resolve, 0));
-                                        
-                                        // Optional: Send progress update to client
-                                        ws.send(JSON.stringify({
-                                            type: 'import_progress',
-                                            current: i + chunk.length,
-                                            total: rows.length
-                                        }));
-                                    }
-                                }
-                                
-                                responseData = { data: { inserted, total: rows.length } };
+                            case 'listTasks': {
+                                // Drizzle Query Builder
+                                const limit = payload.payload.limit || 500;
+                                const offset = payload.payload.offset || 0;
+                                const taskRows = await this.db.select()
+                                    .from(schema.tasks)
+                                    .limit(limit)
+                                    .offset(offset);
+                                responseData = taskRows;
                                 break;
                             }
-                            case 'executeSQL': {
-                                const { sql, params } = payload.payload;
-                                const res = this.sql.exec(sql, ...(params || [])).toArray();
-                                responseData = res;
-                                break;
-                            }
-                            case 'getSchema': {
-                                const tables = this.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_%'").toArray();
-                                const schema: Record<string, any[]> = {};
-                                
-                                for (const t of tables) {
-                                    const tableName = t.name;
-                                    const columns = this.sql.exec(`PRAGMA table_info("${tableName}")`).toArray();
-                                    schema[tableName] = columns.map((c: any) => ({
-                                        name: c.name,
-                                        type: c.type,
-                                        pk: c.pk
-                                    }));
-                                }
-                                responseData = schema;
-                                break;
-                            }
+
                             case 'getUsage': {
                                 try {
-                                    // ensure _usage table exists
-                                    this.sql.exec(`CREATE TABLE IF NOT EXISTS _usage (date TEXT PRIMARY KEY, reads INTEGER DEFAULT 0, writes INTEGER DEFAULT 0, ai_ops INTEGER DEFAULT 0)`);
-                                    const usage = this.sql.exec("SELECT * FROM _usage ORDER BY date DESC LIMIT 30").toArray();
-                                    responseData = usage;
+                                    // Drizzle sql template tag through the proxy pipeline
+                                    const usage = await this.db.run(
+                                        sql`SELECT * FROM _usage ORDER BY date DESC LIMIT 30`
+                                    );
+                                    responseData = (usage as any).rows ?? [];
                                 } catch (e) {
                                     console.error("getUsage error", e);
                                     responseData = [];
                                 }
                                 break;
                             }
-                            case 'listTasks': {
-                                // Legacy support
-                                const res = this.sql.exec("SELECT * FROM tasks LIMIT ? OFFSET ?", payload.payload.limit || 500, payload.payload.offset || 0).toArray();
+
+                            case 'getSchema': {
+                                // System query — safe to keep raw as it queries sqlite_master
+                                const tables = this.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_%'").toArray();
+                                const schemaInfo: Record<string, any[]> = {};
+                                
+                                for (const t of tables) {
+                                    const tblName = t.name;
+                                    const columns = this.sql.exec(`PRAGMA table_info("${tblName}")`).toArray();
+                                    schemaInfo[tblName] = columns.map((c: any) => ({
+                                        name: c.name,
+                                        type: c.type,
+                                        pk: c.pk
+                                    }));
+                                }
+                                responseData = schemaInfo;
+                                break;
+                            }
+
+                            case 'executeSQL': {
+                                // Raw SQL interface for the SQL Runner console
+                                const { sql: rawSql, params } = payload.payload;
+                                const res = this.sql.exec(rawSql, ...(params || [])).toArray();
                                 responseData = res;
                                 break;
                             }
+
                             default:
                                 throw new Error(`Unknown RPC method: ${payload.method}`);
                         }
@@ -290,12 +291,8 @@ export class NanoStore extends DurableObject {
                 
                 case 'subscribe_query':
                 case 'query':
-                    // Mock query response for ghost-busting phase
-                    // Ideally check payload.sql and run against this.db
-                    // SECURITY WARNING: In production, do not allow raw SQL from client!
-                    // This is a legacy feature we are supporting.
+                    // Legacy raw SQL proxy for subscribe_query/query actions
                     try {
-                        // Very basic unsafe proxy for legacy support
                         const res = this.sql.exec(payload.sql).toArray();
                         ws.send(JSON.stringify({
                              type: 'query_result',
