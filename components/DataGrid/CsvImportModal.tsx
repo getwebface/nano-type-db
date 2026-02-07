@@ -11,11 +11,31 @@ interface CsvImportModalProps {
     } | null;
     isImporting: boolean;
     tableName: string;
+    mode: 'new' | 'existing';
+    tableList: string[];
+    newTableName: string;
+    existingTable: string;
+    onModeChange: (mode: 'new' | 'existing') => void;
+    onNewTableNameChange: (name: string) => void;
+    onExistingTableChange: (table: string) => void;
     onClose: () => void;
     onConfirm: () => void;
 }
 
-export const CsvImportModal: React.FC<CsvImportModalProps> = ({ preview, isImporting, tableName, onClose, onConfirm }) => {
+export const CsvImportModal: React.FC<CsvImportModalProps> = ({
+    preview,
+    isImporting,
+    tableName,
+    mode,
+    tableList,
+    newTableName,
+    existingTable,
+    onModeChange,
+    onNewTableNameChange,
+    onExistingTableChange,
+    onClose,
+    onConfirm
+}) => {
     if (!preview) return null;
 
     return (
@@ -36,6 +56,60 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({ preview, isImpor
                 
                 {/* Content */}
                 <div className="p-6 overflow-y-auto flex-1 space-y-4">
+                    {/* Target table selection */}
+                    <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4 space-y-3">
+                        <p className="text-sm font-medium text-slate-300">Import destination</p>
+                        <div className="flex flex-wrap gap-3">
+                            <label className="flex items-center gap-2 text-sm text-slate-300">
+                                <input
+                                    type="radio"
+                                    name="csv-target"
+                                    checked={mode === 'new'}
+                                    onChange={() => onModeChange('new')}
+                                />
+                                New table
+                            </label>
+                            <label className="flex items-center gap-2 text-sm text-slate-300">
+                                <input
+                                    type="radio"
+                                    name="csv-target"
+                                    checked={mode === 'existing'}
+                                    onChange={() => onModeChange('existing')}
+                                />
+                                Existing table
+                            </label>
+                        </div>
+
+                        {mode === 'new' ? (
+                            <div>
+                                <label className="block text-xs text-slate-500 mb-1">Table name</label>
+                                <input
+                                    value={newTableName}
+                                    onChange={(e) => onNewTableNameChange(e.target.value)}
+                                    className="w-full bg-slate-800 text-slate-100 px-3 py-2 rounded border border-slate-700 focus:outline-none focus:border-green-500"
+                                    placeholder="new_table_name"
+                                />
+                            </div>
+                        ) : (
+                            <div>
+                                <label className="block text-xs text-slate-500 mb-1">Select table</label>
+                                <select
+                                    value={existingTable}
+                                    onChange={(e) => onExistingTableChange(e.target.value)}
+                                    className="w-full bg-slate-800 text-slate-100 px-3 py-2 rounded border border-slate-700 focus:outline-none focus:border-green-500"
+                                >
+                                    {tableList.length === 0 ? (
+                                        <option value="">No tables available</option>
+                                    ) : (
+                                        tableList.map(table => (
+                                            <option key={table} value={table}>{table}</option>
+                                        ))
+                                    )}
+                                </select>
+                            </div>
+                        )}
+                    </div>
+
                     {/* Column mapping info */}
                     {preview.headerMapping.length > 0 && (
                         <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">

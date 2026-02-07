@@ -29,7 +29,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, onViewChange }) =
   ];
 
   return (
-    <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col">
+    <aside className="w-56 bg-slate-900 border-r border-slate-800 flex flex-col">
       <div className="p-6 border-b border-slate-800">
         <div className="flex items-center gap-3 text-white mb-1">
           <HardDrive className="text-green-500" />

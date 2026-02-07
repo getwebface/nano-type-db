@@ -3,22 +3,36 @@ import { useRealtimeQuery, useDatabase } from '../../hooks/useDatabase';
 import { GlideTable } from '../DataGrid/GlideTable';
 import { CsvImportModal } from '../DataGrid/CsvImportModal';
 import { parseCSV } from '../../utils/csv';
-import { Table2, Plus, Trash2, Database, Upload } from 'lucide-react';
+import { Table2, Plus, Trash2, Database, Upload, RefreshCw, Sparkles } from 'lucide-react';
 import { ConfirmDialog } from '../Modal';
 
 export const TablesView: React.FC = () => {
-  const { schema, rpc, addToast } = useDatabase();
+  const { schema, rpc, addToast, refreshSchema } = useDatabase();
   const [selectedTable, setSelectedTable] = useState<string>('');
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newTableName, setNewTableName] = useState('');
   const [newTableColumns, setNewTableColumns] = useState([{ name: 'name', type: 'TEXT', notNull: false }]);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
-  const [showCSVImportModal, setShowCSVImportModal] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const LAST_IMPORT_STORAGE_KEY = 'nanotype:last-imports';
+  const DEFAULT_LIMIT = 500;
   
   // CSV Import Wizard State
   const [csvPreview, setCsvPreview] = useState<any>(null);
   const [importing, setImporting] = useState(false);
+  const [csvTargetMode, setCsvTargetMode] = useState<'new' | 'existing'>('new');
+  const [csvTargetName, setCsvTargetName] = useState('');
+  const [csvTargetTable, setCsvTargetTable] = useState('');
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<number | null>(null);
+  const [lastImportMap, setLastImportMap] = useState<Record<string, number>>(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const raw = window.localStorage.getItem(LAST_IMPORT_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
   
   useEffect(() => {
     if (schema) {
@@ -31,6 +45,45 @@ export const TablesView: React.FC = () => {
 
   const { data, total, loadMore } = useRealtimeQuery(selectedTable);
   const tableList = schema ? Object.keys(schema) : [];
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(LAST_IMPORT_STORAGE_KEY, JSON.stringify(lastImportMap));
+    } catch {
+      // ignore storage errors
+    }
+  }, [lastImportMap]);
+
+  const deriveTableName = (fileName: string) =>
+    fileName.replace(/\.csv$/i, '').toLowerCase().replace(/[^a-z0-9_]/g, '_');
+
+  const formatTimestamp = (ts?: number | null) => {
+    if (!ts) return '—';
+    return new Date(ts).toLocaleString();
+  };
+
+  const refreshTableData = async (tableName: string) => {
+    if (!tableName) return;
+    try {
+      if (tableName === 'tasks') {
+        await rpc('listTasks', { limit: DEFAULT_LIMIT, offset: 0 });
+      } else {
+        await rpc('executeSQL', {
+          sql: `SELECT * FROM ${tableName} LIMIT ${DEFAULT_LIMIT} OFFSET 0`,
+          readonly: true
+        });
+        await rpc('executeSQL', {
+          sql: `SELECT COUNT(*) as count FROM ${tableName}`,
+          readonly: true
+        });
+      }
+      setLastRefreshedAt(Date.now());
+    } catch (error) {
+      console.error('Failed to refresh table data:', error);
+      addToast('Failed to refresh table data', 'error');
+    }
+  };
 
   const handleCreateTable = async () => {
     if (!newTableName.trim()) {
@@ -97,12 +150,13 @@ export const TablesView: React.FC = () => {
     fileInputRef.current?.click();
   };
 
-    const handleCSVFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleCSVFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     try {
       const { headers, rows, inferredTypes } = await parseCSV(file);
+      const derivedName = deriveTableName(file.name);
 
       setCsvPreview({
         headers,
@@ -111,21 +165,39 @@ export const TablesView: React.FC = () => {
         inferredTypes,
         fileName: file.name
       });
+      setCsvTargetMode('new');
+      setCsvTargetName(derivedName);
+      setCsvTargetTable(selectedTable || tableList[0] || '');
     } catch (error: any) {
       addToast('CSV parsing failed: ' + error.message, 'error');
     }
 
     if (fileInputRef.current) fileInputRef.current.value = '';
-    };
+  };
 
-    const handleConfirmImport = async () => {
+  const handleConfirmImport = async () => {
     if (!csvPreview) return;
     setImporting(true);
 
     try {
-      const derivedName = csvPreview.fileName.replace('.csv', '').toLowerCase().replace(/[^a-z0-9_]/g, '_');
-      const targetTable = selectedTable || derivedName;
+      const derivedName = deriveTableName(csvPreview.fileName);
+      const targetTable = csvTargetMode === 'existing'
+        ? (csvTargetTable || selectedTable)
+        : (csvTargetName || derivedName);
+
+      if (!targetTable) {
+        addToast('Select a target table to import into', 'error');
+        setImporting(false);
+        return;
+      }
+
       const tableExists = schema && schema[targetTable];
+
+      if (csvTargetMode === 'new' && tableExists) {
+        addToast(`Table "${targetTable}" already exists. Choose a different name or import into an existing table.`, 'error');
+        setImporting(false);
+        return;
+      }
 
       if (!tableExists) {
         const columns = csvPreview.headers.map((header: string) => ({
@@ -162,19 +234,22 @@ export const TablesView: React.FC = () => {
         }
       }
       setCsvPreview(null);
-      if (!selectedTable) setSelectedTable(targetTable);
+      await refreshSchema();
+      setLastImportMap(prev => ({ ...prev, [targetTable]: Date.now() }));
+      setSelectedTable(targetTable);
+      await refreshTableData(targetTable);
     } catch (error: any) {
       console.error("Import error details:", error);
       addToast('Import failed: ' + error.message, 'error');
     } finally {
       setImporting(false);
     }
-    };
+  };
 
   return (
     <div className="flex h-full overflow-hidden">
       {/* Tables Sidebar */}
-      <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col overflow-hidden">
+      <aside className="w-56 bg-slate-900 border-r border-slate-800 flex flex-col overflow-hidden">
         <div className="p-4 border-b border-slate-800 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Tables</h3>
           <div className="flex gap-1">
@@ -269,25 +344,59 @@ export const TablesView: React.FC = () => {
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {selectedTable ? (
           <>
-            <header className="px-8 py-6 border-b border-slate-800 bg-slate-900 flex justify-between items-center">
-              <h2 className="text-2xl font-bold text-white capitalize flex items-center gap-2">
-                {selectedTable}
-                <span className="text-sm font-normal text-slate-500 ml-2 border border-slate-700 px-2 py-0.5 rounded-full">
-                  {data ? data.length : 0} records
-                </span>
-              </h2>
-              
+            <header className="px-5 py-4 border-b border-slate-800 bg-slate-900 flex flex-col gap-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-2xl font-bold text-white capitalize flex items-center gap-2">
+                  {selectedTable}
+                  <span className="text-sm font-normal text-slate-500 ml-2 border border-slate-700 px-2 py-0.5 rounded-full">
+                    {data ? data.length : 0} loaded · {total || 0} total
+                  </span>
+                </h2>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleCSVFileSelect}
+                    className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition-colors text-sm flex items-center gap-2"
+                  >
+                    <Upload size={14} /> Import CSV
+                  </button>
+                  <button
+                    onClick={() => setShowCreateModal(true)}
+                    className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition-colors text-sm flex items-center gap-2"
+                  >
+                    <Plus size={14} /> New Table
+                  </button>
+                  <button
+                    onClick={() => refreshTableData(selectedTable)}
+                    className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition-colors text-sm flex items-center gap-2"
+                    title="Refresh table data"
+                  >
+                    <RefreshCw size={14} /> Refresh
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-4 text-xs text-slate-400">
+                <div className="flex items-center gap-2">
+                  <Sparkles size={12} className="text-green-400" />
+                  <span>Last import: {formatTimestamp(lastImportMap[selectedTable])}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <RefreshCw size={12} className="text-slate-500" />
+                  <span>Last refreshed: {formatTimestamp(lastRefreshedAt)}</span>
+                </div>
+              </div>
+
               {/* Schema Info Badge */}
-              <div className="hidden md:flex gap-2">
+              <div className="flex gap-2 overflow-x-auto pb-1">
                 {schema && schema[selectedTable] && schema[selectedTable].map(col => (
-                  <span key={col.name} className="text-xs font-mono text-slate-500 bg-slate-800 px-2 py-1 rounded">
+                  <span key={col.name} className="text-xs font-mono text-slate-400 bg-slate-800 px-2 py-1 rounded whitespace-nowrap border border-slate-700">
                     {col.name}: {col.type}
                   </span>
                 ))}
               </div>
             </header>
 
-            <div className="flex-1 overflow-auto p-8 bg-slate-900">
+            <div className="flex-1 overflow-auto p-4 bg-slate-900">
               <GlideTable 
                 data={data || []}
                 tableName={selectedTable}
@@ -450,8 +559,20 @@ export const TablesView: React.FC = () => {
       <CsvImportModal
         preview={csvPreview}
         isImporting={importing}
-        tableName={selectedTable || (csvPreview ? csvPreview.fileName.replace('.csv', '').toLowerCase().replace(/[^a-z0-9_]/g, '_') : "New Table")}
-        onClose={() => setCsvPreview(null)}
+        tableName={csvTargetMode === 'existing'
+          ? (csvTargetTable || selectedTable || 'Select a table')
+          : (csvTargetName || (csvPreview ? deriveTableName(csvPreview.fileName) : 'New Table'))
+        }
+        mode={csvTargetMode}
+        tableList={tableList}
+        newTableName={csvTargetName}
+        existingTable={csvTargetTable || selectedTable}
+        onModeChange={setCsvTargetMode}
+        onNewTableNameChange={setCsvTargetName}
+        onExistingTableChange={setCsvTargetTable}
+        onClose={() => {
+          setCsvPreview(null);
+        }}
         onConfirm={handleConfirmImport}
       />
     </div>
