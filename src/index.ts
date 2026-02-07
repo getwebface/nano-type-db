@@ -1369,7 +1369,7 @@ export default {
     let isApiKey = false;
     
     // PRIORITY 1: Check for API Key Header (for external apps)
-    const apiKey = request.headers.get("X-Nano-Key") || url.searchParams.get("api_key");
+    const apiKey = request.headers.get("X-Nano-Key") || url.searchParams.get("api_key") || url.searchParams.get("key");
     
     if (apiKey?.startsWith("nk_")) {
         // Validate API Key against D1 with expiration and scope checking
