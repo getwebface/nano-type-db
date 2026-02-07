@@ -231,11 +231,10 @@ export const useDatabase = () => {
 };
 
 export const useRealtimeQuery = (tableName: string, options: { limit?: number; } = {}) => {
-    // Basic hook implementation for compatibility
     const { rpc, lastResult } = useDatabase();
     const [data, setData] = useState<any[]>([]);
     
-    // Create a stable reload function
+    // Create a stable reload function to force refresh data
     const reload = useCallback(() => {
         if (!tableName) return;
         rpc('executeSQL', { 
@@ -249,11 +248,9 @@ export const useRealtimeQuery = (tableName: string, options: { limit?: number; }
         reload();
     }, [reload]);
 
-    // Handle real-time updates
+    // Handle real-time updates (re-fetch when this table changes)
     useEffect(() => {
         if (lastResult?.table === tableName) {
-             // Simple refetch on any update to this table for now
-             // Optimization: merge diffs here if available
              reload();
         }
     }, [lastResult, tableName, reload]);

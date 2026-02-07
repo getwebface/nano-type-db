@@ -9,15 +9,16 @@ import { ConfirmDialog } from '../Modal';
 export const TablesView: React.FC = () => {
   const { schema, rpc, addToast, refreshSchema } = useDatabase();
   const [selectedTable, setSelectedTable] = useState<string>('');
+  
+  // ... (keep existing state variables like showCreateModal, etc.) ...
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newTableName, setNewTableName] = useState('');
   const [newTableColumns, setNewTableColumns] = useState([{ name: 'name', type: 'TEXT', notNull: false }]);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const LAST_IMPORT_STORAGE_KEY = 'nanotype:last-imports';
-  const DEFAULT_LIMIT = 500;
   
-  // CSV Import Wizard State
+  // ... (keep CSV state variables) ...
   const [csvPreview, setCsvPreview] = useState<any>(null);
   const [importing, setImporting] = useState(false);
   const [csvTargetMode, setCsvTargetMode] = useState<'new' | 'existing'>('new');
@@ -33,7 +34,21 @@ export const TablesView: React.FC = () => {
       return {};
     }
   });
-  
+
+  // STRICT SANITIZATION: Must match backend regex /[^a-z0-9_]/g (applied after toLowerCase)
+  // This prevents the "ghost table" issue where frontend sees "my-table" but backend has "mytable"
+  const sanitizeTableName = (name: string) => name.toLowerCase().replace(/[^a-z0-9_]/g, '');
+
+  const deriveTableName = (fileName: string) => sanitizeTableName(fileName.replace(/\.csv$/i, ''));
+
+  // Reload delay after import to ensure schema propagation
+  const RELOAD_DELAY_MS = 100;
+
+  // Destructure reload from the hook
+  const { data, total, loadMore, reload } = useRealtimeQuery(selectedTable);
+  const tableList = schema ? Object.keys(schema) : [];
+
+  // ... (keep useEffect for auto-selecting table) ...
   useEffect(() => {
     if (schema) {
       const tables = Object.keys(schema);
@@ -42,9 +57,6 @@ export const TablesView: React.FC = () => {
       }
     }
   }, [schema, selectedTable]);
-
-  const { data, total, loadMore, reload } = useRealtimeQuery(selectedTable);
-  const tableList = schema ? Object.keys(schema) : [];
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -55,11 +67,7 @@ export const TablesView: React.FC = () => {
     }
   }, [lastImportMap]);
 
-  const deriveTableName = (fileName: string) =>
-    fileName.replace(/\.csv$/i, '').toLowerCase().replace(/[^a-z0-9_]/g, '_');
-
-  // Ensure table names match backend sanitization (remove non-alphanumeric/underscore)
-  const sanitizeTableName = (name: string) => name.toLowerCase().replace(/[^a-z0-9_]/g, '');
+  const DEFAULT_LIMIT = 500;
 
   const formatTimestamp = (ts?: number | null) => {
     if (!ts) return '—';
@@ -182,34 +190,36 @@ export const TablesView: React.FC = () => {
 
     try {
       const derivedName = deriveTableName(csvPreview.fileName);
-      // Sanitize the name to match backend rules
-      const safeNewName = (csvTargetName || derivedName).toLowerCase().replace(/[^a-z0-9_]/g, '');
+      
+      // Sanitize target name strictly to ensure schema match
       const targetTable = csvTargetMode === 'existing'
         ? (csvTargetTable || selectedTable)
-        : safeNewName;
+        : sanitizeTableName(csvTargetName || derivedName);
 
       if (!targetTable) {
-        addToast('Select a target table to import into', 'error');
+        addToast('Invalid table name', 'error');
         setImporting(false);
         return;
       }
 
+      // Check existence
       const tableExists = schema && schema[targetTable];
 
       if (csvTargetMode === 'new' && tableExists) {
-        addToast(`Table "${targetTable}" already exists. Choose a different name or import into an existing table.`, 'error');
+        addToast(`Table "${targetTable}" already exists.`, 'error');
         setImporting(false);
         return;
       }
 
       if (!tableExists) {
+        // Create table logic...
         const columns = csvPreview.headers.map((header: string) => ({
           name: header,
           type: csvPreview.inferredTypes?.[header] || 'TEXT',
           notNull: false
         }));
 
-        if (!columns.find((c: any) => c.name === 'id')) {
+        if (!columns.find((c: any) => c.name.toLowerCase() === 'id')) {
           columns.unshift({ name: 'id', type: 'INTEGER', primaryKey: true, notNull: true });
         }
 
@@ -218,10 +228,8 @@ export const TablesView: React.FC = () => {
           columns: columns
         });
 
-        // Small delay to allow schema to propagate
+        // Wait for schema propagation
         await new Promise(resolve => setTimeout(resolve, 500));
-        await refreshSchema();
-        addToast(`Table "${targetTable}" created`, 'success');
       }
 
       const response = await rpc('batchInsert', { 
@@ -231,18 +239,16 @@ export const TablesView: React.FC = () => {
 
       if (response && response.data) {
         const { inserted, total } = response.data;
-        if (inserted === 0) {
-          addToast(`Warning: 0 of ${total} rows were imported. Check column headers.`, 'error');
-        } else {
-          addToast(`Successfully imported ${inserted} of ${total} rows`, 'success');
-        }
+        addToast(`Imported ${inserted}/${total} rows`, 'success');
       }
+      
       setCsvPreview(null);
       await refreshSchema();
-      setLastImportMap(prev => ({ ...prev, [targetTable]: Date.now() }));
+      
+      // Update selection to the new (sanitized) name and force reload
       setSelectedTable(targetTable);
-      // Force reload the data grid
-      reload();
+      setTimeout(() => reload(), RELOAD_DELAY_MS); 
+      
     } catch (error: any) {
       console.error("Import error details:", error);
       addToast('Import failed: ' + error.message, 'error');

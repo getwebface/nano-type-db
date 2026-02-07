@@ -196,44 +196,34 @@ export class NanoStore extends DurableObject<Env> {
             break;
           }
 
-          const knownTable = TableMap[table];
-          if (knownTable) {
-            await this.db.insert(knownTable).values(rows).run();
-            // Broadcast update for known tables
-            this.broadcastUpdate(table, 'create', { count: rows.length });
-            data = { data: { inserted: rows.length, total: rows.length } };
-            } else {
-            // Dynamic SQL path
-            const keys = Object.keys(rows[0]);
-            
-            // SECURITY: Ensure table name is safe
-            const safeTableName = table.replace(/[^a-zA-Z0-9_]/g, '');
-            
-            // Build query
-            const cols = keys.map(k => `"${k.replace(/"/g, '""')}"`).join(',');
-            const placeholders = keys.map(() => '?').join(',');
-            const sqlStmt = `INSERT INTO "${safeTableName}" (${cols}) VALUES (${placeholders})`;
-                
-            let inserted = 0;
-            
-            // FIX: Use transactionSync instead of SQL BEGIN TRANSACTION
-            try {
+          // 1. Sanitize table name (Must match frontend logic)
+          const safeTableName = table.toLowerCase().replace(/[^a-z0-9_]/g, '');
+
+          // 2. Prepare keys and statement
+          const keys = Object.keys(rows[0]);
+          const cols = keys.map(k => `"${k.replace(/"/g, '""')}"`).join(',');
+          const placeholders = keys.map(() => '?').join(',');
+          const sqlStmt = `INSERT INTO "${safeTableName}" (${cols}) VALUES (${placeholders})`;
+          
+          // 3. Execute Insert using Cloudflare's Transaction API
+          let inserted = 0;
+          try {
+              // FIX: Use transactionSync instead of SQL BEGIN TRANSACTION
               this.ctx.storage.transactionSync(() => {
-                for (const row of rows) {
-                  this.sql.exec(sqlStmt, ...keys.map(k => row[k]));
-                  inserted++;
-                }
+                  for (const row of rows) {
+                      this.sql.exec(sqlStmt, ...keys.map(k => row[k]));
+                      inserted++;
+                  }
               });
-                
-              // Broadcast update so UI refreshes
+              
+              // 4. Broadcast update so UI refreshes immediately
               this.broadcastUpdate(safeTableName, 'create', { count: inserted });
-            } catch (e) {
+              data = { data: { inserted, total: rows.length } };
+              
+          } catch (e: any) {
               console.error('Batch insert failed:', e);
-              throw e; // Rethrow to inform client
-            }
-            
-            data = { data: { inserted, total: rows.length } };
-            }
+              throw new Error(`Insert failed: ${e.message}`);
+          }
           break;
         }
 
