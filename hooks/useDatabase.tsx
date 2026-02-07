@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
-import { useWebSocket } from 'partysocket/react';
-import { DatabaseContextType, QueryResult, UpdateEvent, ToastMessage, Schema, UsageStat, OptimisticUpdate } from '../types';
+import usePartySocket from 'partysocket/react';
+import { DatabaseContextType, QueryResult, ToastMessage, Schema, UsageStat, OptimisticUpdate } from '../types';
+import { authClient } from '../src/lib/auth-client';
 
 // Dynamic URL detection for production/dev
 const HOST = window.location.host;
@@ -28,6 +29,8 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     const pendingOptimisticUpdates = useRef<Map<string, OptimisticUpdate>>(new Map());
     const pendingRequests = useRef<Map<string, { resolve: (value: any) => void; reject: (reason?: any) => void }>>(new Map());
     const subscribedTablesRef = useRef<Set<string>>(new Set());
+
+    const { data: sessionData } = authClient.useSession();
 
     // Reconnection countdown state
     const [reconnectInfo, setReconnectInfo] = useState<{ attempt: number; maxAttempts: number; nextRetryAt: number | null }>({
@@ -80,7 +83,6 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                 resolve(data);
             }
             pendingRequests.current.delete(data.requestId);
-            return;
         }
 
         // Handle psychic_push message for pre-fetched data
@@ -98,7 +100,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
 
         // Handle schema_update message for reactive schema changes
         if (data.type === 'schema_update') {
-            console.log('📊 Schema Update - Refreshing schema');
+            console.log('🔄 Schema Update - Refreshing schema');
             if (data.schema) {
                 setSchema(data.schema);
             } else {
@@ -160,14 +162,16 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         }
     }
 
-    const wsUrl = (() => {
-        const url = new URL(`${WS_PROTOCOL}://${HOST}/${WS_BASE_PATH}`);
-        if (roomId) url.searchParams.set('room_id', roomId);
-        if (apiKey) url.searchParams.set('key', apiKey);
-        return url.toString();
-    })();
-
-    const socket = useWebSocket(wsUrl, undefined, {
+    const partySocket = usePartySocket({
+        host: HOST,
+        room: roomId || 'default',
+        basePath: WS_BASE_PATH,
+        protocol: WS_PROTOCOL,
+        query: () => ({
+            room_id: roomId || undefined,
+            key: apiKey || undefined,
+            session_token: sessionData?.session?.token || undefined
+        }),
         enabled: Boolean(roomId),
         onOpen: () => {
             wsLog('Connected to WebSocket');
@@ -178,24 +182,24 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             addToast('Connected to database', 'success');
 
             if (lastCursorRef.current) {
-                socket.send(JSON.stringify({
+                partySocket.send(JSON.stringify({
                     action: 'setCursor',
                     payload: lastCursorRef.current
                 }));
             }
             if (lastPresenceRef.current) {
-                socket.send(JSON.stringify({
+                partySocket.send(JSON.stringify({
                     action: 'setPresence',
                     payload: lastPresenceRef.current
                 }));
             }
 
             subscribedTablesRef.current.forEach(table => {
-                socket.send(JSON.stringify({ action: 'subscribe', table }));
+                partySocket.send(JSON.stringify({ action: 'subscribe', table }));
             });
 
-            socket.send(JSON.stringify({ action: 'rpc', method: 'getSchema' }));
-            socket.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
+            partySocket.send(JSON.stringify({ action: 'rpc', method: 'getSchema' }));
+            partySocket.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
         },
         onMessage: (event) => {
             handleSocketMessage(event);
@@ -206,22 +210,25 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             setIsConnected(false);
             setConnectionQuality(prev => ({ ...prev, latency: 0 }));
             setReconnectInfo({
-                attempt: socket.retryCount || 0,
+                attempt: partySocket.retryCount || 0,
                 maxAttempts: 0,
                 nextRetryAt: null
             });
         },
         onError: (error) => {
             wsLog('WebSocket error:', error);
+            // Often a 401 will just manifest as a close/error here
         }
     });
+
+    const socket = roomId ? (partySocket as unknown as WebSocket) : null;
 
     /** Manually trigger a reconnection using PartySocket */
     const manualReconnect = useCallback(() => {
         if (!roomId) return;
         addToast('Manually reconnecting...', 'info');
-        socket.reconnect();
-    }, [socket, roomId]);
+        partySocket.reconnect();
+    }, [partySocket, roomId]);
 
     const performOptimisticAction = useCallback((id: string, action: string, payload: any, rollback: () => void) => {
         // Record optimistic update
@@ -248,57 +255,43 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     }, []);
 
     const runQuery = useCallback((sql: string, tableContext?: string) => {
-        // If it's a mutation, track it
-        const isMutation = /^(INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)/i.test(sql.trim());
-        if (isMutation) {
-            // For raw SQL mutations, we can't easily do optimistic updates
-            // But we can subscribe to the table to get updates
-        }
-
         if (tableContext) {
-            socket.send(JSON.stringify({ action: 'subscribe_query', sql, table: tableContext }));
+            partySocket.send(JSON.stringify({ action: 'subscribe_query', sql, table: tableContext }));
         } else {
-            socket.send(JSON.stringify({ action: 'query', sql })); 
+            partySocket.send(JSON.stringify({ action: 'query', sql })); 
         }
-    }, [socket]);
+    }, [partySocket]);
 
     const runReactiveQuery = useCallback((sql: string, tableContext: string) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        socket.send(JSON.stringify({ action: 'subscribe_query', sql, table: tableContext }));
-    }, [socket]);
+        partySocket.send(JSON.stringify({ action: 'subscribe_query', sql, table: tableContext }));
+    }, [partySocket]);
 
     const subscribe = useCallback((table: string) => {
-        if (socket && socket.readyState === WebSocket.OPEN) {
-            subscribedTablesRef.current.add(table);
-            socket.send(JSON.stringify({ action: 'subscribe', table }));
-        }
-    }, [socket]);
+        subscribedTablesRef.current.add(table);
+        partySocket.send(JSON.stringify({ action: 'subscribe', table }));
+    }, [partySocket]);
 
     const setCursor = useCallback((userId: string, position: any) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        
         // Store for re-connection
         lastCursorRef.current = { userId, position };
         
         // Send to server
-        socket.send(JSON.stringify({
+        partySocket.send(JSON.stringify({
             action: 'setCursor',
             payload: { userId, position }
         }));
-    }, [socket]);
+    }, [partySocket]);
 
     const setPresence = useCallback((userId: string, status: any) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        
          // Store for re-connection
         lastPresenceRef.current = { userId, status };
         
         // Send to server
-        socket.send(JSON.stringify({
+        partySocket.send(JSON.stringify({
             action: 'setPresence',
             payload: { userId, status }
         }));
-    }, [socket]);
+    }, [partySocket]);
 
     const getPsychicData = useCallback((key: string): any => {
         if (psychicCache.current.has(key)) {
@@ -309,14 +302,12 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     }, []);
 
     const streamIntent = useCallback((text: string) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        
-        socket.send(JSON.stringify({
+        partySocket.send(JSON.stringify({
             action: 'rpc',
             method: 'streamIntent',
             payload: { text }
         }));
-    }, [socket]);
+    }, [partySocket]);
 
     /**
      * Generic RPC call - returns a Promise that resolves with the result
@@ -338,7 +329,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             pendingRequests.current.set(requestId, { resolve, reject });
             
             // Send the RPC request with requestId
-            socket.send(JSON.stringify({
+            partySocket.send(JSON.stringify({
                 action: 'rpc',
                 method,
                 payload,
@@ -354,12 +345,12 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                 }
             }, timeout);
         });
-    }, [socket]);
+    }, [partySocket]);
 
     const performMutation = useCallback((method: string, payload: any) => {
-         // This is a wrapper for rpc, but specifically for mutations that might use optimistic updates
-         return rpc(method, payload);
-    }, [rpc]);
+            // PartySocket handles offline buffering, so we don't check readyState
+            return rpc(method, payload);
+        }, [rpc]);
 
     const refreshSchema = useCallback(async () => {
          try {
@@ -375,13 +366,11 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     }, []);
 
     const refreshUsage = useCallback(() => {
-        if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ 
-                action: 'rpc', 
-                method: 'getUsage'
-            }));
-        }
-    }, [socket]);
+        partySocket.send(JSON.stringify({ 
+            action: 'rpc', 
+            method: 'getUsage'
+        }));
+    }, [partySocket]);
 
     const connect = useCallback((nextRoomId: string) => {
         if (!nextRoomId) return;
@@ -394,7 +383,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
 
     // Psychic Auto-Sensor: Global input listener
     useEffect(() => {
-        if (!psychic || !socket || socket.readyState !== WebSocket.OPEN) return;
+        if (!psychic) return;
 
         const handleGlobalInput = (event: Event) => {
             const target = event.target as HTMLElement;
@@ -430,7 +419,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                 clearTimeout(debounceTimerRef.current);
             }
         };
-    }, [psychic, socket, streamIntent]);
+    }, [psychic, streamIntent]);
 
     // Cleanup on unmount
     // PartySocket manages its own lifecycle.
@@ -464,32 +453,29 @@ export const useRealtimeQuery = (tableName: string, options: { limit?: number; }
     };
 
     const loadMore = useCallback(() => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        
         // Calculate next page offset
         const nextOffset = currentOffset + limit;
-        
         // Don't fetch if we already have all data
         if (total > 0 && nextOffset >= total) return;
-
         setCurrentOffset(nextOffset);
 
-        if (tableName === 'tasks') {
-            socket.send(JSON.stringify({ 
-                action: 'rpc', 
-                method: 'listTasks',
-                payload: { limit, offset: nextOffset }
-            }));
-        } else {
-             // For other tables, use executeSQL with pagination
-             socket.send(JSON.stringify({ 
-                action: 'rpc', 
-                method: 'executeSQL', 
-                payload: { 
-                    sql: `SELECT * FROM ${tableName} LIMIT ${limit} OFFSET ${nextOffset}`, 
-                    readonly: true 
-                }
-            }));
+        if (socket) {
+            if (tableName === 'tasks') {
+                socket.send(JSON.stringify({ 
+                    action: 'rpc', 
+                    method: 'listTasks',
+                    payload: { limit, offset: nextOffset }
+                }));
+            } else {
+                 socket.send(JSON.stringify({ 
+                    action: 'rpc', 
+                    method: 'executeSQL', 
+                    payload: { 
+                        sql: `SELECT * FROM ${tableName} LIMIT ${limit} OFFSET ${nextOffset}`, 
+                        readonly: true 
+                    }
+                }));
+            }
         }
     }, [socket, currentOffset, total, limit, tableName]);
 
@@ -499,9 +485,7 @@ export const useRealtimeQuery = (tableName: string, options: { limit?: number; }
         setCurrentOffset(0);
         setTotal(0);
         
-        // Initial fetch handled by user entering context which triggers query usually, 
-        // but let's ensure we fetch page 0 explicitly if connected
-        if (socket && socket.readyState === WebSocket.OPEN && tableName) {
+        if (socket && isConnected && tableName) {
              if (tableName === 'tasks') {
                 socket.send(JSON.stringify({ 
                     action: 'rpc', 
@@ -518,7 +502,6 @@ export const useRealtimeQuery = (tableName: string, options: { limit?: number; }
                         readonly: true 
                     }
                 }));
-                 // Also ask for count
                  socket.send(JSON.stringify({ 
                     action: 'rpc', 
                     method: 'executeSQL', 
@@ -529,7 +512,7 @@ export const useRealtimeQuery = (tableName: string, options: { limit?: number; }
                 }));
             }
         }
-    }, [tableName, socket, isConnected]);
+    }, [tableName, socket, isConnected, subscribe, limit]);
 
     // Handle updates and initial data
     useEffect(() => {
