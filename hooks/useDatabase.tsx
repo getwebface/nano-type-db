@@ -1,38 +1,23 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
+import usePartySocket from 'partysocket/react';
 import { DatabaseContextType, QueryResult, UpdateEvent, ToastMessage, Schema, UsageStat, OptimisticUpdate } from '../types';
-import { authClient } from '../src/lib/auth-client';
 
 // Dynamic URL detection for production/dev
-const PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-const HOST = window.location.host; 
-const WORKER_URL = `${PROTOCOL}//${HOST}`; 
+const HOST = window.location.host;
+const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss' : 'ws';
 const HTTP_URL = `${window.location.protocol}//${HOST}`;
 
 // In development with Vite proxy, use proxied WebSocket path
 const IS_DEV = import.meta.env.DEV;
-const WS_PATH_PREFIX = IS_DEV ? '/__ws' : '';
+const WS_BASE_PATH = IS_DEV ? '__ws/websocket' : 'websocket';
 
 // Configuration constants
 const OPTIMISTIC_UPDATE_TIMEOUT = 10000; // 10 seconds
-const WS_CONNECTION_TIMEOUT = 10000; // 10 seconds for WebSocket to connect
-const WS_RECONNECT_BASE_INTERVAL = 1000; // 1 second base for exponential backoff
-const WS_RECONNECT_MAX_INTERVAL = 30000; // 30 seconds max backoff
-const MAX_RECONNECT_ATTEMPTS = 5; // Maximum reconnection attempts
-const HEARTBEAT_INTERVAL = 30000; // 30 seconds - send ping to keep connection alive
-const HEARTBEAT_TIMEOUT = 5000; // 5 seconds - expect pong response
-
-/** Calculate reconnect delay with exponential backoff and jitter */
-function getReconnectDelay(attempt: number): number {
-    const exponentialDelay = WS_RECONNECT_BASE_INTERVAL * Math.pow(2, attempt - 1);
-    const cappedDelay = Math.min(exponentialDelay, WS_RECONNECT_MAX_INTERVAL);
-    const jitter = Math.random() * cappedDelay * 0.3; // 30% jitter
-    return cappedDelay + jitter;
-}
 
 const DatabaseContext = createContext<DatabaseContextType | null>(null);
 
 export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: boolean; apiKey?: string }> = ({ children, psychic = false, apiKey }) => {
-    const [socket, setSocket] = useState<WebSocket | null>(null);
+    const [roomId, setRoomId] = useState<string>('');
     const [status, setStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
     const [isConnected, setIsConnected] = useState(false);
     const [lastResult, setLastResult] = useState<QueryResult | null>(null);
@@ -41,19 +26,12 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     const [usageStats, setUsageStats] = useState<UsageStat[]>([]);
     const currentRoomIdRef = useRef<string>("");
     const pendingOptimisticUpdates = useRef<Map<string, OptimisticUpdate>>(new Map());
-    const reconnectAttemptsRef = useRef<number>(0);
-    const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-    const connectionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-    const shouldReconnectRef = useRef<boolean>(true);
-    const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
-    const heartbeatTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-    const lastPongRef = useRef<number>(Date.now());
     const subscribedTablesRef = useRef<Set<string>>(new Set());
 
     // Reconnection countdown state
     const [reconnectInfo, setReconnectInfo] = useState<{ attempt: number; maxAttempts: number; nextRetryAt: number | null }>({
         attempt: 0,
-        maxAttempts: MAX_RECONNECT_ATTEMPTS,
+        maxAttempts: 0,
         nextRetryAt: null
     });
 
@@ -63,7 +41,6 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         pingsLost: 0,
         totalPings: 0
     });
-    const pingSentAtRef = useRef<number>(0);
 
     // WebSocket debug mode
     const [wsDebug, setWsDebug] = useState<boolean>(IS_DEV);
@@ -76,9 +53,6 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     const lastCursorRef = useRef<{ userId: string; position: any } | null>(null);
     const lastPresenceRef = useRef<{ userId: string; status: any } | null>(null);
     
-    // IMPORTANT: Make sure connect function is available in scope for manualReconnect
-    const connectRef = useRef<((roomId: string) => void) | null>(null);
-
     const addToast = (message: string, type: 'success' | 'info' | 'error' = 'info') => {
         const id = Math.random().toString(36).substring(7);
         setToasts(prev => [...prev, { id, message, type }]);
@@ -94,63 +68,151 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         }
     }, [wsDebug]);
 
-    /** Schedule a reconnection with exponential backoff and countdown tracking */
-    const scheduleReconnect = useCallback((roomId: string, connectFn: (roomId: string) => void) => {
-        if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
-            addToast('Maximum reconnection attempts reached. Use the reconnect button or refresh the page.', 'error');
-            setReconnectInfo({ attempt: reconnectAttemptsRef.current, maxAttempts: MAX_RECONNECT_ATTEMPTS, nextRetryAt: null });
+    function handleSocketMessage(event: MessageEvent) {
+        const data = JSON.parse(event.data);
+
+        // Handle psychic_push message for pre-fetched data
+        if (data.type === 'psychic_push') {
+            console.log('🔮 Psychic Catch - Storing data in cache');
+            if (data.data && Array.isArray(data.data)) {
+                data.data.forEach((record: any) => {
+                    if (record.id) {
+                        psychicCache.current.set(String(record.id), record);
+                    }
+                });
+            }
             return;
         }
 
-        reconnectAttemptsRef.current++;
-        const delay = getReconnectDelay(reconnectAttemptsRef.current);
-        const nextRetryAt = Date.now() + delay;
+        // Handle schema_update message for reactive schema changes
+        if (data.type === 'schema_update') {
+            console.log('📊 Schema Update - Refreshing schema');
+            if (data.schema) {
+                setSchema(data.schema);
+            } else {
+                // Fallback: fetch schema from HTTP endpoint
+                refreshSchema();
+            }
+            return;
+        }
 
-        wsLog(`Scheduling reconnect attempt ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS} in ${Math.round(delay)}ms`);
+        if (data.type === 'query_result') {
+            if (data.originalSql === 'getUsage') {
+                setUsageStats(data.data);
+            } else if (data.originalSql === 'getAuditLog') {
+                // Handle audit log if needed
+            } else {
+                setLastResult(data);
+            }
+        } else if (data.type === 'error') {
+             if (data.code === 'TABLE_NOT_FOUND' && data.details?.table) {
+                addToast(`Table '${data.details.table}' not found. Please create it first.`, 'error');
+                // Trigger Create Table Modal via window event (handled in App.tsx)
+                window.dispatchEvent(new CustomEvent('open-create-table-modal', { 
+                    detail: { tableName: data.details.table } 
+                }));
+             } else {
+                addToast(data.error || 'An error occurred', 'error');
+             }
+        } else if (data.type === 'mutation_success') {
+            // Remove optimistic update from pending queue on success
+            const updateId = data.updateId;
+            if (updateId && pendingOptimisticUpdates.current.has(updateId)) {
+                pendingOptimisticUpdates.current.delete(updateId);
+            }
+            addToast(`Action '${data.action}' completed`, 'success');
+        } else if (data.type === 'mutation_error') {
+            // Rollback optimistic update on error
+            const updateId = data.updateId;
+            if (updateId && pendingOptimisticUpdates.current.has(updateId)) {
+                const update = pendingOptimisticUpdates.current.get(updateId)!;
+                update.rollback();
+                pendingOptimisticUpdates.current.delete(updateId);
+                addToast(`Action '${data.action}' failed - rolled back`, 'error');
+            }
+        } else if (data.event === 'update') {
+            addToast(`Table '${data.table}' updated`);
+            // Pass action-based update data with the event
+            window.dispatchEvent(new CustomEvent('db-update', { 
+                detail: { 
+                    table: data.table,
+                    action: data.action, // 'added', 'modified', 'deleted'
+                    row: data.row,
+                    // Legacy support for old diff format (if needed)
+                    diff: data.diff,
+                    fullData: data.fullData
+                } 
+            }));
+        } else if (data.error) {
+            addToast(`Error: ${data.error}`, 'error');
+        }
+    }
 
-        setReconnectInfo({
-            attempt: reconnectAttemptsRef.current,
-            maxAttempts: MAX_RECONNECT_ATTEMPTS,
-            nextRetryAt
-        });
+    const partySocket = usePartySocket({
+        host: HOST,
+        room: roomId || 'default',
+        basePath: WS_BASE_PATH,
+        protocol: WS_PROTOCOL,
+        query: () => ({
+            room_id: roomId || undefined,
+            key: apiKey || undefined
+        }),
+        enabled: Boolean(roomId),
+        onOpen: () => {
+            wsLog('Connected to WebSocket');
+            setStatus('connected');
+            setIsConnected(true);
+            setReconnectInfo({ attempt: 0, maxAttempts: 0, nextRetryAt: null });
+            setConnectionQuality({ latency: 0, pingsLost: 0, totalPings: 0 });
+            addToast('Connected to database', 'success');
 
-        addToast(`Connection lost. Reconnecting in ${Math.ceil(delay / 1000)}s (attempt ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})...`, 'info');
+            if (lastCursorRef.current) {
+                partySocket.send(JSON.stringify({
+                    action: 'setCursor',
+                    payload: lastCursorRef.current
+                }));
+            }
+            if (lastPresenceRef.current) {
+                partySocket.send(JSON.stringify({
+                    action: 'setPresence',
+                    payload: lastPresenceRef.current
+                }));
+            }
 
-        reconnectTimeoutRef.current = setTimeout(() => {
-            setReconnectInfo(prev => ({ ...prev, nextRetryAt: null }));
-            connectFn(roomId);
-        }, delay);
-    }, [wsLog]);
+            subscribedTablesRef.current.forEach(table => {
+                partySocket.send(JSON.stringify({ action: 'subscribe', table }));
+            });
 
-    /** Manually trigger a reconnection (resets attempt counter) */
+            partySocket.send(JSON.stringify({ action: 'rpc', method: 'getSchema' }));
+            partySocket.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
+        },
+        onMessage: (event) => {
+            handleSocketMessage(event);
+        },
+        onClose: (event) => {
+            wsLog('WebSocket closed:', event.code, event.reason);
+            setStatus('disconnected');
+            setIsConnected(false);
+            setConnectionQuality(prev => ({ ...prev, latency: 0 }));
+            setReconnectInfo({
+                attempt: partySocket.retryCount || 0,
+                maxAttempts: 0,
+                nextRetryAt: null
+            });
+        },
+        onError: (error) => {
+            wsLog('WebSocket error:', error);
+        }
+    });
+
+    const socket = roomId ? (partySocket as unknown as WebSocket) : null;
+
+    /** Manually trigger a reconnection using PartySocket */
     const manualReconnect = useCallback(() => {
-        const roomId = currentRoomIdRef.current;
         if (!roomId) return;
-
-        // Clear any pending reconnect timers
-        if (reconnectTimeoutRef.current) {
-            clearTimeout(reconnectTimeoutRef.current);
-            reconnectTimeoutRef.current = null;
-        }
-
-        // Reset attempt counter for manual reconnect
-        reconnectAttemptsRef.current = 0;
-        setReconnectInfo({ attempt: 0, maxAttempts: MAX_RECONNECT_ATTEMPTS, nextRetryAt: null });
         addToast('Manually reconnecting...', 'info');
-
-        // Close existing socket if any
-        if (socket) {
-            shouldReconnectRef.current = false;
-            socket.onclose = null;
-            socket.onerror = null;
-            socket.close();
-        }
-        shouldReconnectRef.current = true;
-        // connectRef will be set after connect is defined
-        if (connectRef.current) {
-            connectRef.current(roomId);
-        }
-    }, [socket]);
+        partySocket.reconnect();
+    }, [partySocket, roomId]);
 
     const performOptimisticAction = useCallback((id: string, action: string, payload: any, rollback: () => void) => {
         // Record optimistic update
@@ -342,251 +404,26 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             }
          } catch (e) {
              console.error('Failed to fetch schema via HTTP:', e);
-             // Verify WS fallback
-             if(socket && socket.readyState === WebSocket.OPEN) {
-                 socket.send(JSON.stringify({ action: 'rpc', method: 'getSchema' }));
-             }
          }
-    }, [socket]);
+    }, []);
 
     const refreshUsage = useCallback(() => {
-        if(socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ 
+        if (partySocket.readyState === WebSocket.OPEN) {
+            partySocket.send(JSON.stringify({ 
                 action: 'rpc', 
                 method: 'getUsage'
             }));
         }
-    }, [socket]);
+    }, [partySocket]);
 
-    const connect = useCallback((roomId: string) => {
-        if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
-            // Already connected or connecting, but check if room changed
-            if (currentRoomIdRef.current === roomId) return;
-            socket.close();
-        }
-
-        currentRoomIdRef.current = roomId;
+    const connect = useCallback((nextRoomId: string) => {
+        if (!nextRoomId) return;
+        if (currentRoomIdRef.current === nextRoomId && status === 'connected') return;
+        currentRoomIdRef.current = nextRoomId;
         setStatus('connecting');
-        
-        // Construct WebSocket URL with authentication
-        const wsUrl = new URL(`${WORKER_URL}${WS_PATH_PREFIX}/websocket`);
-        wsUrl.searchParams.set('room_id', roomId);
-        
-        // Add auth token if available (commented out until auth variable is available)
-        // if (authToken) wsUrl.searchParams.set('token', authToken);
-        if (apiKey) wsUrl.searchParams.set('key', apiKey);
-
-        wsLog('Connecting to:', wsUrl.toString());
-
-        const ws = new WebSocket(wsUrl.toString());
-
-        // Set connection timeout
-        connectionTimeoutRef.current = setTimeout(() => {
-            if (ws.readyState !== WebSocket.OPEN) {
-                wsLog('Connection timed out');
-                ws.close();
-                // trigger reconnect logic via onclose
-            }
-        }, WS_CONNECTION_TIMEOUT);
-
-        ws.onopen = () => {
-            wsLog('Connected to WebSocket');
-            
-            // Clear connection timeout
-            if (connectionTimeoutRef.current) {
-                clearTimeout(connectionTimeoutRef.current);
-                connectionTimeoutRef.current = null;
-            }
-            
-            setStatus('connected');
-            setIsConnected(true);
-            setSocket(ws);
-            reconnectAttemptsRef.current = 0; // Reset reconnect attempts on success
-            setReconnectInfo(prev => ({ ...prev, attempt: 0, nextRetryAt: null }));
-            addToast('Connected to database', 'success');
-
-            // Restore state if this is a reconnection
-            if (lastCursorRef.current) {
-                setCursor(lastCursorRef.current.userId, lastCursorRef.current.position);
-            }
-            if (lastPresenceRef.current) {
-                setPresence(lastPresenceRef.current.userId, lastPresenceRef.current.status);
-            }
-            
-            // Resubscribe to tables
-            subscribedTablesRef.current.forEach(table => {
-                ws.send(JSON.stringify({ action: 'subscribe', table }));
-            });
-
-            // Start heartbeat
-            if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
-            heartbeatIntervalRef.current = setInterval(() => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    pingSentAtRef.current = Date.now();
-                    ws.send(JSON.stringify({ action: 'ping' }));
-                    
-                    // Set timeout for pong response
-                    if (heartbeatTimeoutRef.current) clearTimeout(heartbeatTimeoutRef.current);
-                    heartbeatTimeoutRef.current = setTimeout(() => {
-                        wsLog('Heartbeat timeout - reconnecting');
-                        // No pong received, assume connection dead
-                        ws.close(); 
-                    }, HEARTBEAT_TIMEOUT);
-                }
-            }, HEARTBEAT_INTERVAL);
-
-            // Fetch initial schema
-             ws.send(JSON.stringify({ action: 'rpc', method: 'getSchema' }));
-             // Fetch usage stats
-             ws.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
-        };
-
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            
-            // Handle pong
-            if (data.type === 'pong') {
-                const now = Date.now();
-                const latency = now - pingSentAtRef.current;
-                lastPongRef.current = now;
-                
-                // Update connection quality metrics
-                setConnectionQuality(prev => ({
-                    latency: Math.round((prev.latency * 0.7) + (latency * 0.3)), // Moving average
-                    pingsLost: prev.pingsLost,
-                    totalPings: prev.totalPings + 1
-                }));
-                
-                if (wsDebug && latency > 200) {
-                    wsLog(`Pong received, latency: ${latency}ms`);
-                }
-                if (heartbeatTimeoutRef.current) {
-                    clearTimeout(heartbeatTimeoutRef.current);
-                    heartbeatTimeoutRef.current = null;
-                }
-                return;
-            }
-
-            // Handle psychic_push message for pre-fetched data
-            if (data.type === 'psychic_push') {
-                console.log('🔮 Psychic Catch - Storing data in cache');
-                if (data.data && Array.isArray(data.data)) {
-                    data.data.forEach((record: any) => {
-                        if (record.id) {
-                            psychicCache.current.set(String(record.id), record);
-                        }
-                    });
-                }
-                return;
-            }
-
-            // Handle schema_update message for reactive schema changes
-            if (data.type === 'schema_update') {
-                console.log('📊 Schema Update - Refreshing schema');
-                if (data.schema) {
-                    setSchema(data.schema);
-                } else {
-                    // Fallback: fetch schema from HTTP endpoint
-                    refreshSchema();
-                }
-                return;
-            }
-
-            if (data.type === 'query_result') {
-                if (data.originalSql === 'getUsage') {
-                    setUsageStats(data.data);
-                } else if (data.originalSql === 'getAuditLog') {
-                    // Handle audit log if needed
-                } else {
-                    setLastResult(data);
-                }
-            } else if (data.type === 'error') {
-                 if (data.code === 'TABLE_NOT_FOUND' && data.details?.table) {
-                    addToast(`Table '${data.details.table}' not found. Please create it first.`, 'error');
-                    // Trigger Create Table Modal via window event (handled in App.tsx)
-                    window.dispatchEvent(new CustomEvent('open-create-table-modal', { 
-                        detail: { tableName: data.details.table } 
-                    }));
-                 } else {
-                    addToast(data.error || 'An error occurred', 'error');
-                 }
-            } else if (data.type === 'mutation_success') {
-                // Remove optimistic update from pending queue on success
-                const updateId = data.updateId;
-                if (updateId && pendingOptimisticUpdates.current.has(updateId)) {
-                    pendingOptimisticUpdates.current.delete(updateId);
-                }
-                addToast(`Action '${data.action}' completed`, 'success');
-            } else if (data.type === 'mutation_error') {
-                // Rollback optimistic update on error
-                const updateId = data.updateId;
-                if (updateId && pendingOptimisticUpdates.current.has(updateId)) {
-                    const update = pendingOptimisticUpdates.current.get(updateId)!;
-                    update.rollback();
-                    pendingOptimisticUpdates.current.delete(updateId);
-                    addToast(`Action '${data.action}' failed - rolled back`, 'error');
-                }
-            } else if (data.event === 'update') {
-                addToast(`Table '${data.table}' updated`);
-                // Pass action-based update data with the event
-                window.dispatchEvent(new CustomEvent('db-update', { 
-                    detail: { 
-                        table: data.table,
-                        action: data.action, // 'added', 'modified', 'deleted'
-                        row: data.row,
-                        // Legacy support for old diff format (if needed)
-                        diff: data.diff,
-                        fullData: data.fullData
-                    } 
-                }));
-            } else if (data.error) {
-                addToast(`Error: ${data.error}`, 'error');
-            }
-        };
-
-        ws.onclose = (event) => {
-            wsLog('WebSocket closed:', event.code, event.reason);
-            console.log('WebSocket closed:', event.code, event.reason);
-            
-            // Clear connection timeout
-            if (connectionTimeoutRef.current) {
-                clearTimeout(connectionTimeoutRef.current);
-                connectionTimeoutRef.current = null;
-            }
-            
-            // Clear heartbeat timers
-            if (heartbeatIntervalRef.current) {
-                clearInterval(heartbeatIntervalRef.current);
-                heartbeatIntervalRef.current = null;
-            }
-            if (heartbeatTimeoutRef.current) {
-                clearTimeout(heartbeatTimeoutRef.current);
-                heartbeatTimeoutRef.current = null;
-            }
-
-            setStatus('disconnected');
-            setIsConnected(false);
-            setSocket(null);
-
-            // Trigger visual "offline" state if needed
-            setConnectionQuality(prev => ({ ...prev, latency: 0 }));
-
-            // Attempt reconnect if intended (not manually closed)
-            if (shouldReconnectRef.current) {
-                scheduleReconnect(roomId, connect);
-            }
-        };
-
-        ws.onerror = (error) => {
-            wsLog('WebSocket error:', error);
-            // Error will trigger onclose, which handles reconnect
-        };
-    }, [wsDebug, wsLog, scheduleReconnect, apiKey, refreshSchema]);
-    
-    // Store connect ref for manual reconnect
-    useEffect(() => {
-        connectRef.current = connect;
-    }, [connect]);
+        setIsConnected(false);
+        setRoomId(nextRoomId);
+    }, [status]);
 
     // Psychic Auto-Sensor: Global input listener
     useEffect(() => {
@@ -631,28 +468,8 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     // Cleanup on unmount
     useEffect(() => {
         return () => {
-            shouldReconnectRef.current = false;
-            
-            if (reconnectTimeoutRef.current) {
-                clearTimeout(reconnectTimeoutRef.current);
-            }
-            
-            if (connectionTimeoutRef.current) {
-                clearTimeout(connectionTimeoutRef.current);
-            }
-            
-            if (heartbeatIntervalRef.current) {
-                clearInterval(heartbeatIntervalRef.current);
-            }
-            
-            if (heartbeatTimeoutRef.current) {
-                clearTimeout(heartbeatTimeoutRef.current);
-            }
-            
-            if (socket) {
-                socket.onclose = null;
-                socket.onerror = null;
-                socket.close();
+            if (partySocket) {
+                partySocket.close();
             }
         };
     }, []); // Empty dependency array ensures this only runs on unmount
