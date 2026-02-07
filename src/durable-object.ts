@@ -10,9 +10,10 @@ import {
 } from "./lib/security";
 
 // 🛡️ Table Registry
+// 🛡️ FIX: Removed 'tasks' from registry
 const TableMap: Record<string, any> = {
-    tasks: schema.tasks,
-    _webhooks: schema.webhooks,
+  _webhooks: schema.webhooks,
+  // Add other system tables here if needed
 };
 
 // --- Helper Classes (MemoryStore/DebouncedWriter omitted for brevity but assumed present) ---
@@ -175,46 +176,36 @@ export class NanoStore extends DurableObject<Env> {
     let data;
     try {
       switch (payload.method) {
-        case 'listTasks': {
-          // 🛡️ FIX: Explicitly cast to Number to prevent SQL syntax errors
-          const limit = Number(payload.payload.limit) || 500;
-          const offset = Number(payload.payload.offset) || 0;
-          
-          const res = this.sql.exec(
-              "SELECT * FROM tasks LIMIT ? OFFSET ?", 
-              limit, 
-              offset
-          ).toArray();
-          data = res;
-          break;
-        }
-
         case 'batchInsert': {
-            const { table, rows } = payload.payload;
-            if (!rows || rows.length === 0) {
-                data = { inserted: 0, total: 0 };
-                break;
-            }
-            
+          const { table, rows } = payload.payload;
+          if (!rows || rows.length === 0) {
+            data = { inserted: 0, total: 0 };
+            break;
+          }
+
+          const knownTable = TableMap[table];
+          if (knownTable) {
+            await this.db.insert(knownTable).values(rows).run();
+            data = { data: { inserted: rows.length, total: rows.length } };
+          } else {
             // 🛡️ FIX: Use exec() instead of prepare()
             const keys = Object.keys(rows[0]);
-            // Quote columns to be safe
             const cols = keys.map(k => `"${k.replace(/"/g, '""')}"`).join(',');
             const placeholders = keys.map(() => '?').join(',');
             const sqlStmt = `INSERT INTO "${table.replace(/"/g, '""')}" (${cols}) VALUES (${placeholders})`;
-            
+                
             let inserted = 0;
             for (const row of rows) {
-                try {
-                    // Execute directly
-                    this.sql.exec(sqlStmt, ...keys.map(k => row[k]));
-                    inserted++;
-                } catch (e) {
-                    console.error('Insert failed row:', e);
-                }
+              try {
+                this.sql.exec(sqlStmt, ...keys.map(k => row[k]));
+                inserted++;
+              } catch (e) {
+                console.error('Insert failed row:', e);
+              }
             }
             data = { data: { inserted, total: rows.length } };
-            break;
+          }
+          break;
         }
 
         case 'getPresence': {
