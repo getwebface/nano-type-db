@@ -52,6 +52,8 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     // Psychic cache for pre-fetched data (ref to avoid re-renders)
     const psychicCache = useRef<Map<string, any>>(new Map());
     const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const lastPingTimeRef = useRef<number>(0);
+    const pongTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     
     // Track current cursor and presence for re-announcing after reset
     const lastCursorRef = useRef<{ userId: string; position: any } | null>(null);
@@ -74,6 +76,20 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
 
     function handleSocketMessage(event: MessageEvent) {
         const data = JSON.parse(event.data);
+
+        if (data.type === 'pong') {
+            if (pongTimeoutRef.current) {
+                clearTimeout(pongTimeoutRef.current);
+                pongTimeoutRef.current = null;
+            }
+            const latency = Date.now() - lastPingTimeRef.current;
+            setConnectionQuality(prev => ({ 
+                ...prev, 
+                latency, 
+                totalPings: prev.totalPings + 1 
+            }));
+            return;
+        }
 
         if (data.requestId && pendingRequests.current.has(data.requestId)) {
             const { resolve, reject } = pendingRequests.current.get(data.requestId)!;
@@ -305,6 +321,40 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             payload: { userId, status }
         }));
     }, [partySocket]);
+
+    // Heartbeat (Ping/Pong)
+    useEffect(() => {
+        if (!isConnected || !partySocket) return;
+
+        const sendPing = () => {
+            if (partySocket.readyState === WebSocket.OPEN) {
+                lastPingTimeRef.current = Date.now();
+                try {
+                    partySocket.send(JSON.stringify({ action: 'ping' }));
+                } catch (e) {
+                    console.error("Failed to send ping", e);
+                }
+                
+                // Detect dead socket if no pong within 5 seconds
+                if (pongTimeoutRef.current) clearTimeout(pongTimeoutRef.current);
+                pongTimeoutRef.current = setTimeout(() => {
+                    wsLog('Ping timed out - Connection dead');
+                    setConnectionQuality(prev => ({ ...prev, pingsLost: prev.pingsLost + 1 }));
+                    // Force reconnect
+                    partySocket.reconnect();
+                }, 5000);
+            }
+        };
+
+        // Initial ping
+        sendPing();
+
+        const interval = setInterval(sendPing, 30000);
+        return () => {
+            clearInterval(interval);
+            if (pongTimeoutRef.current) clearTimeout(pongTimeoutRef.current);
+        };
+    }, [isConnected, partySocket, wsLog]);
 
     const getPsychicData = useCallback((key: string): any => {
         if (psychicCache.current.has(key)) {

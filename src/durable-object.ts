@@ -371,8 +371,6 @@ export class NanoStore extends DurableObject {
   debouncedWriter: DebouncedWriter;
   // Psychic cache: Track sent IDs per WebSocket
   psychicSentCache: WeakMap<WebSocket, Set<string>>;
-  // SECURITY: Track user IDs per WebSocket for RLS
-  webSocketUserIds: WeakMap<WebSocket, string>;
   // Sync Engine: Track sync status and health
   syncEngine: {
     lastSyncTime: number;
@@ -422,8 +420,6 @@ export class NanoStore extends DurableObject {
     
     // Initialize query subscriptions for automatic reactivity
     this.querySubscriptions = new WeakMap();
-    // SECURITY: Initialize WebSocket user ID tracking for RLS
-    this.webSocketUserIds = new WeakMap();
     
     // SECURITY: Initialize rate limiters
     this.rateLimiters = new Map();
@@ -1726,7 +1722,9 @@ export class NanoStore extends DurableObject {
     this.ctx.acceptWebSocket(webSocket);
     
     // SECURITY: Store userId for this WebSocket connection for RLS
-    this.webSocketUserIds.set(webSocket, userId);
+    // NATIVE FIX: Use WebSocket Tags and Attachments to survive hibernation
+    this.ctx.setWebSocketTag(webSocket, userId);
+    webSocket.serializeAttachment(userId);
 
     // Send reset message when DO wakes up (handleSession starts)
     // This notifies clients to re-announce their cursor/presence
@@ -1735,6 +1733,11 @@ export class NanoStore extends DurableObject {
     } catch (e) {
       console.error("Failed to send reset message:", e);
     }
+  }
+
+  getUserId(webSocket: WebSocket): string {
+    // NATIVE FIX: Retrieve userId from WebSocket attachment (survives hibernation)
+    return webSocket.deserializeAttachment() || "anonymous";
   }
 
   /**
@@ -1866,7 +1869,7 @@ export class NanoStore extends DurableObject {
                     try {
                         // SECURITY: Get userId from WebSocket connection
                         // The userId was stored when the WebSocket was accepted in handleSession
-                        const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                        const userId = this.getUserId(webSocket);
                         
                         // SECURITY: Rate limit check (100 creates per minute per user)
                         if (!this.checkRateLimit(userId, "createTask", 100, 60000)) {
@@ -2124,7 +2127,7 @@ export class NanoStore extends DurableObject {
                         }
                         
                         // SECURITY: Get userId for Row Level Security
-                        const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                        const userId = this.getUserId(webSocket);
                         
                         // Rate limit check
                         if (!this.checkRateLimit(userId, "updateRow", 100, 60000)) {
@@ -2229,7 +2232,7 @@ export class NanoStore extends DurableObject {
                             }
 
                             // Auto-fill Metadata
-                            const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                            const userId = this.getUserId(webSocket);
                             if (existingColumns.has('user_id') && !cleanRow['user_id']) cleanRow['user_id'] = userId;
                             if (existingColumns.has('owner_id') && !cleanRow['owner_id']) cleanRow['owner_id'] = userId;
                             if (existingColumns.has('created_at') && !cleanRow['created_at']) cleanRow['created_at'] = Date.now();
@@ -2349,7 +2352,7 @@ export class NanoStore extends DurableObject {
                              results = await this.readFromD1(`SELECT * FROM tasks WHERE id IN (${placeholders})`, ...taskIds);
                              
                              // SECURITY: Apply RLS filtering to search results
-                             const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                             const userId = this.getUserId(webSocket);
                              results = this.rlsEngine.filterRows('tasks', userId, results);
                          }
                     }
@@ -2361,7 +2364,7 @@ export class NanoStore extends DurableObject {
                 case "streamIntent": {
                     // SECURITY: Psychic Data is gated to pro tier users only
                     // Auto-sensing with AI embeddings burns through budget quickly
-                    const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                    const userId = this.getUserId(webSocket);
                     
                     // Check user tier from AUTH_DB
                     try {
@@ -2513,7 +2516,7 @@ export class NanoStore extends DurableObject {
 
                 case "listTasks": {
                      // SECURITY: Get userId for Row Level Security filtering
-                     const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                     const userId = this.getUserId(webSocket);
                      
                      // Read from D1 replica for horizontal scaling
                      // Support pagination to avoid loading large datasets (max 1000 per page)
@@ -2756,7 +2759,7 @@ export class NanoStore extends DurableObject {
                     }
                     
                     // SECURITY: Rate limiting for executeSQL (50 queries per minute)
-                    const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                    const userId = this.getUserId(webSocket);
                     if (!this.checkRateLimit(userId, "executeSQL", 50, 60000)) {
                         webSocket.send(JSON.stringify({ 
                             type: "query_error", 
@@ -3253,7 +3256,7 @@ export class NanoStore extends DurableObject {
                     }
                     
                     // SECURITY: Rate limiting (10 table creates per minute)
-                    const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                    const userId = this.getUserId(webSocket);
                     if (!this.checkRateLimit(userId, "createTable", 10, 60000)) {
                       webSocket.send(JSON.stringify({
                         type: "mutation_error",
@@ -3352,7 +3355,7 @@ export class NanoStore extends DurableObject {
                     }
                     
                     // SECURITY: Rate limiting (10 table deletes per minute)
-                    const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                    const userId = this.getUserId(webSocket);
                     if (!this.checkRateLimit(userId, "deleteTable", 10, 60000)) {
                       webSocket.send(JSON.stringify({
                         type: "mutation_error",
@@ -3512,11 +3515,6 @@ export class NanoStore extends DurableObject {
       this.querySubscriptions.delete(webSocket);
     }
     
-    // Cleanup user ID tracking
-    if (this.webSocketUserIds.has(webSocket)) {
-      this.webSocketUserIds.delete(webSocket);
-    }
-    
     // Cleanup psychic cache
     if (this.psychicSentCache.has(webSocket)) {
       this.psychicSentCache.delete(webSocket);
@@ -3558,11 +3556,6 @@ export class NanoStore extends DurableObject {
     // Cleanup query subscriptions
     if (this.querySubscriptions.has(webSocket)) {
       this.querySubscriptions.delete(webSocket);
-    }
-    
-    // Cleanup user ID tracking
-    if (this.webSocketUserIds.has(webSocket)) {
-      this.webSocketUserIds.delete(webSocket);
     }
     
     // Cleanup psychic cache
