@@ -8,7 +8,7 @@ import { WebSocketMessageSchema } from "./lib/models";
 // Table Registry: Maps string names to Drizzle Schema Objects.
 // This allows type-safe Drizzle operations for known tables
 // while falling back to raw SQL only for dynamic user-created tables.
-const TableMap: Record<string, any> = {
+const TableMap: Record<string, typeof schema.tasks | typeof schema.webhooks> = {
     tasks: schema.tasks,
     _webhooks: schema.webhooks,
 };
