@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useWebSocket } from 'partysocket/react';
 import { DatabaseContextType, QueryResult, ToastMessage, Schema, UsageStat, OptimisticUpdate } from '../types';
 import { authClient } from '../src/lib/auth-client';
@@ -164,12 +164,21 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
 
     const BASE_WS_URL = `${WS_PROTOCOL}://${HOST}/${WS_BASE_PATH}`;
 
-    const partySocket = useWebSocket(BASE_WS_URL, undefined, {
-        query: {
-            room_id: roomId,
-            ...(apiKey ? { key: apiKey } : {}),
-            ...(sessionData?.session?.token ? { session_token: sessionData.session.token } : {})
-        },
+    const wsUrl = useMemo(() => {
+        const url = new URL(BASE_WS_URL);
+        if (roomId) {
+            url.searchParams.set('room_id', roomId);
+        }
+        if (apiKey) {
+            url.searchParams.set('key', apiKey);
+        }
+        if (sessionData?.session?.token) {
+            url.searchParams.set('session_token', sessionData.session.token);
+        }
+        return url.toString();
+    }, [BASE_WS_URL, roomId, apiKey, sessionData?.session?.token]);
+
+    const partySocket = useWebSocket(wsUrl, undefined, {
         enabled: Boolean(roomId),
         onOpen: () => {
             wsLog('Connected to WebSocket');
