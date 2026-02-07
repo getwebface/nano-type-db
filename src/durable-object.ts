@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { DurableObjectState } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/sqlite-proxy";
-import { tasks, webhooks } from "./db/schema";
+import { tasks, webhooks, type Task } from "./db/schema";
 import { WebSocketMessageSchema } from "./lib/models";
 import { eq } from "drizzle-orm";
 
@@ -116,7 +116,7 @@ export class NanoStore extends DurableObject {
                 ws.send(JSON.stringify({ 
                     type: 'error', 
                     error: 'Invalid message format', 
-                    details: result.error.extractErrors() 
+                    details: result.error.issues 
                 }));
                 return;
             }
@@ -267,9 +267,8 @@ export class NanoStore extends DurableObject {
                                 break;
                             }
                             case 'listTasks': {
-                                // Legacy support
-                                const res = this.sql.exec("SELECT * FROM tasks LIMIT ? OFFSET ?", payload.payload.limit || 500, payload.payload.offset || 0).toArray();
-                                responseData = res;
+                                const taskRows: Task[] = await this.db.select().from(tasks).limit(payload.payload.limit || 500).offset(payload.payload.offset || 0);
+                                responseData = taskRows;
                                 break;
                             }
                             default:

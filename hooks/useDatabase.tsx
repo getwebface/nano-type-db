@@ -338,14 +338,15 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
 
     const refreshSchema = useCallback(async () => {
          try {
-            // Optimistically try fetch first as it's faster than WS handshake for initial load
-            const response = await fetch(`${HTTP_URL}/api/schema`);
-            if (response.ok) {
-                const schemaData = await response.json();
+            if (!currentRoomIdRef.current) return;
+            // Use Hono RPC client for typed schema fetching
+            const res = await (client as any).schema.$get({ query: { room_id: currentRoomIdRef.current } }) as Response;
+            if (res.ok) {
+                const schemaData: Schema = await res.json() as Schema;
                 setSchema(schemaData);
             }
          } catch (e) {
-             console.error('Failed to fetch schema via HTTP:', e);
+             console.error('Failed to fetch schema via RPC client:', e);
              // Verify WS fallback
              if(socket && socket.readyState === WebSocket.OPEN) {
                  socket.send(JSON.stringify({ action: 'rpc', method: 'getSchema' }));

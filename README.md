@@ -30,9 +30,22 @@ npm run db:fix:remote  # Requires CLOUDFLARE_API_TOKEN
 
 For detailed migration documentation, see [PRODUCTION_MIGRATIONS_GUIDE.md](./PRODUCTION_MIGRATIONS_GUIDE.md).
 
+### Schema & Migrations
+
+**`src/db/schema.ts` is the Single Source of Truth** for all database table definitions. Manual SQL migration files in `migrations/` are generated artifacts, not sources — do not edit them by hand.
+
+To generate migration artifacts from the schema:
+
+```bash
+npx drizzle-kit generate
+```
+
+This will produce SQL files in the `migrations/` directory based on the Drizzle schema definitions.
+
 ### Common Database Commands
 
 ```bash
+npx drizzle-kit generate          # Generate migrations from src/db/schema.ts
 npm run migrate:status          # Check migration status
 npm run migrate:up -- --local   # Apply migrations (local)
 npm run migrate:up -- --remote  # Apply migrations (production)
