@@ -161,10 +161,14 @@ app.get("/api/user-tier", async (c) => {
 });
 
 app.get("/analytics", async (c) => {
-    // Mock analytics 
+    // Mock analytics to match frontend expectation
      return c.json({ 
-        usage: [], 
-        meta: { timestamp: Date.now() } 
+        daily: [], 
+        totals: {
+            reads: 0,
+            writes: 0,
+            ai_ops: 0
+        } 
      });
 });
 
