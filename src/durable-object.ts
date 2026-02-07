@@ -1822,17 +1822,13 @@ export class NanoStore extends DurableObject {
                         const currentInfo = this.sql.exec(`PRAGMA table_info("${table}")`).toArray();
                         const existingColumns = new Set(currentInfo.map((c: any) => c.name));
                         
-                        // Analyze the first row to find unmapped columns
+                        // Analyze incoming data
                         const sampleRow = rows[0];
-                        const incomingColumns = Object.keys(sampleRow).map(k => this.sanitizeIdentifier(k));
-                        const unmappedColumns = incomingColumns.filter(k => k !== 'id' && !existingColumns.has(k));
+                        const incomingKeys = Object.keys(sampleRow).map(k => this.sanitizeIdentifier(k));
+                        const validKeys = incomingKeys.filter(k => existingColumns.has(k));
                         
-                        // PREVENT GHOST ROWS: Reject imports with unmapped columns
-                        // This prevents the scenario where User A imports "email, name" and User B imports "Email, FullName"
-                        // resulting in columns: email, name, Email, FullName
-                        if (unmappedColumns.length > 0) {
-                            const errorMsg = `Column mismatch detected. The following columns in your CSV do not exist in the table "${table}": ${unmappedColumns.join(', ')}. Please create these columns first or map them to existing columns. Existing columns: ${Array.from(existingColumns).join(', ')}`;
-                            throw new Error(errorMsg);
+                        if (validKeys.length === 0) {
+                          throw new Error(`No matching columns found. CSV keys: [${incomingKeys.join(', ')}]. Table columns: [${Array.from(existingColumns).join(', ')}]`);
                         }
                         
                         const insertedRows: any[] = [];
@@ -1848,51 +1844,45 @@ export class NanoStore extends DurableObject {
                                 this.ctx.storage.transactionSync(() => {
                                     // Insert rows in this chunk
                                     for (const row of chunk) {
-                                        try {
-                                            // SECURITY: Sanitize field names (convert "Post Content" to "post_content")
-                                            const sanitizedRow: Record<string, any> = {};
-                                            for (const [key, value] of Object.entries(row)) {
-                                                const sanitizedKey = this.sanitizeIdentifier(key);
-                                                if (sanitizedKey) {
-                                                    sanitizedRow[sanitizedKey] = value;
-                                                }
-                                            }
-
-                                            // AUTOMATIC METADATA EXTRUSION: Inject user_id if column exists
-                                            // This ensures tasks/private data imported via CSV are owned by the importer
-                                            if (existingColumns.has('user_id') && !sanitizedRow['user_id']) {
-                                                sanitizedRow['user_id'] = userId;
-                                            }
-                                            if (existingColumns.has('owner_id') && !sanitizedRow['owner_id']) {
-                                                sanitizedRow['owner_id'] = userId;
-                                            }
-                                            if (existingColumns.has('created_at') && !sanitizedRow['created_at']) {
-                                                sanitizedRow['created_at'] = Date.now(); // or ISO string depending on schema
-                                            }
-
-                                            const fields = Object.keys(sanitizedRow);
-                                            if (fields.length === 0) continue;
+                                      try {
+                                        const cleanRow: Record<string, any> = {};
                                             
-                                            const values = Object.values(sanitizedRow);
-                                            
-                                            // Use quoted identifiers for safety
-                                            const placeholders = fields.map(() => '?').join(', ');
-                                            const fieldNames = fields.map(f => `"${f}"`).join(', ');
-                                            
-                                            const query = `INSERT INTO "${table}" (${fieldNames}) VALUES (${placeholders}) RETURNING *`;
-                                            
-                                            const result = this.sql.exec(query, ...values).toArray();
-                                            if (result.length > 0) {
-                                                insertedRows.push(result[0]);
-                                            }
-                                        } catch (rowError: any) {
-                                            console.error('Failed to insert row:', rowError.message);
-                                            // Continue with other rows in the chunk (inside transaction? usually partial failure kills the transaction)
-                                            // In the original code, rowError was caught inside the loop, allowing the loop to continue.
-                                            // However, if we are inside a transactionSync, does a caught error rollback?
-                                            // No, transactionSync only rolls back if the callback throws.
-                                            // Here we catch rowError, so the callback doesn't throw for single row fail.
+                                        // Only copy fields that correspond to valid columns
+                                        for (const [key, value] of Object.entries(row)) {
+                                          const sanitizedKey = this.sanitizeIdentifier(key);
+                                          if (existingColumns.has(sanitizedKey)) {
+                                            cleanRow[sanitizedKey] = value;
+                                          }
                                         }
+
+                                        // AUTOMATIC METADATA EXTRUSION: Inject user_id if column exists
+                                        if (existingColumns.has('user_id') && !cleanRow['user_id']) {
+                                          cleanRow['user_id'] = userId;
+                                        }
+                                        if (existingColumns.has('owner_id') && !cleanRow['owner_id']) {
+                                          cleanRow['owner_id'] = userId;
+                                        }
+                                        if (existingColumns.has('created_at') && !cleanRow['created_at']) {
+                                          cleanRow['created_at'] = Date.now();
+                                        }
+
+                                        const fields = Object.keys(cleanRow);
+                                        if (fields.length === 0) continue;
+                                            
+                                        const values = Object.values(cleanRow);
+                                        const placeholders = fields.map(() => '?').join(', ');
+                                        const fieldNames = fields.map(f => `"${f}"`).join(', ');
+                                            
+                                        this.sql.exec(
+                                          `INSERT INTO "${table}" (${fieldNames}) VALUES (${placeholders})`,
+                                          ...values
+                                        );
+                                            
+                                        const lastId = this.sql.exec("SELECT last_insert_rowid() as id").toArray()[0].id;
+                                        insertedRows.push({ id: lastId, ...cleanRow });
+                                      } catch (rowError: any) {
+                                        console.error('Failed to insert row:', rowError.message);
+                                      }
                                     }
                                 });
                             } catch (chunkError: any) {

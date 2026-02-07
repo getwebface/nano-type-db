@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useRealtimeQuery, useDatabase } from '../../hooks/useDatabase';
 import { GlideTable } from '../DataGrid/GlideTable';
 import { CsvImportModal } from '../DataGrid/CsvImportModal';
-import { parseCSV, sanitizeHeader } from '../../utils/csv';
+import { parseCSV } from '../../utils/csv';
 import { Table2, Plus, Trash2, Database, Upload } from 'lucide-react';
 import { ConfirmDialog } from '../Modal';
 
@@ -93,109 +93,76 @@ export const TablesView: React.FC = () => {
     setNewTableColumns(newTableColumns.filter((_, i) => i !== index));
   };
 
-  const sanitizeIdentifier = (name: string): string => {
-    let sanitized = name.toLowerCase();
-    sanitized = sanitized.replace(/[^a-z0-9_]/g, '_');
-    sanitized = sanitized.replace(/^_+|_+$/g, '');
-    if (!/^[a-z_]/.test(sanitized)) {
-      sanitized = '_' + sanitized;
-    }
-    sanitized = sanitized.replace(/_+/g, '_');
-    return sanitized;
-  };
-
   const handleCSVFileSelect = () => {
     fileInputRef.current?.click();
   };
 
-  const handleCSVFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleCSVFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     try {
-        // 1. Parse CSV locally first
-        const { headers: rawHeaders, rows: parsedRows } = await parseCSV(file);
+      const { headers, rows, inferredTypes } = await parseCSV(file);
 
-        // 2. Prepare Preview Data
-        // Use sanitizeIdentifier (local) or sanitizeHeader (imported) - using local for consistency
-        const headers = rawHeaders.map(h => sanitizeIdentifier(h));
-
-        // Map rows to objects
-        const rows = parsedRows.map(values => {
-            const row: Record<string, any> = {};
-            headers.forEach((header, idx) => {
-                let value: any = values[idx] || '';
-                // Basic type inference
-                if (value && !isNaN(Number(value))) {
-                    value = Number(value);
-                } else if (typeof value === 'string' && value.toLowerCase() === 'true') {
-                    value = true;
-                } else if (typeof value === 'string' && value.toLowerCase() === 'false') {
-                    value = false;
-                }
-                row[header] = value;
-            });
-            return row;
-        });
-
-        // 3. Open Wizard instead of uploading
-        setCsvPreview({
-            headers,
-            headerMapping: [], // Optional: add mapping logic if needed
-            rows,
-            inferredTypes: {}, // Optional: add type inference logic
-            fileName: file.name
-        });
-
+      setCsvPreview({
+        headers,
+        headerMapping: [],
+        rows,
+        inferredTypes,
+        fileName: file.name
+      });
     } catch (error: any) {
-        addToast('CSV parsing failed: ' + error.message, 'error');
+      addToast('CSV parsing failed: ' + error.message, 'error');
     }
 
-    // Reset input
     if (fileInputRef.current) fileInputRef.current.value = '';
-  };
+    };
 
-  const handleConfirmImport = async () => {
+    const handleConfirmImport = async () => {
     if (!csvPreview) return;
     setImporting(true);
+
     try {
-        // Create table if it doesn't exist (optional, logic depends on your flow)
-        // Perform batch insert
-        // Use selectedTable if available, otherwise derive from filename
-        const targetTable = selectedTable || sanitizeIdentifier(csvPreview.fileName.replace('.csv', ''));
-        
-        // Ensure we create the table first if it doesn't exist (or rely on batchInsert auto-creation if supported)
-        // Checks if table exists in schema
-        if (!schema || !schema[targetTable]) {
-             // Create columns from CSV headers
-            const columns = csvPreview.headers.map((header: string) => ({
-                name: header,
-                type: 'TEXT',
-                notNull: false
-            }));
-            
-            await rpc('createTable', {
-                tableName: targetTable,
-                columns: columns
-            });
-            addToast(`Table "${targetTable}" created`, 'success');
+      const derivedName = csvPreview.fileName.replace('.csv', '').toLowerCase().replace(/[^a-z0-9_]/g, '_');
+      const targetTable = selectedTable || derivedName;
+      const tableExists = schema && schema[targetTable];
+
+      if (!tableExists) {
+        const columns = csvPreview.headers.map((header: string) => ({
+          name: header,
+          type: csvPreview.inferredTypes?.[header] || 'TEXT',
+          notNull: false
+        }));
+
+        if (!columns.find((c: any) => c.name === 'id')) {
+          columns.unshift({ name: 'id', type: 'INTEGER', primaryKey: true, notNull: true });
         }
 
-        await rpc('batchInsert', { 
-            table: targetTable, 
-            rows: csvPreview.rows 
+        await rpc('createTable', {
+          tableName: targetTable,
+          columns: columns
         });
-        
-        addToast(`Successfully imported ${csvPreview.rows.length} rows into "${targetTable}"`, 'success');
-        setCsvPreview(null); // Close wizard
-        if (!selectedTable) setSelectedTable(targetTable);
-        
+
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        addToast(`Table "${targetTable}" created`, 'success');
+      }
+
+      await rpc('batchInsert', { 
+        table: targetTable, 
+        rows: csvPreview.rows 
+      });
+
+      addToast(`Successfully imported ${csvPreview.rows.length} rows`, 'success');
+      setCsvPreview(null);
+      if (!selectedTable) setSelectedTable(targetTable);
     } catch (error: any) {
-        addToast('Import failed: ' + error.message, 'error');
+      console.error("Import error details:", error);
+      addToast('Import failed: ' + error.message, 'error');
     } finally {
-        setImporting(false);
+      setImporting(false);
     }
-  };
+    };
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -476,7 +443,7 @@ export const TablesView: React.FC = () => {
       <CsvImportModal
         preview={csvPreview}
         isImporting={importing}
-        tableName={selectedTable || (csvPreview ? sanitizeIdentifier(csvPreview.fileName.replace('.csv', '')) : "New Table")}
+        tableName={selectedTable || (csvPreview ? csvPreview.fileName.replace('.csv', '').toLowerCase().replace(/[^a-z0-9_]/g, '_') : "New Table")}
         onClose={() => setCsvPreview(null)}
         onConfirm={handleConfirmImport}
       />
