@@ -1681,9 +1681,12 @@ export class NanoStore extends DurableObject {
       });
     }
 
-    if (url.pathname === "/connect") {
+    // Allow both the internal /connect path and the public /websocket path
+    // AND the dev proxy path /__ws/websocket
+    if (url.pathname === "/connect" || url.pathname.endsWith("/websocket")) {
       const upgradeHeader = request.headers.get("Upgrade");
-      console.log("/connect upgrade header:", upgradeHeader);
+      console.log(`[DurableObject] Upgrade Request: path=${url.pathname}, upgrade=${upgradeHeader}, userId=${request.headers.get("X-User-ID")}`);
+      
       if (!upgradeHeader || upgradeHeader.toLowerCase() !== "websocket") {
         console.error("Invalid Upgrade header for websocket", { upgradeHeader });
         return new Response("Expected Upgrade: websocket", { status: 426 });

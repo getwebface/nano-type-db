@@ -1503,16 +1503,17 @@ export default {
     // WebSocket Upgrade
     if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
        try {
-         const newUrl = new URL(request.url);
-         newUrl.pathname = "/connect"; // Match the DO's expected path
+         // Simplify: Don't change the URL path. Let the DO handle /websocket or /connect.
+         // This avoids creating a new Request(url, ...) which risks losing the upgrade context in some runtime versions.
+         // We construct a new Request from the old one just to inject headers.
+         const wsRequest = new Request(request);
          
-         // 🔴 FIX: Use the original request as the init object to preserve
-         // internal WebSocket state, but override URL and headers.
-         const wsRequest = new Request(newUrl.toString(), request);
-         
-         // Add the authenticated headers to the *new* request
+         // Add the authenticated headers
          wsRequest.headers.set("X-User-ID", session.user.id);
          wsRequest.headers.set("X-Room-ID", roomId);
+         // Explicitly ensure upgrade headers are present (though new Request(req) usually keeps them)
+         if (!wsRequest.headers.has("Upgrade")) wsRequest.headers.set("Upgrade", "websocket");
+         if (!wsRequest.headers.has("Connection")) wsRequest.headers.set("Connection", "Upgrade");
 
          return stub.fetch(wsRequest);
        } catch (error: any) {
