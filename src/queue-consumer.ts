@@ -10,9 +10,9 @@ export default {
   async queue(batch: MessageBatch<any>, env: Env): Promise<void> {
     for (const message of batch.messages) {
       try {
-        const { taskId, title, doId, timestamp } = message.body;
+        const { taskId, title, doId, roomId, timestamp } = message.body as { taskId: number; title: string; doId: string; roomId?: string; timestamp: number };
         
-        console.log(`Processing embedding for task ${taskId} from DO ${doId}`);
+        console.log(`Processing embedding for task ${taskId} from room ${roomId || doId}`);
         
         // Generate embedding using Cloudflare AI
         if (!env.AI || !env.VECTOR_INDEX) {
@@ -44,7 +44,9 @@ export default {
         
         // Update task status in Durable Object
         // Note: We need to get the DO stub and call an update method
-        const doStub = env.DATA_STORE.get(env.DATA_STORE.idFromString(doId));
+        const doStub = roomId
+          ? env.DATA_STORE.get(env.DATA_STORE.idFromName(roomId))
+          : env.DATA_STORE.get(env.DATA_STORE.idFromString(doId));
         await doStub.fetch(new Request(`https://do.internal/update-vector-status`, {
           method: 'POST',
           body: JSON.stringify({ taskId, status: 'indexed' })

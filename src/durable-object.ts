@@ -364,6 +364,7 @@ export class NanoStore extends DurableObject {
   subscribers: Map<string, Set<WebSocket>>;
   env: Env;
   doId: string;
+  roomId: string;
   ctx: DurableObjectState;
   // Hybrid State: In-memory stores for transient data
   memoryStore: MemoryStore;
@@ -405,6 +406,7 @@ export class NanoStore extends DurableObject {
     this.sql = ctx.storage.sql;
     this.subscribers = new Map();
     this.doId = ctx.id.toString();
+    this.roomId = this.doId;
     
     // PRODUCTION: Initialize structured logger with context
     this.logger = new StructuredLogger({ doId: this.doId });
@@ -1426,6 +1428,11 @@ export class NanoStore extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
+    const roomIdHeader = request.headers.get("X-Room-ID");
+    if (roomIdHeader && roomIdHeader.trim().length > 0) {
+      this.roomId = roomIdHeader;
+    }
+
     // HEALTH CHECK ENDPOINT
     if (url.pathname === "/health") {
       try {
@@ -1904,6 +1911,7 @@ export class NanoStore extends DurableObject {
                                         taskId: newTask.id,
                                         title: title,
                                         doId: this.doId,
+                                        roomId: this.roomId,
                                         timestamp: Date.now()
                                     });
                                     console.log(`Queued embedding for task ${newTask.id}`);

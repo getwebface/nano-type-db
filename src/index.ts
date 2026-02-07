@@ -1494,6 +1494,7 @@ export default {
     // with the User ID header added.
     const newHeaders = new Headers(request.headers);
     newHeaders.set("X-User-ID", session.user.id);
+    newHeaders.set("X-Room-ID", roomId);
 
     // Get Durable Object ID
     const id = env.DATA_STORE.idFromName(roomId);
@@ -1587,13 +1588,15 @@ export default {
 
                 // Embedding job
                 if (body && typeof body.taskId === 'number' && body.doId && body.title) {
-                    const job = body as { taskId: number; doId: string; title: string; timestamp: number };
+                    const job = body as { taskId: number; doId: string; title: string; roomId?: string; timestamp: number };
                     try {
                         const embeddings = await env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [job.title] });
                         const values = embeddings.data?.[0];
                         if (values && env.VECTOR_INDEX) {
                             await env.VECTOR_INDEX.upsert([{ id: `${job.doId}:${job.taskId}`, values, metadata: { doId: job.doId, taskId: job.taskId } }]);
-                            const doIdObj = env.DATA_STORE.idFromString(job.doId);
+                            const doIdObj = job.roomId
+                                ? env.DATA_STORE.idFromName(job.roomId)
+                                : env.DATA_STORE.idFromString(job.doId);
                             const stub = env.DATA_STORE.get(doIdObj);
                             await stub.fetch('http://do/internal/update-vector-status', { method: 'POST', body: JSON.stringify({ taskId: job.taskId, status: 'indexed', values }) });
                             if (env.ANALYTICS) {
