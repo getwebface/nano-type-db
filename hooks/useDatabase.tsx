@@ -162,15 +162,14 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         }
     }
 
-    const wsUrl = (() => {
-        const url = new URL(`${WS_PROTOCOL}://${HOST}/${WS_BASE_PATH}`);
-        if (roomId) url.searchParams.set('room_id', roomId);
-        if (apiKey) url.searchParams.set('key', apiKey);
-        if (sessionData?.session?.token) url.searchParams.set('session_token', sessionData.session.token);
-        return url.toString();
-    })();
+    const BASE_WS_URL = `${WS_PROTOCOL}://${HOST}/${WS_BASE_PATH}`;
 
-    const socket = useWebSocket(wsUrl, undefined, {
+    const socket = useWebSocket(BASE_WS_URL, undefined, {
+        query: {
+            room_id: roomId,
+            ...(apiKey ? { key: apiKey } : {}),
+            ...(sessionData?.session?.token ? { session_token: sessionData.session.token } : {})
+        },
         enabled: Boolean(roomId),
         onOpen: () => {
             wsLog('Connected to WebSocket');
