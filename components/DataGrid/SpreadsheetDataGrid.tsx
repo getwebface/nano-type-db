@@ -102,9 +102,11 @@ export const SpreadsheetDataGrid: React.FC<SpreadsheetDataGridProps> = ({
     rowHeight
   } = virtualScroll;
 
-  // CSV import wizard state
   const [csvPreview, setCsvPreview] = useState<any>(null);
   const [importProgress, setImportProgress] = useState(false);
+  const [isDraggingFill, setIsDraggingFill] = useState(false);
+  const [fillTargetCells, setFillTargetCells] = useState<Set<string>>(new Set());
+  const [fillStartCell, setFillStartCell] = useState<{ rowIndex: number; colIndex: number } | null>(null);
 
   // Keyboard event listener
   useEffect(() => {
@@ -289,6 +291,92 @@ export const SpreadsheetDataGrid: React.FC<SpreadsheetDataGridProps> = ({
     };
   }, [handleCopyEvent, handlePasteEvent]);
 
+  // Drag Fill handlers
+  const handleFillStart = useCallback((e: React.MouseEvent) => {
+    if (!selectedCell) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingFill(true);
+    setFillStartCell(selectedCell);
+    setFillTargetCells(new Set([`${selectedCell.rowIndex}-${selectedCell.colIndex}`]));
+  }, [selectedCell]);
+
+  const handleFillMove = useCallback((e: React.MouseEvent, rowIndex: number, colIndex: number) => {
+    if (!isDraggingFill || !fillStartCell) return;
+    
+    // Only allow dragging in the same column
+    if (colIndex !== fillStartCell.colIndex) return;
+    
+    // Calculate range
+    const startRow = fillStartCell.rowIndex;
+    const endRow = rowIndex;
+    const minRow = Math.min(startRow, endRow);
+    const maxRow = Math.max(startRow, endRow);
+    
+    // Update fill target cells
+    const targets = new Set<string>();
+    for (let r = minRow; r <= maxRow; r++) {
+      targets.add(`${r}-${colIndex}`);
+    }
+    setFillTargetCells(targets);
+  }, [isDraggingFill, fillStartCell]);
+
+  const handleFillEnd = useCallback(() => {
+    if (!isDraggingFill || !fillStartCell || !selectedCell) {
+      setIsDraggingFill(false);
+      setFillTargetCells(new Set());
+      setFillStartCell(null);
+      return;
+    }
+
+    // Get the value to fill
+    const sourceRow = processedData[selectedCell.rowIndex];
+    if (!sourceRow) return;
+    
+    const field = orderedHeaders[selectedCell.colIndex];
+    const sourceValue = sourceRow[field];
+    
+    // Determine if we should smart-fill (increment numbers)
+    const isNumber = typeof sourceValue === 'number' && !isNaN(sourceValue);
+    
+    // Apply fill to target cells
+    fillTargetCells.forEach(cellKey => {
+      const [rowStr, colStr] = cellKey.split('-');
+      const targetRowIndex = parseInt(rowStr);
+      const targetColIndex = parseInt(colStr);
+      
+      // Skip the source cell
+      if (targetRowIndex === selectedCell.rowIndex) return;
+      
+      const targetRow = processedData[targetRowIndex];
+      if (!targetRow) return;
+      
+      // Calculate value
+      let fillValue = sourceValue;
+      if (isNumber) {
+        // Smart fill: increment by the difference
+        const diff = targetRowIndex - selectedCell.rowIndex;
+        fillValue = sourceValue + diff;
+      }
+      
+      // Update the cell
+      handleCellUpdate(targetRow.id, field, fillValue);
+    });
+
+    // Reset state
+    setIsDraggingFill(false);
+    setFillTargetCells(new Set());
+    setFillStartCell(null);
+  }, [isDraggingFill, fillStartCell, selectedCell, fillTargetCells, processedData, orderedHeaders, handleCellUpdate]);
+
+  useEffect(() => {
+    if (isDraggingFill) {
+      const handleMouseUp = () => handleFillEnd();
+      document.addEventListener('mouseup', handleMouseUp);
+      return () => document.removeEventListener('mouseup', handleMouseUp);
+    }
+  }, [isDraggingFill, handleFillEnd]);
+
   // Loading state
   if (isLoading || data === null) {
     return (
@@ -403,6 +491,7 @@ export const SpreadsheetDataGrid: React.FC<SpreadsheetDataGridProps> = ({
                       const columnType = columnDef?.type || 'TEXT';
                       const isSelected = selectedCell?.rowIndex === rowIndex && selectedCell?.colIndex === colIndex;
                       const isEditing = editingCell?.rowIndex === rowIndex && editingCell?.colIndex === colIndex;
+                      const isFillTarget = fillTargetCells.has(`${rowIndex}-${colIndex}`);
 
                       return (
                         <td 
@@ -413,6 +502,7 @@ export const SpreadsheetDataGrid: React.FC<SpreadsheetDataGridProps> = ({
                             height: `${rowHeight}px`,
                             padding: 0
                           }}
+                          onMouseMove={(e) => handleFillMove(e, rowIndex, colIndex)}
                         >
                           <SpreadsheetCell
                             value={row[header]}
@@ -424,10 +514,12 @@ export const SpreadsheetDataGrid: React.FC<SpreadsheetDataGridProps> = ({
                             columnType={columnType}
                             isSelected={isSelected}
                             isEditing={isEditing}
+                            isFillTarget={isFillTarget}
                             onUpdate={handleCellUpdate}
                             onSelect={() => setSelectedCell({ rowIndex, colIndex })}
                             onStartEdit={() => setEditingCell({ rowIndex, colIndex })}
                             onStopEdit={() => setEditingCell(null)}
+                            onDragFillStart={handleFillStart}
                           />
                         </td>
                       );

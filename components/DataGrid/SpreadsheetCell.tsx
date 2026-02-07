@@ -11,11 +11,12 @@ interface SpreadsheetCellProps {
   columnType: string;
   isSelected: boolean;
   isEditing: boolean;
+  isFillTarget?: boolean;
   onUpdate: (rowId: any, field: string, value: any) => void;
   onSelect: () => void;
   onStartEdit: () => void;
   onStopEdit: () => void;
-  onDragFillStart?: () => void;
+  onDragFillStart?: (e: React.MouseEvent) => void;
 }
 
 export const SpreadsheetCell: React.FC<SpreadsheetCellProps> = ({
@@ -28,6 +29,7 @@ export const SpreadsheetCell: React.FC<SpreadsheetCellProps> = ({
   columnType,
   isSelected,
   isEditing,
+  isFillTarget = false,
   onUpdate,
   onSelect,
   onStartEdit,
@@ -167,6 +169,8 @@ export const SpreadsheetCell: React.FC<SpreadsheetCellProps> = ({
       className={`relative h-full min-h-[40px] cursor-cell transition-all ${
         isSelected 
           ? 'ring-2 ring-green-500 ring-inset bg-slate-800/30' 
+          : isFillTarget
+          ? 'ring-2 ring-blue-500 ring-inset bg-blue-500/10'
           : 'hover:bg-slate-800/20'
       }`}
       style={{ userSelect: isEditing ? 'auto' : 'none' }}
@@ -176,11 +180,8 @@ export const SpreadsheetCell: React.FC<SpreadsheetCellProps> = ({
       {/* Drag Fill Handle */}
       {isSelected && !isEditing && onDragFillStart && (
         <div
-          className="absolute bottom-0 right-0 w-2 h-2 bg-green-500 cursor-ns-resize hover:w-3 hover:h-3 transition-all"
-          onMouseDown={(e) => {
-            e.stopPropagation();
-            onDragFillStart();
-          }}
+          className="absolute bottom-0 right-0 w-2 h-2 bg-green-500 cursor-ns-resize hover:w-3 hover:h-3 transition-all z-10"
+          onMouseDown={onDragFillStart}
           title="Drag to fill"
         />
       )}
