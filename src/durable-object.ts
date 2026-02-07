@@ -2777,7 +2777,9 @@ export class NanoStore extends DurableObject {
                     
                     if (!tableName || !columns || !Array.isArray(columns) || columns.length === 0) {
                         webSocket.send(JSON.stringify({ 
-                            type: "error", 
+                            type: "mutation_error", 
+                            action: "createTable", 
+                            requestId: data.requestId,
                             error: "createTable requires tableName and columns array" 
                         }));
                         break;
@@ -2786,14 +2788,18 @@ export class NanoStore extends DurableObject {
                     // SECURITY: Validate table name (alphanumeric and underscore only)
                     if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
                         webSocket.send(JSON.stringify({ 
-                            type: "error", 
+                            type: "mutation_error", 
+                            action: "createTable", 
+                            requestId: data.requestId,
                             error: "Invalid table name. Use only letters, numbers, and underscores. Must start with a letter or underscore." 
                         }));
                         break;
                     }
                     
                     // Prevent creating internal tables
-                    if (tableName.startsWith('_') || tableName === 'sqlite_sequence') {
+                    if (tableName.smutation_error", 
+                            action: "createTable", 
+                            requestId: data.requestId,h('_') || tableName === 'sqlite_sequence') {
                         webSocket.send(JSON.stringify({ 
                             type: "error", 
                             error: "Cannot create tables with names starting with underscore (reserved for system tables)" 
@@ -2803,7 +2809,9 @@ export class NanoStore extends DurableObject {
                     
                     // SECURITY: Rate limiting (10 table creates per minute)
                     const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
-                    if (!this.checkRateLimit(userId, "createTable", 10, 60000)) {
+                    if (!this.checkmutation_error", 
+                            action: "createTable", 
+                            requestId: data.requestId,t(userId, "createTable", 10, 60000)) {
                         webSocket.send(JSON.stringify({ 
                             type: "error", 
                             error: "Rate limit exceeded for createTable" 
@@ -2850,12 +2858,15 @@ export class NanoStore extends DurableObject {
                         webSocket.send(JSON.stringify({ 
                             type: "mutation_success", 
                             action: "createTable",
+                            requestId: data.requestId,
                             data: { tableName, sql: createTableSQL }
                         }));
                         
                         // Broadcast schema update to all connected clients
                         this.broadcastSchemaUpdate();
-                    } catch (e: any) {
+                    } catch (e: anymutation_error", 
+                            action: "createTable", 
+                            requestId: data.requestId,
                         webSocket.send(JSON.stringify({ 
                             type: "error", 
                             error: `Failed to create table: ${e.message}` 
@@ -2867,7 +2878,9 @@ export class NanoStore extends DurableObject {
                 case "deleteTable": {
                     this.trackUsage('writes');
                     
-                    const { tableName } = data.payload || {};
+                    const { tableNamutation_error", 
+                            action: "deleteTable", 
+                            requestId: data.requestId,ata.payload || {};
                     
                     if (!tableName) {
                         webSocket.send(JSON.stringify({ 
@@ -2895,7 +2908,9 @@ export class NanoStore extends DurableObject {
                         break;
                     }
                     
-                    // SECURITY: Rate limiting (10 table deletes per minute)
+                    // SECURITY: Ramutation_error", 
+                            action: "deleteTable", 
+                            requestId: data.requestId,ing (10 table deletes per minute)
                     const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
                     if (!this.checkRateLimit(userId, "deleteTable", 10, 60000)) {
                         webSocket.send(JSON.stringify({ 
@@ -2914,10 +2929,13 @@ export class NanoStore extends DurableObject {
                         webSocket.send(JSON.stringify({ 
                             type: "mutation_success", 
                             action: "deleteTable",
+                            requestId: data.requestId,
                             data: { tableName }
                         }));
                         
-                        // Broadcast schema update to all connected clients
+                        // Broadcasmutation_error", 
+                            action: "deleteTable", 
+                            requestId: data.requestId, update to all connected clients
                         this.broadcastSchemaUpdate();
                     } catch (e: any) {
                         webSocket.send(JSON.stringify({ 
