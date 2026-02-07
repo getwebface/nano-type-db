@@ -49,6 +49,79 @@ class DebouncedWriter {
     }
 }
 
+// --- SYNC ENGINE VERSION 2 ---
+class SyncEngine {
+  constructor(
+    private ctx: DurableObjectState, 
+    private env: Env, 
+    private logger: StructuredLogger
+  ) {}
+
+  /**
+   * READ STRATEGY: "Infinite Scale"
+   * 1. Try reading from D1 (Read Replica) - Scalable, Global
+   * 2. Fallback to DO (Local SQLite) - Consistency guarantee if D1 lags/fails
+   */
+  async read(query: string, params: any[] = []): Promise<any[]> {
+    // If no replica configured, just read local
+    if (!this.env.READ_REPLICA) {
+      return this.localRead(query, params);
+    }
+
+    try {
+      // 1. Try D1 Read Replica
+      const result = await this.env.READ_REPLICA.prepare(query).bind(...params).all();
+      return result.results || [];
+    } catch (e: any) {
+      // 2. Fallback to Local DO
+      this.logger.warn("SyncEngine: D1 Read failed, falling back to DO", { error: e.message });
+      return this.localRead(query, params);
+    }
+  }
+
+  /**
+   * WRITE STRATEGY: "Real-Time Source of Truth"
+   * 1. Write to DO immediately (ACID transaction)
+   * 2. Replicate to D1 asynchronously (Eventual Consistency)
+   */
+  async replicateInsert(table: string, rows: any[]) {
+    if (!this.env.READ_REPLICA || !rows.length) return;
+
+    try {
+      const keys = Object.keys(rows[0]);
+      // Sanitize column names for D1 (should match DO)
+      const cols = keys.map(k => `"${k.replace(/"/g, '""')}"`).join(',');
+      const placeholders = keys.map(() => '?').join(',');
+      const sql = `INSERT INTO "${table.replace(/"/g, '""')}" (${cols}) VALUES (${placeholders})`;
+
+      // Prepare batch for D1
+      const statements = rows.map(row => 
+        this.env.READ_REPLICA.prepare(sql).bind(...keys.map(k => row[k]))
+      );
+
+      // Execute batch on D1
+      await this.env.READ_REPLICA.batch(statements);
+      
+    } catch (e: any) {
+      this.logger.error("SyncEngine: D1 Replication failed", { error: e.message, table });
+      // TODO: Add to a Dead Letter Queue or Retry list if critical
+    }
+  }
+
+  async replicateDDL(sql: string) {
+    if (!this.env.READ_REPLICA) return;
+    try {
+      await this.env.READ_REPLICA.exec(sql);
+    } catch (e: any) {
+      this.logger.error("SyncEngine: DDL Replication failed", { error: e.message, sql });
+    }
+  }
+
+  private localRead(query: string, params: any[]): any[] {
+    return this.ctx.storage.sql.exec(query, ...params).toArray();
+  }
+}
+
 export class NanoStore extends DurableObject<Env> {
   private db: ReturnType<typeof drizzle<typeof schema>>;
   private sql: any;
@@ -56,12 +129,14 @@ export class NanoStore extends DurableObject<Env> {
   private memoryStore: MemoryStore;
   private debouncedWriter: DebouncedWriter;
   private logger: StructuredLogger;
+  private syncEngine: SyncEngine;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.logger = new StructuredLogger({ doId: ctx.id.toString() });
     this.memoryStore = new MemoryStore();
+    this.syncEngine = new SyncEngine(ctx, env, this.logger);
 
     this.db = drizzle(async (sql, params, method) => {
       try {
@@ -218,9 +293,11 @@ export class NanoStore extends DurableObject<Env> {
               
               // 4. Broadcast update so UI refreshes immediately
               this.broadcastUpdate(safeTableName, 'create', { count: inserted });
-              data = { data: { inserted, total: rows.length } };
               
-          } catch (e: any) {
+              // 2. Replicate to D1 Asynchronously (Scalable)
+              // We use ctx.waitUntil so it doesn't block the WebSocket response
+              this.ctx.waitUntil(this.syncEngine.replicateInsert(safeTableName, rows));
+            } catch (e) {
               console.error('Batch insert failed:', e);
               throw new Error(`Insert failed: ${e.message}`);
           }
@@ -255,6 +332,11 @@ export class NanoStore extends DurableObject<Env> {
           const safeName = tableName.replace(/[^a-zA-Z0-9_]/g, '');
           const cols = columns.map((c: any) => `"${c.name.replace(/\W/g,'')}" ${c.type}`).join(',');
           this.sql.exec(`CREATE TABLE IF NOT EXISTS "${safeName}" (${cols})`);
+
+          // Replicate DDL to D1
+          const ddl = `CREATE TABLE IF NOT EXISTS "${safeName}" (${cols})`;
+          this.ctx.waitUntil(this.syncEngine.replicateDDL(ddl));
+
           data = { success: true };
           break;
         }
@@ -263,15 +345,26 @@ export class NanoStore extends DurableObject<Env> {
           const { tableName } = payload.payload;
           const safeName = tableName.replace(/[^a-zA-Z0-9_]/g, '');
           this.sql.exec(`DROP TABLE IF EXISTS "${safeName}"`);
+
+          // Replicate DDL to D1
+          const ddl = `DROP TABLE IF EXISTS "${safeName}"`;
+          this.ctx.waitUntil(this.syncEngine.replicateDDL(ddl));
+
           data = { success: true };
           break;
         }
 
         case 'executeSQL': {
-           const { sql: query, params } = payload.payload;
-           if (!query.trim().toLowerCase().startsWith('select')) throw new Error("Only SELECT allowed");
-           data = this.sql.exec(query, ...(params || [])).toArray();
-           break;
+            const { sql: query, params } = payload.payload;
+           
+            // Simple security check
+            if (!query.trim().toLowerCase().startsWith('select')) {
+             throw new Error("Only SELECT allowed in executeSQL RPC");
+            }
+
+            // Use Sync Engine: Try D1 first, fallback to DO
+            data = await this.syncEngine.read(query, params || []);
+            break;
         }
         
         default:
