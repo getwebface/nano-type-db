@@ -26,11 +26,17 @@
     "fs": "^0.0.1-security",
     "lodash": "^4.17.23",
     "lucide-react": "^0.563.0",
-    "marked": "^17.0.1",
+    "marked": "^4.3.0",
     "papaparse": "^5.5.3",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-responsive": "^10.0.1"
+  },
+  "overrides": {
+    "@glideapps/glide-data-grid": {
+      "react": "$react",
+      "react-dom": "$react-dom"
+    }
   },
   "devDependencies": {
     "@types/node": "^22.19.9",
