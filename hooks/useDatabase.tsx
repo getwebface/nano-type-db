@@ -340,9 +340,10 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
          try {
             if (!currentRoomIdRef.current) return;
             // Use Hono RPC client for typed schema fetching
+            // Note: cast needed because AppType cannot be fully resolved without Cloudflare Worker types
             const res = await (client as any).schema.$get({ query: { room_id: currentRoomIdRef.current } }) as Response;
             if (res.ok) {
-                const schemaData: Schema = await res.json() as Schema;
+                const schemaData: Schema = await res.json();
                 setSchema(schemaData);
             }
          } catch (e) {
