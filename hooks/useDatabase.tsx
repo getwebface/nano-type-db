@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
-import usePartySocket from 'partysocket/react';
+import { useWebSocket } from 'partysocket/react';
 import { DatabaseContextType, QueryResult, UpdateEvent, ToastMessage, Schema, UsageStat, OptimisticUpdate } from '../types';
 
 // Dynamic URL detection for production/dev
@@ -148,15 +148,14 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         }
     }
 
-    const partySocket = usePartySocket({
-        host: HOST,
-        room: roomId || 'default',
-        basePath: WS_BASE_PATH,
-        protocol: WS_PROTOCOL,
-        query: () => ({
-            room_id: roomId || undefined,
-            key: apiKey || undefined
-        }),
+    const socketUrl = useCallback(() => {
+        const wsUrl = new URL(`${WS_PROTOCOL}://${HOST}/${WS_BASE_PATH}`);
+        if (roomId) wsUrl.searchParams.set('room_id', roomId);
+        if (apiKey) wsUrl.searchParams.set('key', apiKey);
+        return wsUrl.toString();
+    }, [roomId, apiKey]);
+
+    const socket = useWebSocket(socketUrl, undefined, {
         enabled: Boolean(roomId),
         onOpen: () => {
             wsLog('Connected to WebSocket');
@@ -167,24 +166,24 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             addToast('Connected to database', 'success');
 
             if (lastCursorRef.current) {
-                partySocket.send(JSON.stringify({
+                socket.send(JSON.stringify({
                     action: 'setCursor',
                     payload: lastCursorRef.current
                 }));
             }
             if (lastPresenceRef.current) {
-                partySocket.send(JSON.stringify({
+                socket.send(JSON.stringify({
                     action: 'setPresence',
                     payload: lastPresenceRef.current
                 }));
             }
 
             subscribedTablesRef.current.forEach(table => {
-                partySocket.send(JSON.stringify({ action: 'subscribe', table }));
+                socket.send(JSON.stringify({ action: 'subscribe', table }));
             });
 
-            partySocket.send(JSON.stringify({ action: 'rpc', method: 'getSchema' }));
-            partySocket.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
+            socket.send(JSON.stringify({ action: 'rpc', method: 'getSchema' }));
+            socket.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
         },
         onMessage: (event) => {
             handleSocketMessage(event);
@@ -195,7 +194,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             setIsConnected(false);
             setConnectionQuality(prev => ({ ...prev, latency: 0 }));
             setReconnectInfo({
-                attempt: partySocket.retryCount || 0,
+                attempt: socket.retryCount || 0,
                 maxAttempts: 0,
                 nextRetryAt: null
             });
@@ -205,14 +204,12 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         }
     });
 
-    const socket = roomId ? (partySocket as unknown as WebSocket) : null;
-
     /** Manually trigger a reconnection using PartySocket */
     const manualReconnect = useCallback(() => {
         if (!roomId) return;
         addToast('Manually reconnecting...', 'info');
-        partySocket.reconnect();
-    }, [partySocket, roomId]);
+        socket.reconnect();
+    }, [socket, roomId]);
 
     const performOptimisticAction = useCallback((id: string, action: string, payload: any, rollback: () => void) => {
         // Record optimistic update
@@ -468,8 +465,8 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     // Cleanup on unmount
     useEffect(() => {
         return () => {
-            if (partySocket) {
-                partySocket.close();
+            if (socket) {
+                socket.close();
             }
         };
     }, []); // Empty dependency array ensures this only runs on unmount
