@@ -10,6 +10,9 @@ import { GridRow, SkeletonRow, GhostRow } from './Rows';
 import { CsvImportModal } from './CsvImportModal';
 import { ConfirmDialog } from '../Modal';
 
+// Export SpreadsheetDataGrid as well
+export { SpreadsheetDataGrid } from './SpreadsheetDataGrid';
+
 interface DataGridProps {
     data: any[] | null;
     total?: number;
