@@ -84,31 +84,24 @@ export class NanoStore extends DurableObject<Env> {
   }
 
   private initializeSchema() {
+    // 🛡️ FIX: Removed 'tasks' creation. Only system tables.
     this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT,
-        status TEXT,
-        owner_id TEXT,
-        vector_status TEXT,
-        created_at INTEGER
-      );
-      CREATE TABLE IF NOT EXISTS _webhooks (
-        id TEXT PRIMARY KEY,
-        url TEXT,
-        events TEXT,
-        secret TEXT,
-        active INTEGER,
-        created_at INTEGER,
-        last_triggered_at INTEGER,
-        failure_count INTEGER
-      );
-      CREATE TABLE IF NOT EXISTS _usage (
-        date TEXT PRIMARY KEY,
-        reads INTEGER DEFAULT 0,
-        writes INTEGER DEFAULT 0,
-        ai_ops INTEGER DEFAULT 0
-      );
+         CREATE TABLE IF NOT EXISTS _webhooks (
+            id TEXT PRIMARY KEY,
+            url TEXT NOT NULL,
+            events TEXT NOT NULL,
+            secret TEXT,
+            active INTEGER DEFAULT 1,
+            created_at INTEGER NOT NULL,
+            last_triggered_at INTEGER,
+            failure_count INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS _usage (
+            date TEXT PRIMARY KEY, 
+            reads INTEGER DEFAULT 0, 
+            writes INTEGER DEFAULT 0, 
+            ai_ops INTEGER DEFAULT 0
+        );
     `);
   }
 
@@ -123,14 +116,22 @@ export class NanoStore extends DurableObject<Env> {
       return new Response(null, { status: 101, webSocket: client });
     }
 
-    // 🛡️ FIXED: Handle both root /schema and nested /api/schema paths
+    // 🛡️ FIX: Allow both paths so the API router can reach it
     if (url.pathname === "/schema" || url.pathname === "/api/schema") {
-        return Response.json({
-            tables: [
-                { name: 'tasks', columns: ['id', 'title', 'status', 'owner_id'] },
-                { name: '_webhooks', columns: ['id', 'url', 'events', 'secret', 'active', 'created_at'] }
-            ]
-        });
+      // Helper to get schema dynamically (prevents hardcoded 'tasks' ghost)
+      const tables = this.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_%'").toArray();
+      const schema: Record<string, any[]> = {};
+        
+      for (const t of tables) {
+        const tableName = t.name;
+        const columns = this.sql.exec(`PRAGMA table_info("${tableName}")`).toArray();
+        schema[tableName] = columns.map((c: any) => ({
+          name: c.name,
+          type: c.type,
+          pk: c.pk
+        }));
+      }
+      return Response.json(schema);
     }
 
     return new Response("NanoStore Active", { status: 200 });
@@ -175,38 +176,45 @@ export class NanoStore extends DurableObject<Env> {
     try {
       switch (payload.method) {
         case 'listTasks': {
-          // 🛡️ FIXED: Strict number casting for LIMIT/OFFSET
+          // 🛡️ FIX: Explicitly cast to Number to prevent SQL syntax errors
           const limit = Number(payload.payload.limit) || 500;
           const offset = Number(payload.payload.offset) || 0;
-          data = await this.db.select().from(schema.tasks).limit(limit).offset(offset);
+          
+          const res = this.sql.exec(
+              "SELECT * FROM tasks LIMIT ? OFFSET ?", 
+              limit, 
+              offset
+          ).toArray();
+          data = res;
           break;
         }
 
         case 'batchInsert': {
-          const { table, rows } = payload.payload;
-          if (!rows?.length) { data = { inserted: 0 }; break; }
-
-          const knownTable = TableMap[table];
-          if (knownTable) {
-            await this.db.insert(knownTable).values(rows).run();
-            data = { inserted: rows.length };
-          } else {
-            // 🛡️ FIXED: Replaced .prepare() with .exec()
-            const keys = Object.keys(rows[0]);
-            // Safe column quoting
-            const cols = keys.map(k => `"${k.replace(/"/g, '""')}"`).join(','); 
-            const placeholders = keys.map(() => '?').join(',');
-            const sql = `INSERT INTO "${table.replace(/"/g, '""')}" (${cols}) VALUES (${placeholders})`;
-            
-            let count = 0;
-            for (const row of rows) {
-               // Execute directly - Cloudflare SqlStorage doesn't cache statements like better-sqlite3
-               this.sql.exec(sql, ...keys.map(k => row[k]));
-               count++;
+            const { table, rows } = payload.payload;
+            if (!rows || rows.length === 0) {
+                data = { inserted: 0, total: 0 };
+                break;
             }
-            data = { inserted: count };
-          }
-          break;
+            
+            // 🛡️ FIX: Use exec() instead of prepare()
+            const keys = Object.keys(rows[0]);
+            // Quote columns to be safe
+            const cols = keys.map(k => `"${k.replace(/"/g, '""')}"`).join(',');
+            const placeholders = keys.map(() => '?').join(',');
+            const sqlStmt = `INSERT INTO "${table.replace(/"/g, '""')}" (${cols}) VALUES (${placeholders})`;
+            
+            let inserted = 0;
+            for (const row of rows) {
+                try {
+                    // Execute directly
+                    this.sql.exec(sqlStmt, ...keys.map(k => row[k]));
+                    inserted++;
+                } catch (e) {
+                    console.error('Insert failed row:', e);
+                }
+            }
+            data = { data: { inserted, total: rows.length } };
+            break;
         }
 
         case 'getPresence': {
