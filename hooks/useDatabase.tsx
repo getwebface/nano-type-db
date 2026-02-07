@@ -35,7 +35,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     // Reconnection countdown state
     const [reconnectInfo, setReconnectInfo] = useState<{ attempt: number; maxAttempts: number; nextRetryAt: number | null }>({
         attempt: 0,
-        maxAttempts: 0,
+        maxAttempts: 5,
         nextRetryAt: null
     });
 
@@ -198,11 +198,17 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
 
     const partySocket = useWebSocket(wsUrl, undefined, {
         enabled: Boolean(resolvedRoomId),
+        // Reliability Features: Connection timeout and reconnection limits
+        connectionTimeout: 10000, // 10-second timeout to force refresh if connection hangs
+        maxRetries: 5, // Maximum 5 reconnection attempts
+        minReconnectionDelay: 3000, // 3-second delay before first retry
+        maxReconnectionDelay: 3000, // Keep delay constant at 3 seconds (no exponential backoff)
+        reconnectionDelayGrowFactor: 1, // No growth factor = constant delay
         onOpen: () => {
             wsLog('Connected to WebSocket');
             setStatus('connected');
             setIsConnected(true);
-            setReconnectInfo({ attempt: 0, maxAttempts: 0, nextRetryAt: null });
+            setReconnectInfo({ attempt: 0, maxAttempts: 5, nextRetryAt: null });
             setConnectionQuality({ latency: 0, pingsLost: 0, totalPings: 0 });
             addToast('Connected to database', 'success');
 
@@ -236,7 +242,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             setConnectionQuality(prev => ({ ...prev, latency: 0 }));
             setReconnectInfo({
                 attempt: partySocket.retryCount || 0,
-                maxAttempts: 0,
+                maxAttempts: 5,
                 nextRetryAt: null
             });
         },
