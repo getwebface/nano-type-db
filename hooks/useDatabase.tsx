@@ -164,7 +164,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
 
     const BASE_WS_URL = `${WS_PROTOCOL}://${HOST}/${WS_BASE_PATH}`;
 
-    const socket = useWebSocket(BASE_WS_URL, undefined, {
+    const partySocket = useWebSocket(BASE_WS_URL, undefined, {
         query: {
             room_id: roomId,
             ...(apiKey ? { key: apiKey } : {}),
@@ -180,24 +180,24 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             addToast('Connected to database', 'success');
 
             if (lastCursorRef.current) {
-                socket.send(JSON.stringify({
+                partySocket.send(JSON.stringify({
                     action: 'setCursor',
                     payload: lastCursorRef.current
                 }));
             }
             if (lastPresenceRef.current) {
-                socket.send(JSON.stringify({
+                partySocket.send(JSON.stringify({
                     action: 'setPresence',
                     payload: lastPresenceRef.current
                 }));
             }
 
             subscribedTablesRef.current.forEach(table => {
-                socket.send(JSON.stringify({ action: 'subscribe', table }));
+                partySocket.send(JSON.stringify({ action: 'subscribe', table }));
             });
 
-            socket.send(JSON.stringify({ action: 'rpc', method: 'getSchema' }));
-            socket.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
+            partySocket.send(JSON.stringify({ action: 'rpc', method: 'getSchema' }));
+            partySocket.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
         },
         onMessage: (event) => {
             handleSocketMessage(event);
@@ -208,7 +208,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             setIsConnected(false);
             setConnectionQuality(prev => ({ ...prev, latency: 0 }));
             setReconnectInfo({
-                attempt: socket.retryCount || 0,
+                attempt: partySocket.retryCount || 0,
                 maxAttempts: 0,
                 nextRetryAt: null
             });
@@ -219,12 +219,14 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         }
     });
 
+    const socket = partySocket as unknown as WebSocket;
+
     /** Manually trigger a reconnection using PartySocket */
     const manualReconnect = useCallback(() => {
         if (!roomId) return;
         addToast('Manually reconnecting...', 'info');
-        socket.reconnect();
-    }, [socket, roomId]);
+        partySocket.reconnect();
+    }, [partySocket, roomId]);
 
     const performOptimisticAction = useCallback((id: string, action: string, payload: any, rollback: () => void) => {
         // Record optimistic update
@@ -252,46 +254,46 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
 
     const runQuery = useCallback((sql: string, tableContext?: string) => {
         if (tableContext) {
-            socket.send(JSON.stringify({ action: 'subscribe_query', sql, table: tableContext }));
+            partySocket.send(JSON.stringify({ action: 'subscribe_query', sql, table: tableContext }));
         } else {
-            socket.send(JSON.stringify({ action: 'query', sql })); 
+            partySocket.send(JSON.stringify({ action: 'query', sql })); 
         }
-    }, [socket]);
+    }, [partySocket]);
 
     const runReactiveQuery = useCallback((sql: string, tableContext: string) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        socket.send(JSON.stringify({ action: 'subscribe_query', sql, table: tableContext }));
-    }, [socket]);
+        if (!partySocket || partySocket.readyState !== WebSocket.OPEN) return;
+        partySocket.send(JSON.stringify({ action: 'subscribe_query', sql, table: tableContext }));
+    }, [partySocket]);
 
     const subscribe = useCallback((table: string) => {
         subscribedTablesRef.current.add(table);
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        socket.send(JSON.stringify({ action: 'subscribe', table }));
-    }, [socket]);
+        if (!partySocket || partySocket.readyState !== WebSocket.OPEN) return;
+        partySocket.send(JSON.stringify({ action: 'subscribe', table }));
+    }, [partySocket]);
 
     const setCursor = useCallback((userId: string, position: any) => {
         // Store for re-connection
         lastCursorRef.current = { userId, position };
         
         // Send to server
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        socket.send(JSON.stringify({
+        if (!partySocket || partySocket.readyState !== WebSocket.OPEN) return;
+        partySocket.send(JSON.stringify({
             action: 'setCursor',
             payload: { userId, position }
         }));
-    }, [socket]);
+    }, [partySocket]);
 
     const setPresence = useCallback((userId: string, status: any) => {
          // Store for re-connection
         lastPresenceRef.current = { userId, status };
         
         // Send to server
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        socket.send(JSON.stringify({
+        if (!partySocket || partySocket.readyState !== WebSocket.OPEN) return;
+        partySocket.send(JSON.stringify({
             action: 'setPresence',
             payload: { userId, status }
         }));
-    }, [socket]);
+    }, [partySocket]);
 
     const getPsychicData = useCallback((key: string): any => {
         if (psychicCache.current.has(key)) {
@@ -302,13 +304,13 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     }, []);
 
     const streamIntent = useCallback((text: string) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        socket.send(JSON.stringify({
+        if (!partySocket || partySocket.readyState !== WebSocket.OPEN) return;
+        partySocket.send(JSON.stringify({
             action: 'rpc',
             method: 'streamIntent',
             payload: { text }
         }));
-    }, [socket]);
+    }, [partySocket]);
 
     /**
      * Generic RPC call - returns a Promise that resolves with the result
@@ -330,7 +332,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             pendingRequests.current.set(requestId, { resolve, reject });
             
             // Send the RPC request with requestId
-            socket.send(JSON.stringify({
+            partySocket.send(JSON.stringify({
                 action: 'rpc',
                 method,
                 payload,
@@ -346,7 +348,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                 }
             }, timeout);
         });
-    }, [socket]);
+    }, [partySocket]);
 
     const performMutation = useCallback((method: string, payload: any) => {
             // PartySocket handles offline buffering, so we don't check readyState
@@ -367,12 +369,12 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     }, []);
 
     const refreshUsage = useCallback(() => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        socket.send(JSON.stringify({ 
+        if (!partySocket || partySocket.readyState !== WebSocket.OPEN) return;
+        partySocket.send(JSON.stringify({ 
             action: 'rpc', 
             method: 'getUsage'
         }));
-    }, [socket]);
+    }, [partySocket]);
 
     const connect = useCallback((nextRoomId: string) => {
         if (!nextRoomId) return;

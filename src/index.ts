@@ -1500,7 +1500,7 @@ export default {
     const stub = env.DATA_STORE.get(id);
 
     // WebSocket Upgrade
-    if (request.headers.get("Upgrade") === "websocket") {
+    if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
        try {
          const newUrl = new URL(request.url);
          newUrl.pathname = "/connect"; // Match the DO's expected path
