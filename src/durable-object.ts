@@ -131,14 +131,23 @@ export class NanoStore extends DurableObject {
                                 break;
                             case 'createTable':{
                                 const { tableName, columns } = payload.payload;
+                                // Sanitize table name (basic)
+                                const safeTableName = tableName.replace(/[^a-zA-Z0-9_]/g, '');
+                                
                                 const colDefs = columns.map((c: any) => {
-                                    let def = `${c.name} ${c.type}`;
+                                    const safeColName = c.name.replace(/[^a-zA-Z0-9_]/g, '');
+                                    let def = `"${safeColName}" ${c.type}`;
                                     if (c.primaryKey) def += ' PRIMARY KEY';
                                     if (c.notNull) def += ' NOT NULL';
                                     return def;
                                 }).join(', ');
-                                this.sql.exec(`CREATE TABLE IF NOT EXISTS ${tableName} (${colDefs})`);
-                                responseData = { success: true, table: tableName };
+                                
+                                try {
+                                    this.sql.exec(`CREATE TABLE IF NOT EXISTS "${safeTableName}" (${colDefs})`);
+                                    responseData = { success: true, table: safeTableName };
+                                } catch (e: any) {
+                                    throw new Error(`Failed to create table: ${e.message}`);
+                                }
                                 break;
                             }
                             case 'deleteTable': {
@@ -174,6 +183,34 @@ export class NanoStore extends DurableObject {
                                 const { sql, params } = payload.payload;
                                 const res = this.sql.exec(sql, ...(params || [])).toArray();
                                 responseData = res;
+                                break;
+                            }
+                            case 'getSchema': {
+                                const tables = this.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_%'").toArray();
+                                const schema: Record<string, any[]> = {};
+                                
+                                for (const t of tables) {
+                                    const tableName = t.name;
+                                    const columns = this.sql.exec(`PRAGMA table_info("${tableName}")`).toArray();
+                                    schema[tableName] = columns.map((c: any) => ({
+                                        name: c.name,
+                                        type: c.type,
+                                        pk: c.pk
+                                    }));
+                                }
+                                responseData = schema;
+                                break;
+                            }
+                            case 'getUsage': {
+                                try {
+                                    // ensure _usage table exists
+                                    this.sql.exec(`CREATE TABLE IF NOT EXISTS _usage (date TEXT PRIMARY KEY, reads INTEGER DEFAULT 0, writes INTEGER DEFAULT 0, ai_ops INTEGER DEFAULT 0)`);
+                                    const usage = this.sql.exec("SELECT * FROM _usage ORDER BY date DESC LIMIT 30").toArray();
+                                    responseData = usage;
+                                } catch (e) {
+                                    console.error("getUsage error", e);
+                                    responseData = [];
+                                }
                                 break;
                             }
                             case 'listTasks': {
