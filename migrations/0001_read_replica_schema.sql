@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER NOT NULL,
     title TEXT NOT NULL,
     status TEXT NOT NULL,
+    _sync_ts INTEGER,
     room_id TEXT NOT NULL,
     PRIMARY KEY (id, room_id)
 );

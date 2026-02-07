@@ -152,22 +152,22 @@ export class SQLSanitizer {
     query: string,
     roomId: string,
     params: any[]
-  ): { query: string; params: any[] } {
+  ): { query: string; params: any[]; injected: boolean; reason?: string } {
     const upperQuery = query.toUpperCase();
     
     // Don't modify if already has room_id filter
     if (upperQuery.includes('ROOM_ID')) {
-      return { query, params };
+      return { query, params, injected: true };
     }
 
     // Don't modify if not a SELECT query
     if (!upperQuery.trim().startsWith('SELECT')) {
-      return { query, params };
+      return { query, params, injected: false, reason: 'not_select' };
     }
 
-    // Only handle tasks table for now
-    if (!upperQuery.includes('FROM TASKS')) {
-      return { query, params };
+    // Avoid injecting into complex queries (JOINs, subqueries, CTEs, etc.)
+    if (!this.canSafelyInjectRoomId(query)) {
+      return { query, params, injected: false, reason: 'complex_query' };
     }
 
     const newParams = [roomId, ...params];
@@ -217,13 +217,26 @@ export class SQLSanitizer {
     }
     // Case 5: Simple SELECT without modifiers
     else {
-      modifiedQuery = query.replace(
-        /FROM\s+tasks/i,
-        'FROM tasks WHERE room_id = ?'
-      );
+      const trimmed = query.trim();
+      const hasSemicolon = trimmed.endsWith(';');
+      const base = hasSemicolon ? trimmed.slice(0, -1) : trimmed;
+      modifiedQuery = `${base} WHERE room_id = ?${hasSemicolon ? ';' : ''}`;
     }
 
-    return { query: modifiedQuery, params: newParams };
+    return { query: modifiedQuery, params: newParams, injected: true };
+  }
+
+  /**
+   * Determine if a query is safe for automatic room_id injection
+   */
+  static canSafelyInjectRoomId(query: string): boolean {
+    const upper = query.toUpperCase();
+    if (!upper.trim().startsWith('SELECT')) return false;
+    if (/\bJOIN\b|\bUNION\b|\bINTERSECT\b|\bEXCEPT\b|\bWITH\b/i.test(upper)) return false;
+    if (/\bFROM\s*\(/i.test(query)) return false;
+    const fromMatches = upper.match(/\bFROM\b/g) || [];
+    if (fromMatches.length !== 1) return false;
+    return true;
   }
 }
 

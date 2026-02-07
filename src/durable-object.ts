@@ -370,7 +370,28 @@ const MIGRATIONS = [
               console.warn("Migration v6 warning:", e);
           }
       }
-  }
+        },
+        {
+          version: 8,
+          up: (sql: any) => {
+            // Durable replication queue for D1 sync retries
+            sql.exec(`CREATE TABLE IF NOT EXISTS _replication_queue (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              table_name TEXT NOT NULL,
+              operation TEXT NOT NULL,
+              data TEXT,
+              attempt INTEGER DEFAULT 0,
+              next_retry_at INTEGER NOT NULL,
+              last_error TEXT,
+              created_at INTEGER NOT NULL
+            )`);
+            try {
+              sql.exec(`CREATE INDEX IF NOT EXISTS idx_replication_queue_next_retry ON _replication_queue(next_retry_at)`);
+            } catch (e) {
+              console.warn("Could not create idx_replication_queue_next_retry index:", e);
+            }
+          }
+        }
 ];
 
 export class NanoStore extends DurableObject {
@@ -393,6 +414,10 @@ export class NanoStore extends DurableObject {
     totalSyncs: number;
     isHealthy: boolean;
   };
+  // Sync Engine: Replication queue processing state
+  replicationQueueProcessing: boolean;
+  // Sync Engine: Monotonic timestamp for replication ordering
+  lastSyncTimestamp: number;
   // SECURITY: Rate limiters for RPC methods (per user)
   rateLimiters: Map<string, RateLimiter>;
   // SECURITY: Memory tracker for debounced writes
@@ -464,6 +489,8 @@ export class NanoStore extends DurableObject {
       totalSyncs: 0,
       isHealthy: true
     };
+    this.replicationQueueProcessing = false;
+    this.lastSyncTimestamp = Date.now();
     
     this.runMigrations();
     
@@ -474,6 +501,11 @@ export class NanoStore extends DurableObject {
     this.performInitialSync().catch(e => {
       this.logger.error('Initial sync failed', e);
     });
+
+    // Process any pending D1 replication retries
+    this.ctx.waitUntil(this.processReplicationQueue().catch(e => {
+      this.logger.error('Replication queue processing failed', e);
+    }));
   }
 
   runMigrations() {
@@ -562,38 +594,189 @@ export class NanoStore extends DurableObject {
   }
 
   /**
+   * Sync Engine: Monotonic timestamp for replication ordering
+   * Ensures replication writes are ordered even under rapid updates
+   */
+  private getNextSyncTimestamp(): number {
+    const now = Date.now();
+    if (now <= this.lastSyncTimestamp) {
+      this.lastSyncTimestamp += 1;
+      return this.lastSyncTimestamp;
+    }
+    this.lastSyncTimestamp = now;
+    return now;
+  }
+
+  /**
+   * Sync Engine: Check if table supports conflict-aware upsert by id
+   */
+  private canUseConflictUpsert(table: string, data?: any): boolean {
+    if (!data || data.id === undefined || data.id === null) return false;
+    const schema = this.getSchema();
+    const columns = schema[table];
+    if (!columns || !Array.isArray(columns)) return false;
+    return columns.some((c: any) => c.name === 'id' && c.pk && c.pk > 0);
+  }
+
+  /**
+   * Sync Engine: Enqueue failed replication for retry
+   */
+  private async enqueueReplication(table: string, operation: 'insert' | 'update' | 'delete', data: any, error?: any): Promise<void> {
+    try {
+      const now = Date.now();
+      const nextRetry = now + 1000;
+      const payload = data ? JSON.stringify(data) : null;
+      const errMsg = error?.message ? String(error.message) : (error ? String(error) : null);
+
+      this.sql.exec(
+        `INSERT INTO _replication_queue (table_name, operation, data, attempt, next_retry_at, last_error, created_at)
+         VALUES (?, ?, ?, 0, ?, ?, ?)`,
+        table,
+        operation,
+        payload,
+        nextRetry,
+        errMsg,
+        now
+      );
+
+      this.scheduleReplicationRetry(1000);
+    } catch (e) {
+      console.error("Failed to enqueue replication retry:", e);
+    }
+  }
+
+  /**
+   * Sync Engine: Schedule alarm for replication retries
+   */
+  private scheduleReplicationRetry(delayMs: number): void {
+    try {
+      const when = Date.now() + delayMs;
+      this.ctx.storage.setAlarm(when).catch(() => {
+        // Ignore alarm scheduling errors
+      });
+    } catch (e) {
+      // Ignore alarm scheduling errors
+    }
+  }
+
+  /**
+   * Sync Engine: Process queued replication retries with backoff
+   */
+  private async processReplicationQueue(): Promise<void> {
+    if (this.replicationQueueProcessing) return;
+    if (!this.env.READ_REPLICA) return;
+
+    this.replicationQueueProcessing = true;
+    try {
+      const now = Date.now();
+      const queued = this.sql.exec(
+        `SELECT id, table_name, operation, data, attempt
+         FROM _replication_queue
+         WHERE next_retry_at <= ?
+         ORDER BY id
+         LIMIT 25`,
+        now
+      ).toArray();
+
+      if (queued.length === 0) return;
+
+      for (const item of queued) {
+        const queueId = item.id;
+        const table = item.table_name;
+        const operation = item.operation as 'insert' | 'update' | 'delete';
+        const payload = item.data ? JSON.parse(item.data) : undefined;
+
+        try {
+          await this.replicateToD1(table, operation, payload, { fromQueue: true });
+          this.sql.exec("DELETE FROM _replication_queue WHERE id = ?", queueId);
+        } catch (e: any) {
+          const attempt = (item.attempt || 0) + 1;
+          const backoffMs = Math.min(60000, 1000 * Math.pow(2, attempt));
+          const nextRetry = Date.now() + backoffMs;
+          const errMsg = e?.message ? String(e.message) : String(e);
+
+          this.sql.exec(
+            "UPDATE _replication_queue SET attempt = ?, next_retry_at = ?, last_error = ? WHERE id = ?",
+            attempt,
+            nextRetry,
+            errMsg,
+            queueId
+          );
+
+          this.scheduleReplicationRetry(backoffMs);
+        }
+      }
+
+      // If there may be more queued items, schedule another pass soon
+      if (queued.length === 25) {
+        this.scheduleReplicationRetry(1000);
+      }
+    } finally {
+      this.replicationQueueProcessing = false;
+    }
+  }
+
+  /**
+   * Durable Object alarm handler to process replication queue
+   */
+  async alarm(): Promise<void> {
+    await this.processReplicationQueue();
+  }
+
+  /**
    * Replicate data from Durable Object to D1 read replica
    * This enables horizontal scaling for read operations while maintaining
    * write consistency in the Durable Object.
    */
-  async replicateToD1(table: string, operation: 'insert' | 'update' | 'delete', data?: any) {
+  async replicateToD1(
+    table: string,
+    operation: 'insert' | 'update' | 'delete',
+    data?: any,
+    options: { fromQueue?: boolean } = {}
+  ) {
     if (!this.env.READ_REPLICA) {
       console.warn("D1 READ_REPLICA not available, skipping replication");
+      if (options.fromQueue) {
+        throw new Error("D1 READ_REPLICA not available");
+      }
       return;
     }
 
     // Helper to perform the actual query
     const performQuery = async () => {
       const roomId = this.doId;
+      const syncTs = this.getNextSyncTimestamp();
+      const useConflictUpsert = this.canUseConflictUpsert(table, data);
       switch (operation) {
         case 'insert':
         case 'update':
           if (!data) throw new Error(`Data required for ${operation} operation on table '${table}'`);
-          const keys = Object.keys(data).filter(k => k !== 'room_id');
-          const columns = [...keys, 'room_id'];
-          const placeholders = [...keys.map(() => '?'), '?'];
-          const values = [...keys.map(k => data[k]), roomId];
-          
-          await this.env.READ_REPLICA.prepare(
-            `INSERT OR REPLACE INTO "${table}" (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`
-          ).bind(...values).run();
+          const keys = Object.keys(data).filter(k => k !== 'room_id' && k !== '_sync_ts');
+          const columns = [...keys, 'room_id', '_sync_ts'];
+          const columnStr = columns.map(c => `"${c}"`).join(', ');
+          const placeholders = columns.map(() => '?').join(', ');
+          const values = [...keys.map(k => data[k]), roomId, syncTs];
+
+          if (useConflictUpsert) {
+            const updateColumns = [...keys.filter(k => k !== 'id'), '_sync_ts'];
+            const updateSet = updateColumns.map(c => `"${c}" = excluded."${c}"`).join(', ');
+            await this.env.READ_REPLICA.prepare(
+              `INSERT INTO "${table}" (${columnStr}) VALUES (${placeholders})
+               ON CONFLICT("id", "room_id") DO UPDATE SET ${updateSet}
+               WHERE excluded._sync_ts >= "${table}"._sync_ts`
+            ).bind(...values).run();
+          } else {
+            await this.env.READ_REPLICA.prepare(
+              `INSERT OR REPLACE INTO "${table}" (${columnStr}) VALUES (${placeholders})`
+            ).bind(...values).run();
+          }
           break;
 
         case 'delete':
           if (!data || !data.id) throw new Error(`ID required for delete operation on table '${table}'`);
           await this.env.READ_REPLICA.prepare(
-            `DELETE FROM "${table}" WHERE id = ? AND room_id = ?`
-          ).bind(data.id, roomId).run();
+            `DELETE FROM "${table}" WHERE id = ? AND room_id = ? AND (_sync_ts IS NULL OR _sync_ts <= ?)`
+          ).bind(data.id, roomId, syncTs).run();
           break;
       }
     };
@@ -607,8 +790,8 @@ export class NanoStore extends DurableObject {
       this.syncEngine.isHealthy = true;
 
     } catch (e: any) {
-      // 🟢 AUTO-FIX: Handle "no such table" error automatically
-      if (e.message && e.message.includes('no such table')) {
+      // 🟢 AUTO-FIX: Handle "no such table" or "no such column" errors automatically
+      if (e.message && (e.message.includes('no such table') || e.message.includes('no such column'))) {
         console.warn(`[Sync Engine] Table '${table}' missing in D1. Attempting auto-creation...`);
         
         try {
@@ -634,6 +817,15 @@ export class NanoStore extends DurableObject {
       console.error(`D1 replication failed for ${operation} on ${table}:`, e);
       this.syncEngine.syncErrors++;
       this.syncEngine.isHealthy = false;
+
+      // Queue retry for transient failures (unless already processing queue)
+      if (!options.fromQueue) {
+        await this.enqueueReplication(table, operation, data, e);
+      }
+
+      if (options.fromQueue) {
+        throw e;
+      }
     }
   }
 
@@ -667,6 +859,13 @@ export class NanoStore extends DurableObject {
             await this.env.READ_REPLICA.prepare(`ALTER TABLE "${tableName}" ADD COLUMN room_id TEXT`).run();
         } catch (alterErr: any) {
             // Ignore if column already exists
+        }
+
+        // 2b. Add _sync_ts column for conflict-aware replication
+        try {
+          await this.env.READ_REPLICA.prepare(`ALTER TABLE "${tableName}" ADD COLUMN _sync_ts INTEGER`).run();
+        } catch (alterErr: any) {
+          // Ignore if column already exists
         }
         
         // 3. Create index
@@ -737,8 +936,11 @@ export class NanoStore extends DurableObject {
         const roomId = this.doId;
         
         // SECURITY: Use SQLSanitizer for safe query modification
-        const { query: modifiedQuery, params: newParams } = 
-          SQLSanitizer.injectRoomIdFilter(query, roomId, params);
+        const injection = SQLSanitizer.injectRoomIdFilter(query, roomId, params);
+        if (!injection.injected) {
+          throw new Error(`Unsafe D1 query for room isolation: ${injection.reason || 'unknown'}`);
+        }
+        const { query: modifiedQuery, params: newParams } = injection;
         
         // Properly chain bind() calls (each bind() returns a new statement)
         let stmt = this.env.READ_REPLICA.prepare(modifiedQuery);
@@ -793,6 +995,9 @@ export class NanoStore extends DurableObject {
 
     try {
       console.log(`[Sync Engine] Starting initial sync for room ${this.doId}`);
+
+      // Ensure D1 schema is up-to-date before syncing data
+      await this.replicateSchemaToD1();
       
       // Get all user tables dynamically (excluding system tables)
       const schema = this.getSchema();
@@ -881,29 +1086,40 @@ export class NanoStore extends DurableObject {
 
     try {
       const roomId = this.doId;
+      const useConflictUpsert = this.canUseConflictUpsert(table, rows[0]);
       
       // Use the first row as the template to guarantee column order
       const templateRow = rows[0];
-      const keys = Object.keys(templateRow).filter(k => k !== 'room_id');
+      const keys = Object.keys(templateRow).filter(k => k !== 'room_id' && k !== '_sync_ts');
       
       if (keys.length === 0) return;
 
-      const columns = [...keys, 'room_id'];
+      const columns = [...keys, 'room_id', '_sync_ts'];
       const columnStr = columns.map(c => `"${c}"`).join(', ');
       const placeholderStr = columns.map(() => '?').join(', ');
 
+      const updateColumns = [...keys.filter(k => k !== 'id'), '_sync_ts'];
+      const updateSet = updateColumns.map(c => `"${c}" = excluded."${c}"`).join(', ');
+      const baseQuery = useConflictUpsert
+        ? `INSERT INTO "${table}" (${columnStr}) VALUES (${placeholderStr})
+           ON CONFLICT("id", "room_id") DO UPDATE SET ${updateSet}
+           WHERE excluded._sync_ts >= "${table}"._sync_ts`
+        : `INSERT OR REPLACE INTO "${table}" (${columnStr}) VALUES (${placeholderStr})`;
+
       const statements = rows.map(row => {
           // Map values securely against the fixed keys array
+          const syncTs = this.getNextSyncTimestamp();
           const values = [
             ...keys.map(k => {
               const val = row[k];
               return val === undefined ? null : val;
             }), 
-            roomId
+            roomId,
+            syncTs
           ];
           
           return this.env.READ_REPLICA.prepare(
-            `INSERT OR REPLACE INTO "${table}" (${columnStr}) VALUES (${placeholderStr})`
+            baseQuery
           ).bind(...values);
       });
 
@@ -919,6 +1135,13 @@ export class NanoStore extends DurableObject {
    * Sync Engine: Get sync status and health metrics
    */
   getSyncStatus(): any {
+    let queueDepth = 0;
+    try {
+      const res = this.sql.exec("SELECT COUNT(*) as c FROM _replication_queue").toArray()[0];
+      queueDepth = res?.c || 0;
+    } catch (e) {
+      // Ignore if queue table doesn't exist yet
+    }
     return {
       isHealthy: this.syncEngine.isHealthy,
       lastSyncTime: this.syncEngine.lastSyncTime,
@@ -930,7 +1153,8 @@ export class NanoStore extends DurableObject {
       errorRate: this.syncEngine.totalSyncs > 0 
         ? (this.syncEngine.syncErrors / this.syncEngine.totalSyncs * 100).toFixed(2) + '%'
         : '0%',
-      replicaAvailable: !!this.env.READ_REPLICA
+      replicaAvailable: !!this.env.READ_REPLICA,
+      replicationQueueDepth: queueDepth
     };
   }
 
