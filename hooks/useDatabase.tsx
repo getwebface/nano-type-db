@@ -26,6 +26,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     const [usageStats, setUsageStats] = useState<UsageStat[]>([]);
     const currentRoomIdRef = useRef<string>("");
     const pendingOptimisticUpdates = useRef<Map<string, OptimisticUpdate>>(new Map());
+    const pendingRequests = useRef<Map<string, { resolve: (value: any) => void; reject: (reason?: any) => void }>>(new Map());
     const subscribedTablesRef = useRef<Set<string>>(new Set());
 
     // Reconnection countdown state
@@ -70,6 +71,17 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
 
     function handleSocketMessage(event: MessageEvent) {
         const data = JSON.parse(event.data);
+
+        if (data.requestId && pendingRequests.current.has(data.requestId)) {
+            const { resolve, reject } = pendingRequests.current.get(data.requestId)!;
+            if (data.type === 'error' || data.type === 'rpc_error' || data.type === 'mutation_error') {
+                reject(new Error(data.error || 'RPC call failed'));
+            } else {
+                resolve(data);
+            }
+            pendingRequests.current.delete(data.requestId);
+            return;
+        }
 
         // Handle psychic_push message for pre-fetched data
         if (data.type === 'psychic_push') {
@@ -235,23 +247,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         return updateId;
     }, []);
 
-    const performMutation = useCallback((method: string, payload: any) => {
-         // This is a wrapper for rpc, but specifically for mutations that might use optimistic updates
-         if (!socket || socket.readyState !== WebSocket.OPEN) {
-             addToast('Cannot perform action: offline', 'error');
-             return Promise.reject(new Error('Offline'));
-         }
-         
-         // Use the rpc method defined later
-         return rpc(method, payload);
-    }, [socket]); // Will add rpc to deps once defined
-
     const runQuery = useCallback((sql: string, tableContext?: string) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) {
-            addToast('Cannot run query: offline', 'error');
-            return;
-        }
-        
         // If it's a mutation, track it
         const isMutation = /^(INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)/i.test(sql.trim());
         if (isMutation) {
@@ -327,11 +323,6 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
      */
     const rpc = useCallback((method: string, payload: any): Promise<any> => {
         return new Promise((resolve, reject) => {
-            if (!socket || socket.readyState !== WebSocket.OPEN) {
-                reject(new Error("Not connected to database"));
-                return;
-            }
-            
             // Generate a unique request ID
             let requestId: string;
             if (crypto.randomUUID) {
@@ -343,35 +334,8 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             } else {
                 requestId = `rpc_${Date.now()}_${Math.random()}`;
             }
-            
-            // Create a one-time listener for the response
-            let timeoutId: ReturnType<typeof setTimeout> | null = null;
-            
-            const handleResponse = (event: MessageEvent) => {
-                try {
-                    const response = JSON.parse(event.data);
-                    
-                    // Check if this response is for our request
-                    if (response.requestId === requestId) {
-                        // Clear the timeout
-                        clearTimeout(timeoutId!);
-                        
-                        // Remove the listener
-                        socket.removeEventListener('message', handleResponse);
-                        
-                        if (response.type === 'query_result' || response.type === 'rpc_result' || response.type === 'mutation_success') {
-                            resolve(response);
-                        } else if (response.type === 'error' || response.type === 'rpc_error' || response.type === 'mutation_error') {
-                            reject(new Error(response.error || 'RPC call failed'));
-                        }
-                    }
-                } catch (e) {
-                    // Ignore parse errors for other messages
-                }
-            };
-            
-            // Add listener
-            socket.addEventListener('message', handleResponse);
+
+            pendingRequests.current.set(requestId, { resolve, reject });
             
             // Send the RPC request with requestId
             socket.send(JSON.stringify({
@@ -383,13 +347,19 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             
             // Timeout after a configurable delay (longer for batch operations)
             const timeout = (method === 'batchInsert' || method === 'createTable') ? 60000 : 10000; // 60s for batch, 10s for others
-            timeoutId = setTimeout(() => {
-                timeoutId = null;
-                socket.removeEventListener('message', handleResponse);
-                reject(new Error(`RPC call to ${method} timed out`));
+            setTimeout(() => {
+                if (pendingRequests.current.has(requestId)) {
+                    pendingRequests.current.delete(requestId);
+                    reject(new Error(`RPC call to ${method} timed out`));
+                }
             }, timeout);
         });
     }, [socket]);
+
+    const performMutation = useCallback((method: string, payload: any) => {
+         // This is a wrapper for rpc, but specifically for mutations that might use optimistic updates
+         return rpc(method, payload);
+    }, [rpc]);
 
     const refreshSchema = useCallback(async () => {
          try {
@@ -405,13 +375,13 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     }, []);
 
     const refreshUsage = useCallback(() => {
-        if (partySocket.readyState === WebSocket.OPEN) {
-            partySocket.send(JSON.stringify({ 
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ 
                 action: 'rpc', 
                 method: 'getUsage'
             }));
         }
-    }, [partySocket]);
+    }, [socket]);
 
     const connect = useCallback((nextRoomId: string) => {
         if (!nextRoomId) return;
@@ -463,13 +433,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     }, [psychic, socket, streamIntent]);
 
     // Cleanup on unmount
-    useEffect(() => {
-        return () => {
-            if (socket) {
-                socket.close();
-            }
-        };
-    }, []); // Empty dependency array ensures this only runs on unmount
+    // PartySocket manages its own lifecycle.
 
     return (
         <DatabaseContext.Provider value={{ status, isConnected, connect, runQuery, subscribe, lastResult, toasts, addToast, schema, refreshSchema, usageStats, refreshUsage, performOptimisticAction, performMutation, runReactiveQuery, rpc, socket, setCursor, setPresence, getPsychicData, manualReconnect, reconnectInfo, connectionQuality, wsDebug, setWsDebug }}>
