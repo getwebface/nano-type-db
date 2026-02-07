@@ -59,7 +59,7 @@ Previously, you had to manually call `broadcastUpdate` in every RPC method. Now,
 const unsubscribe = runReactiveQuery('listTasks', {}, ['tasks']);
 
 // Create a new task - ALL subscribed queries automatically refresh
-performMutation('createTask', { title: 'New Task' });
+ // performMutation('createTask', { title: 'New Task' });
 // UI updates instantly (optimistic), query auto-refreshes with real data
 
 // Cleanup when component unmounts

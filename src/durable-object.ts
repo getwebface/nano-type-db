@@ -1769,13 +1769,14 @@ export class NanoStore extends DurableObject {
   /**
    * Helper to send structured error responses
    */
-  sendError(ws: WebSocket, code: string, message: string, details?: any) {
+  sendError(ws: WebSocket, code: string, message: string, details?: any, requestId?: string) {
     try {
       ws.send(JSON.stringify({ 
         type: "error",
         code, 
         error: message, 
-        details 
+        details,
+        requestId
       }));
     } catch (e) {
       this.logger.error("Failed to send error response", e);
@@ -2934,16 +2935,20 @@ export class NanoStore extends DurableObject {
                     // Validate inputs
                     if (!url || typeof url !== 'string') {
                         webSocket.send(JSON.stringify({ 
-                            type: "error", 
-                            error: "createWebhook requires url parameter" 
+                          type: "mutation_error", 
+                          action: "createWebhook",
+                          requestId: data.requestId,
+                          error: "createWebhook requires url parameter" 
                         }));
                         break;
                     }
                     
                     if (!events || typeof events !== 'string') {
                         webSocket.send(JSON.stringify({ 
-                            type: "error", 
-                            error: "createWebhook requires events parameter (comma-separated list)" 
+                          type: "mutation_error", 
+                          action: "createWebhook",
+                          requestId: data.requestId,
+                          error: "createWebhook requires events parameter (comma-separated list)" 
                         }));
                         break;
                     }
@@ -2953,13 +2958,28 @@ export class NanoStore extends DurableObject {
                         new URL(url);
                     } catch (e) {
                         webSocket.send(JSON.stringify({ 
-                            type: "error", 
-                            error: "Invalid webhook URL format" 
+                          type: "mutation_error", 
+                          action: "createWebhook",
+                          requestId: data.requestId,
+                          error: "Invalid webhook URL format" 
                         }));
                         break;
                     }
                     
                     try {
+                        // Ensure _webhooks table exists (in case migrations didn't run yet)
+                        this.sql.exec(`
+                          CREATE TABLE IF NOT EXISTS _webhooks (
+                            id TEXT PRIMARY KEY,
+                            url TEXT NOT NULL,
+                            events TEXT NOT NULL,
+                            secret TEXT,
+                            active INTEGER DEFAULT 1,
+                            created_at INTEGER NOT NULL,
+                            last_triggered_at INTEGER,
+                            failure_count INTEGER DEFAULT 0
+                          )
+                        `);
                         const id = `wh_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
                         const now = Date.now();
                         
@@ -2974,12 +2994,15 @@ export class NanoStore extends DurableObject {
                         webSocket.send(JSON.stringify({ 
                             type: "mutation_success", 
                             action: "createWebhook",
-                            data: webhook 
+                          data: webhook,
+                          requestId: data.requestId
                         }));
                     } catch (e: any) {
                         webSocket.send(JSON.stringify({ 
-                            type: "error", 
-                            error: `Failed to create webhook: ${e.message}` 
+                          type: "mutation_error", 
+                          action: "createWebhook",
+                          requestId: data.requestId,
+                          error: `Failed to create webhook: ${e.message}` 
                         }));
                     }
                     break;
@@ -3007,8 +3030,9 @@ export class NanoStore extends DurableObject {
                         ).toArray();
 
                         webSocket.send(JSON.stringify({ 
-                            type: "query_result", 
-                            data: webhooks 
+                          type: "query_result", 
+                          data: webhooks,
+                          requestId: data.requestId
                         }));
                     } catch (e: any) {
                         // Lazy Migration: Self-heal schema if columns missing
@@ -3030,15 +3054,16 @@ export class NanoStore extends DurableObject {
                                 ).toArray();
                                 
                                 webSocket.send(JSON.stringify({ 
-                                    type: "query_result", 
-                                    data: webhooks 
+                                  type: "query_result", 
+                                  data: webhooks,
+                                  requestId: data.requestId
                                 }));
                                 return;
                             } catch (migrationErr: any) {
                                 console.error("Lazy migration failed:", migrationErr);
                             }
                         
-                        this.sendError(webSocket, "QUERY_FAILED", `Failed to list webhooks: ${e.message}`);
+                            this.sendError(webSocket, "QUERY_FAILED", `Failed to list webhooks: ${e.message}`, undefined, data.requestId);
                     }
                     break;
                 }
@@ -3049,7 +3074,7 @@ export class NanoStore extends DurableObject {
                     // Fetch logs from D1 (as consumer writes there) OR from local if it was replicated back?
                     // Assuming webhook-consumer writes to READ_REPLICA (D1)
                     if (!this.env.READ_REPLICA) {
-                        this.sendError(webSocket, "CONFIG_ERROR", "D1 READ_REPLICA not available");
+                      this.sendError(webSocket, "CONFIG_ERROR", "D1 READ_REPLICA not available", undefined, data.requestId);
                         break;
                     }
 
@@ -3060,15 +3085,16 @@ export class NanoStore extends DurableObject {
                         ).all();
                         
                         webSocket.send(JSON.stringify({ 
-                            type: "query_result", 
-                            data: logs.results 
+                          type: "query_result", 
+                          data: logs.results,
+                          requestId: data.requestId
                         }));
                     } catch (e: any) {
                          // Check if table exists
                          if (e.message.includes("no such table")) {
-                             webSocket.send(JSON.stringify({ type: "query_result", data: [] })); // Empty if no logs table yet
+                           webSocket.send(JSON.stringify({ type: "query_result", data: [], requestId: data.requestId })); // Empty if no logs table yet
                          } else {
-                             this.sendError(webSocket, "QUERY_FAILED", `Failed to fetch webhook logs: ${e.message}`);
+                           this.sendError(webSocket, "QUERY_FAILED", `Failed to fetch webhook logs: ${e.message}`, undefined, data.requestId);
                          }
                     }
                     break;
@@ -3081,13 +3107,28 @@ export class NanoStore extends DurableObject {
                     
                     if (!id) {
                         webSocket.send(JSON.stringify({ 
-                            type: "error", 
-                            error: "updateWebhook requires id parameter" 
+                      type: "mutation_error", 
+                      action: "updateWebhook",
+                      requestId: data.requestId,
+                      error: "updateWebhook requires id parameter" 
                         }));
                         break;
                     }
                     
                     try {
+                    // Ensure _webhooks table exists (in case migrations didn't run yet)
+                    this.sql.exec(`
+                      CREATE TABLE IF NOT EXISTS _webhooks (
+                        id TEXT PRIMARY KEY,
+                        url TEXT NOT NULL,
+                        events TEXT NOT NULL,
+                        secret TEXT,
+                        active INTEGER DEFAULT 1,
+                        created_at INTEGER NOT NULL,
+                        last_triggered_at INTEGER,
+                        failure_count INTEGER DEFAULT 0
+                      )
+                    `);
                         const updates: string[] = [];
                         const params: any[] = [];
                         
@@ -3097,8 +3138,10 @@ export class NanoStore extends DurableObject {
                                 new URL(url);
                             } catch (e) {
                                 webSocket.send(JSON.stringify({ 
-                                    type: "error", 
-                                    error: "Invalid webhook URL format" 
+                          type: "mutation_error", 
+                          action: "updateWebhook",
+                          requestId: data.requestId,
+                          error: "Invalid webhook URL format" 
                                 }));
                                 break;
                             }
@@ -3118,8 +3161,10 @@ export class NanoStore extends DurableObject {
                         
                         if (updates.length === 0) {
                             webSocket.send(JSON.stringify({ 
-                                type: "error", 
-                                error: "No fields to update" 
+                            type: "mutation_error", 
+                            action: "updateWebhook",
+                            requestId: data.requestId,
+                            error: "No fields to update" 
                             }));
                             break;
                         }
@@ -3132,12 +3177,15 @@ export class NanoStore extends DurableObject {
                         
                         webSocket.send(JSON.stringify({ 
                             type: "mutation_success", 
-                            action: "updateWebhook"
+                          action: "updateWebhook",
+                          requestId: data.requestId
                         }));
                     } catch (e: any) {
                         webSocket.send(JSON.stringify({ 
-                            type: "error", 
-                            error: `Failed to update webhook: ${e.message}` 
+                          type: "mutation_error", 
+                          action: "updateWebhook",
+                          requestId: data.requestId,
+                          error: `Failed to update webhook: ${e.message}` 
                         }));
                     }
                     break;
@@ -3150,23 +3198,41 @@ export class NanoStore extends DurableObject {
                     
                     if (!id) {
                         webSocket.send(JSON.stringify({ 
-                            type: "error", 
-                            error: "deleteWebhook requires id parameter" 
+                      type: "mutation_error", 
+                      action: "deleteWebhook",
+                      requestId: data.requestId,
+                      error: "deleteWebhook requires id parameter" 
                         }));
                         break;
                     }
                     
                     try {
+                    // Ensure _webhooks table exists (in case migrations didn't run yet)
+                    this.sql.exec(`
+                      CREATE TABLE IF NOT EXISTS _webhooks (
+                        id TEXT PRIMARY KEY,
+                        url TEXT NOT NULL,
+                        events TEXT NOT NULL,
+                        secret TEXT,
+                        active INTEGER DEFAULT 1,
+                        created_at INTEGER NOT NULL,
+                        last_triggered_at INTEGER,
+                        failure_count INTEGER DEFAULT 0
+                      )
+                    `);
                         this.sql.exec(`DELETE FROM _webhooks WHERE id = ?`, id);
                         
                         webSocket.send(JSON.stringify({ 
                             type: "mutation_success", 
-                            action: "deleteWebhook"
+                      action: "deleteWebhook",
+                      requestId: data.requestId
                         }));
                     } catch (e: any) {
                         webSocket.send(JSON.stringify({ 
-                            type: "error", 
-                            error: `Failed to delete webhook: ${e.message}` 
+                      type: "mutation_error", 
+                      action: "deleteWebhook",
+                      requestId: data.requestId,
+                      error: `Failed to delete webhook: ${e.message}` 
                         }));
                     }
                     break;

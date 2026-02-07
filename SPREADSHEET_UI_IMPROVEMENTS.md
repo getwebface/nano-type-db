@@ -21,7 +21,7 @@ The DataGrid component has been completely rewritten to provide an Excel/Airtabl
 
 **User Experience:**
 ```
-Before: Write "UPDATE tasks SET title = 'New Title' WHERE id = 1"
+Before: Write "UPDATE [your_table_name] SET title = 'New Title' WHERE id = 1"
 After:  Double-click cell → Type → Press Enter
 ```
 

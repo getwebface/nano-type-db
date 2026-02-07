@@ -2,7 +2,7 @@
 
 ## Problem Statement
 
-The application had a hard-coded table whitelist in the `updateRow` and `batchInsert` RPC methods that only allowed operations on `['tasks', 'users', 'projects']`. This prevented:
+The application had a hard-coded table whitelist in the `updateRow` and `batchInsert` RPC methods that only allowed operations on `['users', 'projects']`. This prevented:
 
 1. **CSV imports** to newly created custom tables
 2. **Row updates** in custom tables

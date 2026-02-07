@@ -135,7 +135,7 @@ npx wrangler d1 execute nanotype-auth --local --command="SELECT name FROM sqlite
 
 Expected tables:
 - `_cf_METADATA`
-- `account`
+- // `tasks`
 - `api_keys` ✅ (critical for API functionality)
 - `permissions`
 - `session`
