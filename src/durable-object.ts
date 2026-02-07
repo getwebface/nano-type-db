@@ -2797,11 +2797,11 @@ export class NanoStore extends DurableObject {
                     }
                     
                     // Prevent creating internal tables
-                    if (tableName.smutation_error", 
-                            action: "createTable", 
-                            requestId: data.requestId,h('_') || tableName === 'sqlite_sequence') {
+                    if (tableName.startsWith('_') || tableName === 'sqlite_sequence') {
                         webSocket.send(JSON.stringify({ 
-                            type: "error", 
+                            type: "mutation_error", 
+                            action: "createTable", 
+                            requestId: data.requestId,
                             error: "Cannot create tables with names starting with underscore (reserved for system tables)" 
                         }));
                         break;
