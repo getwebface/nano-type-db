@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
+const LOADING_RESET_DELAY_MS = 500;
+
 export interface VirtualScrollOptions {
   rowHeight?: number;
   overscan?: number;
@@ -52,7 +54,7 @@ export const useVirtualScroll = (
         // Reset loading flag after a delay
         setTimeout(() => {
           isLoadingRef.current = false;
-        }, 500);
+        }, LOADING_RESET_DELAY_MS);
       }
     }
   }, [hasMore, loadMore, loadMoreThreshold]);

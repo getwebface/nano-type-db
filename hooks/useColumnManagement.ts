@@ -1,5 +1,8 @@
 import { useState, useCallback, useEffect } from 'react';
 
+const MIN_COLUMN_WIDTH = 50;
+const DEFAULT_COLUMN_WIDTH = 200;
+
 export interface ColumnWidth {
   [columnName: string]: number;
 }
@@ -46,7 +49,7 @@ export const useColumnManagement = (tableName: string, headers: string[]) => {
   }, [frozenColumns, tableName]);
 
   const setColumnWidth = useCallback((column: string, width: number) => {
-    setColumnWidths(prev => ({ ...prev, [column]: Math.max(50, width) }));
+    setColumnWidths(prev => ({ ...prev, [column]: Math.max(MIN_COLUMN_WIDTH, width) }));
   }, []);
 
   const reorderColumns = useCallback((fromIndex: number, toIndex: number) => {
@@ -71,7 +74,7 @@ export const useColumnManagement = (tableName: string, headers: string[]) => {
   }, []);
 
   const getColumnWidth = useCallback((column: string) => {
-    return columnWidths[column] || 200; // Default width
+    return columnWidths[column] || DEFAULT_COLUMN_WIDTH;
   }, [columnWidths]);
 
   const isFrozen = useCallback((column: string) => {

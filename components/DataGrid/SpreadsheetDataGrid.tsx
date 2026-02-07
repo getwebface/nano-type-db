@@ -62,6 +62,9 @@ export const SpreadsheetDataGrid: React.FC<SpreadsheetDataGridProps> = ({
     toggleFrozenColumn
   } = columnManagement;
 
+  // Ordered headers for rendering
+  const orderedHeaders = columnOrder.filter(h => headers.includes(h));
+
   // Spreadsheet Navigation
   const spreadsheetNav = useSpreadsheetNavigation(
     processedData.length,
@@ -193,11 +196,11 @@ export const SpreadsheetDataGrid: React.FC<SpreadsheetDataGridProps> = ({
         const row: Record<string, any> = {};
         headers.forEach((header, idx) => {
           let value: any = values[idx] || '';
-          if (value && !isNaN(Number(value))) {
+          if (value !== '' && !isNaN(Number(value))) {
             value = Number(value);
-          } else if (value.toLowerCase() === 'true') {
+          } else if (typeof value === 'string' && value.toLowerCase() === 'true') {
             value = true;
-          } else if (value.toLowerCase() === 'false') {
+          } else if (typeof value === 'string' && value.toLowerCase() === 'false') {
             value = false;
           }
           row[header] = value;
@@ -386,7 +389,6 @@ export const SpreadsheetDataGrid: React.FC<SpreadsheetDataGridProps> = ({
     );
   }
 
-  const orderedHeaders = columnOrder.filter(h => headers.includes(h));
   const filtersCount = filterValue ? 1 : 0;
 
   return (
