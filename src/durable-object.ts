@@ -219,6 +219,7 @@ const ACTIONS = {
   deleteTask: { params: ["id"] },
   listTasks: { params: ["limit?", "offset?"] }, // RLS: filtering enforced server-side
   search: { params: ["query"] },
+  getSchema: { params: [] },
   getUsage: { params: [] },
   getAuditLog: { params: [] },
   // Memory Store actions
@@ -1365,6 +1366,12 @@ export class NanoStore extends DurableObject {
       });
     }
 
+    // SCHEMA ENDPOINT (HTTP)
+    if (url.pathname === "/schema" || url.pathname === "/api/schema") {
+      this.trackUsage('reads');
+      return Response.json(this.getSchema());
+    }
+
     // DOWNLOAD CLIENT ENDPOINT - Generate and serve type-safe TypeScript client
     if (url.pathname === "/download-client") {
       this.trackUsage('reads');
@@ -2339,6 +2346,24 @@ export class NanoStore extends DurableObject {
                     const usage = this.sql.exec("SELECT * FROM _usage ORDER BY date DESC LIMIT 30").toArray();
                     webSocket.send(JSON.stringify({ type: "query_result", data: usage, originalSql: "getUsage" }));
                     break;
+
+                case "getSchema": {
+                  this.trackUsage('reads');
+                  const schema = this.getSchema();
+                  // Send schema_update for UI listeners
+                  webSocket.send(JSON.stringify({
+                    type: "schema_update",
+                    schema
+                  }));
+                  // Also send rpc_result for promise-based RPC callers
+                  webSocket.send(JSON.stringify({
+                    type: "rpc_result",
+                    method: "getSchema",
+                    data: schema,
+                    requestId: data.requestId
+                  }));
+                  break;
+                }
 
                 case "getAuditLog":
                      this.trackUsage('reads');
