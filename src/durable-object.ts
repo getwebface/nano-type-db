@@ -791,8 +791,12 @@ export class NanoStore extends DurableObject {
       this.syncEngine.isHealthy = true;
 
     } catch (e: any) {
-      // 🟢 AUTO-FIX: Handle "no such table" or "no such column" errors automatically
-      if (e.message && (e.message.includes('no such table') || e.message.includes('no such column'))) {
+      // 🟢 AUTO-FIX: Handle missing schema or conflict target errors automatically
+      if (e.message && (
+        e.message.includes('no such table') ||
+        e.message.includes('no such column') ||
+        e.message.includes('ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint')
+      )) {
         console.warn(`[Sync Engine] Table '${table}' missing in D1. Attempting auto-creation...`);
         
         try {
@@ -835,6 +839,8 @@ export class NanoStore extends DurableObject {
 
     const pkColumns = columns.filter((col: any) => col.pk > 0).sort((a: any, b: any) => a.pk - b.pk);
     const hasCompositePk = pkColumns.length > 1;
+    const singlePkIsId = pkColumns.length === 1 && pkColumns[0].name === 'id';
+    const useCompositeWithRoomId = singlePkIsId;
 
     const columnDefs = columns.map((col: any) => {
       const name = col.name;
@@ -843,7 +849,7 @@ export class NanoStore extends DurableObject {
 
       const parts = [`"${name}"`, type];
 
-      if (!hasCompositePk && col.pk > 0) {
+      if (!hasCompositePk && col.pk > 0 && !useCompositeWithRoomId) {
         parts.push('PRIMARY KEY');
       }
 
@@ -858,9 +864,24 @@ export class NanoStore extends DurableObject {
       return parts.join(' ');
     });
 
+    const hasRoomId = columns.some((col: any) => col.name === 'room_id');
+    const hasSyncTs = columns.some((col: any) => col.name === '_sync_ts');
+
+    if (!hasRoomId) {
+      columnDefs.push(`"room_id" TEXT`);
+    }
+
+    if (!hasSyncTs) {
+      columnDefs.push(`"_sync_ts" INTEGER`);
+    }
+
     if (hasCompositePk) {
       const pkList = pkColumns.map((col: any) => `"${col.name}"`).join(', ');
       columnDefs.push(`PRIMARY KEY (${pkList})`);
+    }
+
+    if (!hasCompositePk && useCompositeWithRoomId) {
+      columnDefs.push(`PRIMARY KEY ("id", "room_id")`);
     }
 
     return `CREATE TABLE IF NOT EXISTS "${tableName}" (${columnDefs.join(', ')})`;
@@ -930,6 +951,18 @@ export class NanoStore extends DurableObject {
       await this.env.READ_REPLICA.exec(`CREATE INDEX IF NOT EXISTS idx_${tableName}_room_id ON "${tableName}" (room_id)`);
     } catch (idxErr) {
       // Ignore index errors
+    }
+
+    // Ensure composite unique constraint for conflict-aware upserts when id exists
+    const hasId = columns.some((col: any) => col.name === 'id');
+    if (hasId) {
+      try {
+        await this.env.READ_REPLICA.exec(
+          `CREATE UNIQUE INDEX IF NOT EXISTS idx_${tableName}_id_room_id_unique ON "${tableName}" (id, room_id)`
+        );
+      } catch (idxErr) {
+        // Ignore index errors
+      }
     }
   }
 
@@ -1206,8 +1239,12 @@ export class NanoStore extends DurableObject {
       await this.env.READ_REPLICA.batch(statements);
       console.log(`[Sync Engine] Batch synced ${rows.length} rows to D1 table ${table}`);
     } catch (e: any) {
-      // Attempt auto-recovery for missing tables/columns
-      if (e?.message && (e.message.includes('no such table') || e.message.includes('no such column'))) {
+      // Attempt auto-recovery for missing tables/columns or conflict target issues
+      if (e?.message && (
+        e.message.includes('no such table') ||
+        e.message.includes('no such column') ||
+        e.message.includes('ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint')
+      )) {
         console.warn(`[Sync Engine] Batch sync detected missing schema for '${table}'. Attempting repair...`);
         try {
           await this.ensureTableInD1(table);
