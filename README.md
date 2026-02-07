@@ -32,15 +32,23 @@ For detailed migration documentation, see [PRODUCTION_MIGRATIONS_GUIDE.md](./PRO
 
 ### Schema & Migrations
 
-**`src/db/schema.ts` is the Single Source of Truth** for all database table definitions. Manual SQL migration files in `migrations/` are generated artifacts, not sources — do not edit them by hand.
+**Source of Truth:** `src/db/schema.ts`
 
-To generate migration artifacts from the schema:
+We use **Drizzle ORM** as the single schema authority. Do not manually create or edit `.sql` files in `migrations/` — they are generated artifacts.
 
-```bash
-npx drizzle-kit generate
-```
+#### How to Change the Schema
 
-This will produce SQL files in the `migrations/` directory based on the Drizzle schema definitions.
+1.  **Modify `src/db/schema.ts`**: Add your tables or columns here using Drizzle types.
+2.  **Generate Migration**:
+    ```bash
+    npx drizzle-kit generate
+    ```
+    This creates the SQL file in `migrations/` automatically.
+3.  **Apply Migration**:
+    ```bash
+    npm run migrate:up -- --local   # Local
+    npm run migrate:up -- --remote  # Production
+    ```
 
 ### Common Database Commands
 
