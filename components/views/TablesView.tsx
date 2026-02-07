@@ -148,12 +148,19 @@ export const TablesView: React.FC = () => {
         addToast(`Table "${targetTable}" created`, 'success');
       }
 
-      await rpc('batchInsert', { 
+      const response = await rpc('batchInsert', { 
         table: targetTable, 
         rows: csvPreview.rows 
       });
 
-      addToast(`Successfully imported ${csvPreview.rows.length} rows`, 'success');
+      if (response && response.data) {
+        const { inserted, total } = response.data;
+        if (inserted === 0) {
+          addToast(`Warning: 0 of ${total} rows were imported. Check column headers.`, 'error');
+        } else {
+          addToast(`Successfully imported ${inserted} of ${total} rows`, 'success');
+        }
+      }
       setCsvPreview(null);
       if (!selectedTable) setSelectedTable(targetTable);
     } catch (error: any) {

@@ -1787,162 +1787,126 @@ export class NanoStore extends DurableObject {
                     break;
                 }
                 
-                // Batch insert for CSV import with Schema Evolution
+                // Batch insert for CSV import
                 case "batchInsert": {
-                    try {
-                        this.trackUsage('writes');
+                  try {
+                    this.trackUsage('writes');
                         
-                        const { table, rows } = data.payload || {};
+                    const { table, rows } = data.payload || {};
                         
-                        // SECURITY: Input validation
-                        if (!table || typeof table !== 'string') {
-                            throw new Error('Invalid table name');
-                        }
-                        if (!Array.isArray(rows) || rows.length === 0) {
-                            throw new Error('Rows must be a non-empty array');
-                        }
-                        
-                        // SECURITY: Limit batch size to prevent DoS
-                        if (rows.length > 10000) {
-                            throw new Error('Batch size limited to 10000 rows');
-                        }
-                        
-                        // SECURITY: Get userId
-                        const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
-                        
-                        // Rate limit check (stricter for batch operations)
-                        if (!this.checkRateLimit(userId, "batchInsert", 10, 60000)) {
-                            throw new Error('Rate limit exceeded. Please slow down.');
-                        }
-                        
-                        this.logAction(method, { table, rowCount: rows.length });
-                        
-                        // SCHEMA VALIDATION: Prevent automatic column creation
-                        // Require users to explicitly map CSV columns to existing schema or create columns first
-                        const currentInfo = this.sql.exec(`PRAGMA table_info("${table}")`).toArray();
-                        const existingColumns = new Set(currentInfo.map((c: any) => c.name));
-                        
-                        // Analyze incoming data
-                        const sampleRow = rows[0];
-                        const incomingKeys = Object.keys(sampleRow).map(k => this.sanitizeIdentifier(k));
-                        const validKeys = incomingKeys.filter(k => existingColumns.has(k));
-                        
-                        if (validKeys.length === 0) {
-                          throw new Error(`No matching columns found. CSV keys: [${incomingKeys.join(', ')}]. Table columns: [${Array.from(existingColumns).join(', ')}]`);
-                        }
-                        
-                        const insertedRows: any[] = [];
-                        // PERFORMANCE: Reduced chunk size for better transaction handling
-                        const CHUNK_SIZE = 50;
-                        
-                        // Process rows in chunks with transactions
-                        for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
-                            const chunk = rows.slice(i, Math.min(i + CHUNK_SIZE, rows.length));
-                            
-                            // Transaction for each chunk
-                            try {
-                                this.ctx.storage.transactionSync(() => {
-                                    // Insert rows in this chunk
-                                    for (const row of chunk) {
-                                      try {
-                                        const cleanRow: Record<string, any> = {};
-                                            
-                                        // Only copy fields that correspond to valid columns
-                                        for (const [key, value] of Object.entries(row)) {
-                                          const sanitizedKey = this.sanitizeIdentifier(key);
-                                          if (existingColumns.has(sanitizedKey)) {
-                                            cleanRow[sanitizedKey] = value;
-                                          }
-                                        }
+                    if (!table || typeof table !== 'string') throw new Error('Invalid table name');
+                    if (!Array.isArray(rows) || rows.length === 0) throw new Error('Rows must be a non-empty array');
+                    if (!this.isUserTable(table)) throw new Error(`Table '${table}' does not exist or is not accessible`);
 
-                                        // AUTOMATIC METADATA EXTRUSION: Inject user_id if column exists
-                                        if (existingColumns.has('user_id') && !cleanRow['user_id']) {
-                                          cleanRow['user_id'] = userId;
-                                        }
-                                        if (existingColumns.has('owner_id') && !cleanRow['owner_id']) {
-                                          cleanRow['owner_id'] = userId;
-                                        }
-                                        if (existingColumns.has('created_at') && !cleanRow['created_at']) {
-                                          cleanRow['created_at'] = Date.now();
-                                        }
-
-                                        const fields = Object.keys(cleanRow);
-                                        if (fields.length === 0) continue;
-                                            
-                                        const values = Object.values(cleanRow);
-                                        const placeholders = fields.map(() => '?').join(', ');
-                                        const fieldNames = fields.map(f => `"${f}"`).join(', ');
-                                            
-                                        this.sql.exec(
-                                          `INSERT INTO "${table}" (${fieldNames}) VALUES (${placeholders})`,
-                                          ...values
-                                        );
-                                            
-                                        const lastId = this.sql.exec("SELECT last_insert_rowid() as id").toArray()[0].id;
-                                        insertedRows.push({ id: lastId, ...cleanRow });
-                                      } catch (rowError: any) {
-                                        console.error('Failed to insert row:', rowError.message);
-                                      }
-                                    }
-                                });
-                            } catch (chunkError: any) {
-                                console.error(`Batch chunk failed:`, chunkError);
-                                // Don't crash the whole request, just log and continue
-                            }
-                            
-                            // Send progress update for each chunk
-                            if (i + CHUNK_SIZE < rows.length) {
-                                webSocket.send(JSON.stringify({ 
-                                    type: "batch_progress",
-                                    action: "batchInsert",
-                                    updateId: data.updateId,
-                                    requestId: data.requestId,
-                                    data: { 
-                                        inserted: insertedRows.length, 
-                                        total: rows.length,
-                                        progress: Math.round((insertedRows.length / rows.length) * 100)
-                                    }
-                                }));
-                            }
-                        }
-                        
-                        // Replicate data to D1 (async) - for all inserted rows
-                        if (insertedRows.length > 0) {
-                            for (const row of insertedRows) {
-                                this.ctx.waitUntil(this.replicateToD1(table, 'insert', row));
-                            }
-                            
-                            // Broadcast all inserted rows
-                            for (const row of insertedRows) {
-                                this.broadcastUpdate(table, "added", row);
-                            }
-                        }
-                        
-                        this.logger.info(`Batch insert completed`, { 
-                            table, 
-                            count: insertedRows.length,
-                            totalRows: rows.length
-                        });
-                        
-                        webSocket.send(JSON.stringify({ 
-                            type: "mutation_success", 
-                            action: "batchInsert",
-                            updateId: data.updateId,
-                            requestId: data.requestId,
-                            data: { inserted: insertedRows.length, total: rows.length }
-                        }));
-                        
-                    } catch (e: any) {
-                        this.logger.error("Batch insert failed", e);
-                        webSocket.send(JSON.stringify({ 
-                            type: "mutation_error", 
-                            action: "batchInsert",
-                            error: e.message,
-                            updateId: data.updateId,
-                            requestId: data.requestId
-                        }));
+                    // 1. Force Schema Sync to D1 to ensure Grid can read what we write
+                    // This prevents "It's in the backend but I can't see it" issues
+                    if (this.env.READ_REPLICA) {
+                       this.ctx.waitUntil(this.replicateSchemaToD1());
                     }
-                    break;
+
+                    // 2. Validate Schema Matches
+                    const currentInfo = this.sql.exec(`PRAGMA table_info("${table}")`).toArray();
+                    const existingColumns = new Set(currentInfo.map((c: any) => c.name));
+                        
+                    // Sanitize keys to match DB format
+                    const sampleRow = rows[0];
+                    const incomingKeys = Object.keys(sampleRow).map(k => this.sanitizeIdentifier(k));
+                    const validKeys = incomingKeys.filter(k => existingColumns.has(k));
+                        
+                    if (validKeys.length === 0) {
+                      // CRITICAL: Throw error if no columns match, don't fail silently
+                      const dbCols = Array.from(existingColumns).join(', ');
+                      const csvCols = incomingKeys.join(', ');
+                      throw new Error(`Column mismatch. CSV columns (${csvCols}) do not match Table columns (${dbCols})`);
+                    }
+
+                    const insertedRows: any[] = [];
+                    const CHUNK_SIZE = 50;
+                    let insertErrors: string[] = [];
+                        
+                    for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+                      const chunk = rows.slice(i, Math.min(i + CHUNK_SIZE, rows.length));
+                            
+                      try {
+                        this.ctx.storage.transactionSync(() => {
+                          for (const row of chunk) {
+                            try {
+                            const cleanRow: Record<string, any> = {};
+                                            
+                            // Map CSV data to Database Schema
+                            for (const [key, value] of Object.entries(row)) {
+                              const sanitizedKey = this.sanitizeIdentifier(key);
+                              if (existingColumns.has(sanitizedKey)) {
+                              cleanRow[sanitizedKey] = value;
+                              }
+                            }
+
+                            // Auto-fill Metadata
+                            const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
+                            if (existingColumns.has('user_id') && !cleanRow['user_id']) cleanRow['user_id'] = userId;
+                            if (existingColumns.has('owner_id') && !cleanRow['owner_id']) cleanRow['owner_id'] = userId;
+                            if (existingColumns.has('created_at') && !cleanRow['created_at']) cleanRow['created_at'] = Date.now();
+
+                            const fields = Object.keys(cleanRow);
+                            if (fields.length === 0) return; // Skip empty rows
+                                            
+                            const values = Object.values(cleanRow);
+                            const placeholders = fields.map(() => '?').join(', ');
+                            const fieldNames = fields.map(f => `"${f}"`).join(', ');
+                                            
+                            this.sql.exec(
+                              `INSERT INTO "${table}" (${fieldNames}) VALUES (${placeholders})`,
+                              ...values
+                            );
+                                            
+                            const lastId = this.sql.exec("SELECT last_insert_rowid() as id").toArray()[0].id;
+                            insertedRows.push({ id: lastId, ...cleanRow });
+                            } catch (rowError: any) {
+                            insertErrors.push(rowError.message);
+                            }
+                          }
+                        });
+                      } catch (chunkError: any) {
+                        console.error(`Batch chunk failed:`, chunkError);
+                        insertErrors.push(chunkError.message);
+                      }
+                    }
+                        
+                    // 3. Replicate Data to D1 immediately (async)
+                    if (insertedRows.length > 0) {
+                      for (const row of insertedRows) {
+                        this.ctx.waitUntil(this.replicateToD1(table, 'insert', row));
+                      }
+                      // Broadcast updates
+                      for (const row of insertedRows) {
+                        this.broadcastUpdate(table, "added", row);
+                      }
+                    }
+                        
+                    // 4. Return Actual Results
+                    webSocket.send(JSON.stringify({ 
+                      type: "mutation_success", 
+                      action: "batchInsert",
+                      updateId: data.updateId,
+                      requestId: data.requestId,
+                      data: { 
+                        inserted: insertedRows.length, 
+                        total: rows.length,
+                        errors: insertErrors.slice(0, 5) // Send first 5 errors if any
+                      }
+                    }));
+                        
+                  } catch (e: any) {
+                    this.logger.error("Batch insert failed", e);
+                    webSocket.send(JSON.stringify({ 
+                      type: "mutation_error", 
+                      action: "batchInsert",
+                      error: e.message,
+                      updateId: data.updateId,
+                      requestId: data.requestId
+                    }));
+                  }
+                  break;
                 }
                 
                 case "search": {
