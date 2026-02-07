@@ -179,7 +179,8 @@ export class NanoStore extends DurableObject<Env> {
       try {
         sub.send(msg);
       } catch (e) {
-        // ignore closed sockets
+        // Ignore closed sockets and remove them from the set
+        this.subscribers.delete(sub);
       }
     }
   }
@@ -201,39 +202,38 @@ export class NanoStore extends DurableObject<Env> {
             // Broadcast update for known tables
             this.broadcastUpdate(table, 'create', { count: rows.length });
             data = { data: { inserted: rows.length, total: rows.length } };
-          } else {
+            } else {
             // Dynamic SQL path
             const keys = Object.keys(rows[0]);
-
-            // SECURITY: Ensure table name is safe (redundant check but good practice)
-            const safeTableName = (table || '').replace(/[^a-zA-Z0-9_]/g, '');
-            if (!safeTableName) throw new Error('Invalid table name');
-
+            
+            // SECURITY: Ensure table name is safe
+            const safeTableName = table.replace(/[^a-zA-Z0-9_]/g, '');
+            
             // Build query
             const cols = keys.map(k => `"${k.replace(/"/g, '""')}"`).join(',');
             const placeholders = keys.map(() => '?').join(',');
             const sqlStmt = `INSERT INTO "${safeTableName}" (${cols}) VALUES (${placeholders})`;
                 
             let inserted = 0;
-            // Use transaction for speed and atomicity
-            this.sql.exec('BEGIN TRANSACTION');
+            
+            // FIX: Use transactionSync instead of SQL BEGIN TRANSACTION
             try {
+              this.ctx.storage.transactionSync(() => {
                 for (const row of rows) {
-                    this.sql.exec(sqlStmt, ...keys.map(k => row[k]));
-                    inserted++;
+                  this.sql.exec(sqlStmt, ...keys.map(k => row[k]));
+                  inserted++;
                 }
-                this.sql.exec('COMMIT');
-
-                // Broadcast update so UI refreshes
-                this.broadcastUpdate(safeTableName, 'create', { count: inserted });
+              });
+                
+              // Broadcast update so UI refreshes
+              this.broadcastUpdate(safeTableName, 'create', { count: inserted });
             } catch (e) {
-                this.sql.exec('ROLLBACK');
-                console.error('Batch insert failed:', e);
-                throw e; // Rethrow to inform client
+              console.error('Batch insert failed:', e);
+              throw e; // Rethrow to inform client
             }
             
             data = { data: { inserted, total: rows.length } };
-          }
+            }
           break;
         }
 

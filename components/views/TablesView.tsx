@@ -182,12 +182,11 @@ export const TablesView: React.FC = () => {
 
     try {
       const derivedName = deriveTableName(csvPreview.fileName);
-      const targetTableRaw = csvTargetMode === 'existing'
+      // Sanitize the name to match backend rules
+      const safeNewName = (csvTargetName || derivedName).toLowerCase().replace(/[^a-z0-9_]/g, '');
+      const targetTable = csvTargetMode === 'existing'
         ? (csvTargetTable || selectedTable)
-        : (csvTargetName || derivedName);
-
-      // Sanitize the target name to ensure it matches what createTable creates
-      const targetTable = sanitizeTableName(targetTableRaw || '');
+        : safeNewName;
 
       if (!targetTable) {
         addToast('Select a target table to import into', 'error');
@@ -219,8 +218,9 @@ export const TablesView: React.FC = () => {
           columns: columns
         });
 
+        // Small delay to allow schema to propagate
         await new Promise(resolve => setTimeout(resolve, 500));
-
+        await refreshSchema();
         addToast(`Table "${targetTable}" created`, 'success');
       }
 
