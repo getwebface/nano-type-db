@@ -35,11 +35,14 @@ export const TablesView: React.FC = () => {
     }
   });
 
-  // STRICT SANITIZATION: Must match backend regex /[^a-zA-Z0-9_]/g
+  // STRICT SANITIZATION: Must match backend regex /[^a-z0-9_]/g (applied after toLowerCase)
   // This prevents the "ghost table" issue where frontend sees "my-table" but backend has "mytable"
   const sanitizeTableName = (name: string) => name.toLowerCase().replace(/[^a-z0-9_]/g, '');
 
   const deriveTableName = (fileName: string) => sanitizeTableName(fileName.replace(/\.csv$/i, ''));
+
+  // Reload delay after import to ensure schema propagation
+  const RELOAD_DELAY_MS = 100;
 
   // Destructure reload from the hook
   const { data, total, loadMore, reload } = useRealtimeQuery(selectedTable);
@@ -244,7 +247,7 @@ export const TablesView: React.FC = () => {
       
       // Update selection to the new (sanitized) name and force reload
       setSelectedTable(targetTable);
-      setTimeout(() => reload(), 100); 
+      setTimeout(() => reload(), RELOAD_DELAY_MS); 
       
     } catch (error: any) {
       console.error("Import error details:", error);

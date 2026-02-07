@@ -197,7 +197,7 @@ export class NanoStore extends DurableObject<Env> {
           }
 
           // 1. Sanitize table name (Must match frontend logic)
-          const safeTableName = table.replace(/[^a-zA-Z0-9_]/g, '');
+          const safeTableName = table.toLowerCase().replace(/[^a-z0-9_]/g, '');
 
           // 2. Prepare keys and statement
           const keys = Object.keys(rows[0]);
