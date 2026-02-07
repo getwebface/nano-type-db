@@ -1419,11 +1419,28 @@ export default {
             if (!session) {
                 const sessionToken = url.searchParams.get("session_token");
                 if (sessionToken) {
+                    // Try common Better Auth cookie name variants and bearer token
                     session = await auth.api.getSession({ 
                         headers: new Headers({
                             'Cookie': `better-auth.session_token=${sessionToken}`
                         })
                     });
+
+                    if (!session) {
+                        session = await auth.api.getSession({ 
+                            headers: new Headers({
+                                'Cookie': `better-auth.session-token=${sessionToken}`
+                            })
+                        });
+                    }
+
+                    if (!session) {
+                        session = await auth.api.getSession({ 
+                            headers: new Headers({
+                                'Authorization': `Bearer ${sessionToken}`
+                            })
+                        });
+                    }
                 }
             }
         } catch (e: any) {
