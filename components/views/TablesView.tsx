@@ -43,7 +43,7 @@ export const TablesView: React.FC = () => {
     }
   }, [schema, selectedTable]);
 
-  const { data, total, loadMore } = useRealtimeQuery(selectedTable);
+  const { data, total, loadMore, reload } = useRealtimeQuery(selectedTable);
   const tableList = schema ? Object.keys(schema) : [];
 
   useEffect(() => {
@@ -58,6 +58,9 @@ export const TablesView: React.FC = () => {
   const deriveTableName = (fileName: string) =>
     fileName.replace(/\.csv$/i, '').toLowerCase().replace(/[^a-z0-9_]/g, '_');
 
+  // Ensure table names match backend sanitization (remove non-alphanumeric/underscore)
+  const sanitizeTableName = (name: string) => name.toLowerCase().replace(/[^a-z0-9_]/g, '');
+
   const formatTimestamp = (ts?: number | null) => {
     if (!ts) return '—';
     return new Date(ts).toLocaleString();
@@ -66,18 +69,15 @@ export const TablesView: React.FC = () => {
   const refreshTableData = async (tableName: string) => {
     if (!tableName) return;
     try {
-      if (tableName === 'tasks') {
-        await rpc('listTasks', { limit: DEFAULT_LIMIT, offset: 0 });
-      } else {
-        await rpc('executeSQL', {
-          sql: `SELECT * FROM ${tableName} LIMIT ${DEFAULT_LIMIT} OFFSET 0`,
-          readonly: true
-        });
-        await rpc('executeSQL', {
-          sql: `SELECT COUNT(*) as count FROM ${tableName}`,
-          readonly: true
-        });
-      }
+      // Always use executeSQL with quoted table name
+      await rpc('executeSQL', {
+        sql: `SELECT * FROM "${tableName}" LIMIT ${DEFAULT_LIMIT} OFFSET 0`,
+        readonly: true
+      });
+      await rpc('executeSQL', {
+        sql: `SELECT COUNT(*) as count FROM "${tableName}"`,
+        readonly: true
+      });
       setLastRefreshedAt(Date.now());
     } catch (error) {
       console.error('Failed to refresh table data:', error);
@@ -97,15 +97,16 @@ export const TablesView: React.FC = () => {
     }
 
     try {
+      const safeName = sanitizeTableName(newTableName);
       await rpc('createTable', {
-        tableName: newTableName,
+        tableName: safeName,
         columns: newTableColumns
       });
       
       setShowCreateModal(false);
       setNewTableName('');
       setNewTableColumns([{ name: 'name', type: 'TEXT', notNull: false }]);
-      setSelectedTable(newTableName);
+      setSelectedTable(safeName);
     } catch (error) {
       console.error('Failed to create table:', error);
       addToast('Failed to create table: ' + (error as Error).message, 'error');
@@ -181,9 +182,12 @@ export const TablesView: React.FC = () => {
 
     try {
       const derivedName = deriveTableName(csvPreview.fileName);
-      const targetTable = csvTargetMode === 'existing'
+      const targetTableRaw = csvTargetMode === 'existing'
         ? (csvTargetTable || selectedTable)
         : (csvTargetName || derivedName);
+
+      // Sanitize the target name to ensure it matches what createTable creates
+      const targetTable = sanitizeTableName(targetTableRaw || '');
 
       if (!targetTable) {
         addToast('Select a target table to import into', 'error');
@@ -237,7 +241,8 @@ export const TablesView: React.FC = () => {
       await refreshSchema();
       setLastImportMap(prev => ({ ...prev, [targetTable]: Date.now() }));
       setSelectedTable(targetTable);
-      await refreshTableData(targetTable);
+      // Force reload the data grid
+      reload();
     } catch (error: any) {
       console.error("Import error details:", error);
       addToast('Import failed: ' + error.message, 'error');

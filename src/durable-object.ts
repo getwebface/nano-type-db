@@ -172,6 +172,18 @@ export class NanoStore extends DurableObject<Env> {
     }
   }
 
+  // Helper to broadcast updates to all clients
+  private broadcastUpdate(table: string, action: 'create' | 'update' | 'delete', data: any) {
+    const msg = JSON.stringify({ event: 'update', table, action, data });
+    for (const sub of this.subscribers) {
+      try {
+        sub.send(msg);
+      } catch (e) {
+        // ignore closed sockets
+      }
+    }
+  }
+
   private async handleRpc(ws: WebSocket, payload: any) {
     let data;
     try {
@@ -186,23 +198,40 @@ export class NanoStore extends DurableObject<Env> {
           const knownTable = TableMap[table];
           if (knownTable) {
             await this.db.insert(knownTable).values(rows).run();
+            // Broadcast update for known tables
+            this.broadcastUpdate(table, 'create', { count: rows.length });
             data = { data: { inserted: rows.length, total: rows.length } };
           } else {
-            // 🛡️ FIX: Use exec() instead of prepare()
+            // Dynamic SQL path
             const keys = Object.keys(rows[0]);
+
+            // SECURITY: Ensure table name is safe (redundant check but good practice)
+            const safeTableName = (table || '').replace(/[^a-zA-Z0-9_]/g, '');
+            if (!safeTableName) throw new Error('Invalid table name');
+
+            // Build query
             const cols = keys.map(k => `"${k.replace(/"/g, '""')}"`).join(',');
             const placeholders = keys.map(() => '?').join(',');
-            const sqlStmt = `INSERT INTO "${table.replace(/"/g, '""')}" (${cols}) VALUES (${placeholders})`;
+            const sqlStmt = `INSERT INTO "${safeTableName}" (${cols}) VALUES (${placeholders})`;
                 
             let inserted = 0;
-            for (const row of rows) {
-              try {
-                this.sql.exec(sqlStmt, ...keys.map(k => row[k]));
-                inserted++;
-              } catch (e) {
-                console.error('Insert failed row:', e);
-              }
+            // Use transaction for speed and atomicity
+            this.sql.exec('BEGIN TRANSACTION');
+            try {
+                for (const row of rows) {
+                    this.sql.exec(sqlStmt, ...keys.map(k => row[k]));
+                    inserted++;
+                }
+                this.sql.exec('COMMIT');
+
+                // Broadcast update so UI refreshes
+                this.broadcastUpdate(safeTableName, 'create', { count: inserted });
+            } catch (e) {
+                this.sql.exec('ROLLBACK');
+                console.error('Batch insert failed:', e);
+                throw e; // Rethrow to inform client
             }
+            
             data = { data: { inserted, total: rows.length } };
           }
           break;

@@ -235,18 +235,28 @@ export const useRealtimeQuery = (tableName: string, options: { limit?: number; }
     const { rpc, lastResult } = useDatabase();
     const [data, setData] = useState<any[]>([]);
     
-    useEffect(() => {
+    // Create a stable reload function
+    const reload = useCallback(() => {
+        if (!tableName) return;
         rpc('executeSQL', { 
-            sql: `SELECT * FROM ${tableName} LIMIT ${options.limit || 100}`, 
+            sql: `SELECT * FROM "${tableName}" LIMIT ${options.limit || 100}`, 
             params: [] 
         }).then(setData).catch(console.error);
-    }, [tableName, rpc]);
+    }, [tableName, options.limit, rpc]);
 
+    // Initial load
+    useEffect(() => {
+        reload();
+    }, [reload]);
+
+    // Handle real-time updates
     useEffect(() => {
         if (lastResult?.table === tableName) {
-             // Handle updates logic here...
+             // Simple refetch on any update to this table for now
+             // Optimization: merge diffs here if available
+             reload();
         }
-    }, [lastResult]);
+    }, [lastResult, tableName, reload]);
 
-    return { data, total: data.length, loadMore: () => {} };
+    return { data, total: data.length, loadMore: () => {}, reload };
 };
