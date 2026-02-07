@@ -1,20 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { DurableObjectState } from "cloudflare:workers";
-import { 
-  SQLSanitizer, 
-  RateLimiter, 
-      try {
-        if (this.env && this.env.READ_REPLICA) {
-          await this.env.READ_REPLICA.prepare(`DELETE FROM _webhooks WHERE id = ?`).bind(id).run();
-        } else {
-          this.sql.exec(`DELETE FROM _webhooks WHERE id = ?`, id);
-        }
-        webSocket.send(JSON.stringify({ type: "mutation_success", action: "deleteWebhook", requestId: data.requestId }));
-      } catch (e: any) {
-        webSocket.send(JSON.stringify({ type: "mutation_error", action: "deleteWebhook", requestId: data.requestId, error: `Failed to delete webhook: ${e.message}` }));
-      }
+import { SQLSanitizer, RateLimiter } from './lib/security';
 import { generateTypeSafeClient } from "./client-generator";
-        webSocket.send(JSON.stringify({ type: "mutation_error", action: "deleteWebhook", requestId: data.requestId, error: `Failed to delete webhook: ${e.message}` }));
 /**
  * SECURITY & ARCHITECTURE NOTES:
  * 
@@ -73,47 +60,9 @@ class MemoryStore {
   
   set(key: string, value: any, ttlMs?: number): void {
     this.data.set(key, value);
-          try {
-            const id = `wh_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-            const now = Date.now();
-
-            if (this.env && this.env.READ_REPLICA) {
-              try {
-                await this.env.READ_REPLICA.prepare(
-                  `INSERT INTO _webhooks (id, url, events, secret, active, created_at, failure_count) VALUES (?, ?, ?, ?, 1, ?, 0)`
-                ).bind(id, url, events, secret || null, now).run();
-              } catch (e) {
-                // If D1 insert fails, fallback to local sqlite
-                this.sql.exec(
-                  `INSERT INTO _webhooks (id, url, events, secret, active, created_at, failure_count) VALUES (?, ?, ?, ?, 1, ?, 0)`,
-                  id, url, events, secret || null, now
-                );
-              }
-            } else {
-              this.sql.exec(
-                `INSERT INTO _webhooks (id, url, events, secret, active, created_at, failure_count) VALUES (?, ?, ?, ?, 1, ?, 0)`,
-                id, url, events, secret || null, now
-              );
-            }
-
-            const webhook = { id, url, events, active: 1, created_at: now };
-
-            webSocket.send(JSON.stringify({ 
-              type: "mutation_success", 
-              action: "createWebhook",
-              data: webhook,
-              requestId: data.requestId
-            }));
-          } catch (e: any) {
-            webSocket.send(JSON.stringify({ 
-              type: "mutation_error", 
-              action: "createWebhook",
-              requestId: data.requestId,
-              error: `Failed to create webhook: ${e.message}` 
-            }));
-          }
-    this.data.clear();
-    this.expiry.clear();
+    if (ttlMs && typeof ttlMs === 'number') {
+      this.expiry.set(key, Date.now() + ttlMs);
+    }
   }
   
   private cleanupExpired(): void {
