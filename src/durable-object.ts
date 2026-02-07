@@ -3,16 +3,18 @@ import type { DurableObjectState } from "cloudflare:workers";
 import { 
   SQLSanitizer, 
   RateLimiter, 
-  InputValidator, 
-  QueryTimeout,
-  MemoryTracker,
-  StructuredLogger
-} from "./lib/security";
+      try {
+        if (this.env && this.env.READ_REPLICA) {
+          await this.env.READ_REPLICA.prepare(`DELETE FROM _webhooks WHERE id = ?`).bind(id).run();
+        } else {
+          this.sql.exec(`DELETE FROM _webhooks WHERE id = ?`, id);
+        }
+        webSocket.send(JSON.stringify({ type: "mutation_success", action: "deleteWebhook", requestId: data.requestId }));
+      } catch (e: any) {
+        webSocket.send(JSON.stringify({ type: "mutation_error", action: "deleteWebhook", requestId: data.requestId, error: `Failed to delete webhook: ${e.message}` }));
+      }
 import { generateTypeSafeClient } from "./client-generator";
-// `node:fs` is not available in Cloudflare Workers; file-system backups
-// are only performed when running in a Node environment. In Workers
-// we skip file-based backups and rely on R2 or other mechanisms.
-
+        webSocket.send(JSON.stringify({ type: "mutation_error", action: "deleteWebhook", requestId: data.requestId, error: `Failed to delete webhook: ${e.message}` }));
 /**
  * SECURITY & ARCHITECTURE NOTES:
  * 
@@ -71,32 +73,45 @@ class MemoryStore {
   
   set(key: string, value: any, ttlMs?: number): void {
     this.data.set(key, value);
-    if (ttlMs) {
-      this.expiry.set(key, Date.now() + ttlMs);
-    }
-  }
-  
-  get(key: string): any {
-    this.cleanupExpired();
-    return this.data.get(key);
-  }
-  
-  delete(key: string): boolean {
-    this.expiry.delete(key);
-    return this.data.delete(key);
-  }
-  
-  has(key: string): boolean {
-    this.cleanupExpired();
-    return this.data.has(key);
-  }
-  
-  keys(): IterableIterator<string> {
-    this.cleanupExpired();
-    return this.data.keys();
-  }
-  
-  clear(): void {
+          try {
+            const id = `wh_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+            const now = Date.now();
+
+            if (this.env && this.env.READ_REPLICA) {
+              try {
+                await this.env.READ_REPLICA.prepare(
+                  `INSERT INTO _webhooks (id, url, events, secret, active, created_at, failure_count) VALUES (?, ?, ?, ?, 1, ?, 0)`
+                ).bind(id, url, events, secret || null, now).run();
+              } catch (e) {
+                // If D1 insert fails, fallback to local sqlite
+                this.sql.exec(
+                  `INSERT INTO _webhooks (id, url, events, secret, active, created_at, failure_count) VALUES (?, ?, ?, ?, 1, ?, 0)`,
+                  id, url, events, secret || null, now
+                );
+              }
+            } else {
+              this.sql.exec(
+                `INSERT INTO _webhooks (id, url, events, secret, active, created_at, failure_count) VALUES (?, ?, ?, ?, 1, ?, 0)`,
+                id, url, events, secret || null, now
+              );
+            }
+
+            const webhook = { id, url, events, active: 1, created_at: now };
+
+            webSocket.send(JSON.stringify({ 
+              type: "mutation_success", 
+              action: "createWebhook",
+              data: webhook,
+              requestId: data.requestId
+            }));
+          } catch (e: any) {
+            webSocket.send(JSON.stringify({ 
+              type: "mutation_error", 
+              action: "createWebhook",
+              requestId: data.requestId,
+              error: `Failed to create webhook: ${e.message}` 
+            }));
+          }
     this.data.clear();
     this.expiry.clear();
   }
@@ -3024,16 +3039,25 @@ export class NanoStore extends DurableObject {
                             )
                         `);
 
-                        const webhooks = this.sql.exec(
-                            `SELECT id, url, events, active, created_at, last_triggered_at, failure_count 
-                             FROM _webhooks ORDER BY created_at DESC`
-                        ).toArray();
-
-                        webSocket.send(JSON.stringify({ 
-                          type: "query_result", 
-                          data: webhooks,
-                          requestId: data.requestId
-                        }));
+                        if (this.env && this.env.READ_REPLICA) {
+                          try {
+                            const res = await this.env.READ_REPLICA.prepare(
+                              `SELECT id, url, events, active, created_at, last_triggered_at, failure_count FROM _webhooks ORDER BY created_at DESC`
+                            ).all();
+                            webSocket.send(JSON.stringify({ type: "query_result", data: res.results, requestId: data.requestId }));
+                          } catch (e) {
+                            // Fallback to local sqlite
+                            const webhooks = this.sql.exec(
+                              `SELECT id, url, events, active, created_at, last_triggered_at, failure_count FROM _webhooks ORDER BY created_at DESC`
+                            ).toArray();
+                            webSocket.send(JSON.stringify({ type: "query_result", data: webhooks, requestId: data.requestId }));
+                          }
+                        } else {
+                          const webhooks = this.sql.exec(
+                            `SELECT id, url, events, active, created_at, last_triggered_at, failure_count FROM _webhooks ORDER BY created_at DESC`
+                          ).toArray();
+                          webSocket.send(JSON.stringify({ type: "query_result", data: webhooks, requestId: data.requestId }));
+                        }
                     } catch (e: any) {
                         // Lazy Migration: Self-heal schema if columns missing
                             console.log("Lazy migration: Fixing _webhooks table schema...");
@@ -3048,16 +3072,21 @@ export class NanoStore extends DurableObject {
                                 try { this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_webhooks_active ON _webhooks(active) WHERE active = 1`); } catch (_) {}
 
                                 // Retry query
+                                if (this.env && this.env.READ_REPLICA) {
+                                  try {
+                                    const res = await this.env.READ_REPLICA.prepare(
+                                      `SELECT id, url, events, active, created_at, last_triggered_at, failure_count FROM _webhooks ORDER BY created_at DESC`
+                                    ).all();
+                                    webSocket.send(JSON.stringify({ type: "query_result", data: res.results, requestId: data.requestId }));
+                                    return;
+                                  } catch (_) {
+                                    // fall through to local sqlite
+                                  }
+                                }
                                 const webhooks = this.sql.exec(
-                                    `SELECT id, url, events, active, created_at, last_triggered_at, failure_count 
-                                     FROM _webhooks ORDER BY created_at DESC`
+                                  `SELECT id, url, events, active, created_at, last_triggered_at, failure_count FROM _webhooks ORDER BY created_at DESC`
                                 ).toArray();
-                                
-                                webSocket.send(JSON.stringify({ 
-                                  type: "query_result", 
-                                  data: webhooks,
-                                  requestId: data.requestId
-                                }));
+                                webSocket.send(JSON.stringify({ type: "query_result", data: webhooks, requestId: data.requestId }));
                                 return;
                             } catch (migrationErr: any) {
                                 console.error("Lazy migration failed:", migrationErr);
@@ -3151,22 +3180,20 @@ export class NanoStore extends DurableObject {
                         
                         if (events !== undefined) {
                             updates.push("events = ?");
-                            params.push(events);
-                        }
-                        
-                        if (active !== undefined) {
-                            updates.push("active = ?");
-                            params.push(active ? 1 : 0);
-                        }
-                        
-                        if (updates.length === 0) {
-                            webSocket.send(JSON.stringify({ 
-                            type: "mutation_error", 
+                            params.push(id);
+                            const sql = `UPDATE _webhooks SET ${updates.join(', ')} WHERE id = ?`;
+                            try {
+                              if (this.env && this.env.READ_REPLICA) {
+                                await this.env.READ_REPLICA.prepare(sql).bind(...params).run();
+                              } else {
+                                this.sql.exec(sql, ...params);
+                              }
+                              webSocket.send(JSON.stringify({ type: "mutation_success", action: "updateWebhook", requestId: data.requestId }));
+                            } catch (e: any) {
+                              webSocket.send(JSON.stringify({ type: "mutation_error", action: "updateWebhook", requestId: data.requestId, error: `Failed to update webhook: ${e.message}` }));
+                            }
                             action: "updateWebhook",
-                            requestId: data.requestId,
-                            error: "No fields to update" 
-                            }));
-                            break;
+                            webSocket.send(JSON.stringify({ type: "mutation_error", action: "updateWebhook", requestId: data.requestId, error: `Failed to update webhook: ${e.message}` }));
                         }
                         
                         params.push(id);
