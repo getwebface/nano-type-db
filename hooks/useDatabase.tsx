@@ -82,8 +82,9 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
          try {
             if (!currentRoomIdRef.current) return;
             
-            // ✅ Hono Client call
-            const res = await client.schema.$get({ 
+            // 🛡️ FIXED: Use the correct API route
+            // Since we moved it to /api/schema in Hono:
+            const res = await client.api.schema.$get({ 
                 query: { room_id: currentRoomIdRef.current } 
             });
             

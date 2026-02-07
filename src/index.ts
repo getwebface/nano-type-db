@@ -129,13 +129,14 @@ roomsApp.get("/list", async (c) => {
 
 app.route("/api/rooms", roomsApp);
 
-// Proxy Schema Request
-app.get("/schema", async (c) => {
+// 🛡️ FIXED: Moved to /api/schema to match Vite Proxy
+app.get("/api/schema", async (c) => {
     const roomId = c.req.query("room_id");
     if (!roomId) return c.json({ error: "Missing room_id" }, 400);
 
     const id = c.env.DATA_STORE.idFromName(roomId);
     const stub = c.env.DATA_STORE.get(id);
+    // Passes c.req.raw, which contains the full URL including /api/schema
     return stub.fetch(c.req.raw);
 });
 
