@@ -160,14 +160,14 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         }
     }
 
-    const socketUrl = useCallback(() => {
-        const wsUrl = new URL(`${WS_PROTOCOL}://${HOST}/${WS_BASE_PATH}`);
-        if (roomId) wsUrl.searchParams.set('room_id', roomId);
-        if (apiKey) wsUrl.searchParams.set('key', apiKey);
-        return wsUrl.toString();
-    }, [roomId, apiKey]);
+    const wsUrl = (() => {
+        const url = new URL(`${WS_PROTOCOL}://${HOST}/${WS_BASE_PATH}`);
+        if (roomId) url.searchParams.set('room_id', roomId);
+        if (apiKey) url.searchParams.set('key', apiKey);
+        return url.toString();
+    })();
 
-    const socket = useWebSocket(socketUrl, undefined, {
+    const socket = useWebSocket(wsUrl, undefined, {
         enabled: Boolean(roomId),
         onOpen: () => {
             wsLog('Connected to WebSocket');
