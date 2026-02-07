@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
-import usePartySocket from 'partysocket/react';
+import { useWebSocket } from 'partysocket/react';
 import { DatabaseContextType, QueryResult, ToastMessage, Schema, UsageStat, OptimisticUpdate } from '../types';
 import { authClient } from '../src/lib/auth-client';
 
@@ -162,16 +162,15 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         }
     }
 
-    const partySocket = usePartySocket({
-        host: HOST,
-        room: roomId || 'default',
-        basePath: WS_BASE_PATH,
-        protocol: WS_PROTOCOL,
-        query: () => ({
-            room_id: roomId || undefined,
-            key: apiKey || undefined,
-            session_token: sessionData?.session?.token || undefined
-        }),
+    const wsUrl = (() => {
+        const url = new URL(`${WS_PROTOCOL}://${HOST}/${WS_BASE_PATH}`);
+        if (roomId) url.searchParams.set('room_id', roomId);
+        if (apiKey) url.searchParams.set('key', apiKey);
+        if (sessionData?.session?.token) url.searchParams.set('session_token', sessionData.session.token);
+        return url.toString();
+    })();
+
+    const socket = useWebSocket(wsUrl, undefined, {
         enabled: Boolean(roomId),
         onOpen: () => {
             wsLog('Connected to WebSocket');
@@ -182,24 +181,24 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             addToast('Connected to database', 'success');
 
             if (lastCursorRef.current) {
-                partySocket.send(JSON.stringify({
+                socket.send(JSON.stringify({
                     action: 'setCursor',
                     payload: lastCursorRef.current
                 }));
             }
             if (lastPresenceRef.current) {
-                partySocket.send(JSON.stringify({
+                socket.send(JSON.stringify({
                     action: 'setPresence',
                     payload: lastPresenceRef.current
                 }));
             }
 
             subscribedTablesRef.current.forEach(table => {
-                partySocket.send(JSON.stringify({ action: 'subscribe', table }));
+                socket.send(JSON.stringify({ action: 'subscribe', table }));
             });
 
-            partySocket.send(JSON.stringify({ action: 'rpc', method: 'getSchema' }));
-            partySocket.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
+            socket.send(JSON.stringify({ action: 'rpc', method: 'getSchema' }));
+            socket.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
         },
         onMessage: (event) => {
             handleSocketMessage(event);
@@ -210,7 +209,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             setIsConnected(false);
             setConnectionQuality(prev => ({ ...prev, latency: 0 }));
             setReconnectInfo({
-                attempt: partySocket.retryCount || 0,
+                attempt: socket.retryCount || 0,
                 maxAttempts: 0,
                 nextRetryAt: null
             });
@@ -221,14 +220,12 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         }
     });
 
-    const socket = roomId ? (partySocket as unknown as WebSocket) : null;
-
     /** Manually trigger a reconnection using PartySocket */
     const manualReconnect = useCallback(() => {
         if (!roomId) return;
         addToast('Manually reconnecting...', 'info');
-        partySocket.reconnect();
-    }, [partySocket, roomId]);
+        socket.reconnect();
+    }, [socket, roomId]);
 
     const performOptimisticAction = useCallback((id: string, action: string, payload: any, rollback: () => void) => {
         // Record optimistic update
@@ -256,42 +253,46 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
 
     const runQuery = useCallback((sql: string, tableContext?: string) => {
         if (tableContext) {
-            partySocket.send(JSON.stringify({ action: 'subscribe_query', sql, table: tableContext }));
+            socket.send(JSON.stringify({ action: 'subscribe_query', sql, table: tableContext }));
         } else {
-            partySocket.send(JSON.stringify({ action: 'query', sql })); 
+            socket.send(JSON.stringify({ action: 'query', sql })); 
         }
-    }, [partySocket]);
+    }, [socket]);
 
     const runReactiveQuery = useCallback((sql: string, tableContext: string) => {
-        partySocket.send(JSON.stringify({ action: 'subscribe_query', sql, table: tableContext }));
-    }, [partySocket]);
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({ action: 'subscribe_query', sql, table: tableContext }));
+    }, [socket]);
 
     const subscribe = useCallback((table: string) => {
         subscribedTablesRef.current.add(table);
-        partySocket.send(JSON.stringify({ action: 'subscribe', table }));
-    }, [partySocket]);
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({ action: 'subscribe', table }));
+    }, [socket]);
 
     const setCursor = useCallback((userId: string, position: any) => {
         // Store for re-connection
         lastCursorRef.current = { userId, position };
         
         // Send to server
-        partySocket.send(JSON.stringify({
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({
             action: 'setCursor',
             payload: { userId, position }
         }));
-    }, [partySocket]);
+    }, [socket]);
 
     const setPresence = useCallback((userId: string, status: any) => {
          // Store for re-connection
         lastPresenceRef.current = { userId, status };
         
         // Send to server
-        partySocket.send(JSON.stringify({
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({
             action: 'setPresence',
             payload: { userId, status }
         }));
-    }, [partySocket]);
+    }, [socket]);
 
     const getPsychicData = useCallback((key: string): any => {
         if (psychicCache.current.has(key)) {
@@ -302,12 +303,13 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     }, []);
 
     const streamIntent = useCallback((text: string) => {
-        partySocket.send(JSON.stringify({
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({
             action: 'rpc',
             method: 'streamIntent',
             payload: { text }
         }));
-    }, [partySocket]);
+    }, [socket]);
 
     /**
      * Generic RPC call - returns a Promise that resolves with the result
@@ -329,7 +331,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
             pendingRequests.current.set(requestId, { resolve, reject });
             
             // Send the RPC request with requestId
-            partySocket.send(JSON.stringify({
+            socket.send(JSON.stringify({
                 action: 'rpc',
                 method,
                 payload,
@@ -345,7 +347,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                 }
             }, timeout);
         });
-    }, [partySocket]);
+    }, [socket]);
 
     const performMutation = useCallback((method: string, payload: any) => {
             // PartySocket handles offline buffering, so we don't check readyState
@@ -366,11 +368,12 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     }, []);
 
     const refreshUsage = useCallback(() => {
-        partySocket.send(JSON.stringify({ 
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({ 
             action: 'rpc', 
             method: 'getUsage'
         }));
-    }, [partySocket]);
+    }, [socket]);
 
     const connect = useCallback((nextRoomId: string) => {
         if (!nextRoomId) return;
