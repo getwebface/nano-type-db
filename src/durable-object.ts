@@ -796,8 +796,8 @@ export class NanoStore extends DurableObject {
         console.warn(`[Sync Engine] Table '${table}' missing in D1. Attempting auto-creation...`);
         
         try {
-          // 1. Force immediate schema replication
-          await this.replicateSchemaToD1();
+          // 1. Force immediate schema replication for the target table
+          await this.ensureTableInD1(table);
           
           // 2. Retry the operation once
           console.log(`[Sync Engine] Retrying operation on '${table}'...`);
@@ -830,6 +830,109 @@ export class NanoStore extends DurableObject {
     }
   }
 
+  private buildCreateTableSql(tableName: string, columns: any[]): string | null {
+    if (!columns || columns.length === 0) return null;
+
+    const pkColumns = columns.filter((col: any) => col.pk > 0).sort((a: any, b: any) => a.pk - b.pk);
+    const hasCompositePk = pkColumns.length > 1;
+
+    const columnDefs = columns.map((col: any) => {
+      const name = col.name;
+      const rawType = typeof col.type === 'string' && col.type.trim() ? col.type.trim() : 'TEXT';
+      const type = rawType.toUpperCase();
+
+      const parts = [`"${name}"`, type];
+
+      if (!hasCompositePk && col.pk > 0) {
+        parts.push('PRIMARY KEY');
+      }
+
+      if (col.notnull) {
+        parts.push('NOT NULL');
+      }
+
+      if (col.dflt_value !== null && col.dflt_value !== undefined) {
+        parts.push(`DEFAULT ${col.dflt_value}`);
+      }
+
+      return parts.join(' ');
+    });
+
+    if (hasCompositePk) {
+      const pkList = pkColumns.map((col: any) => `"${col.name}"`).join(', ');
+      columnDefs.push(`PRIMARY KEY (${pkList})`);
+    }
+
+    return `CREATE TABLE IF NOT EXISTS "${tableName}" (${columnDefs.join(', ')})`;
+  }
+
+  private async ensureTableInD1(tableName: string): Promise<void> {
+    if (!this.env.READ_REPLICA) return;
+
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
+      throw new Error(`Invalid table name: ${tableName}`);
+    }
+
+    const columns = this.sql.exec(`PRAGMA table_info("${tableName}")`).toArray();
+    if (!columns || columns.length === 0) {
+      throw new Error(`Table ${tableName} not found in DO schema`);
+    }
+
+    const createSql = this.buildCreateTableSql(tableName, columns);
+    if (!createSql) return;
+
+    await this.env.READ_REPLICA.exec(createSql);
+
+    // Fetch existing D1 columns to reconcile missing ones
+    let d1Columns: string[] = [];
+    try {
+      const res = await this.env.READ_REPLICA.prepare(`PRAGMA table_info("${tableName}")`).all();
+      d1Columns = (res?.results || []).map((row: any) => row.name);
+    } catch (err) {
+      // If PRAGMA fails, continue with best-effort adds below
+    }
+
+    const d1ColumnSet = new Set(d1Columns);
+
+    for (const col of columns) {
+      const colName = col.name;
+      if (d1ColumnSet.has(colName)) continue;
+
+      const rawType = typeof col.type === 'string' && col.type.trim() ? col.type.trim() : 'TEXT';
+      const type = rawType.toUpperCase();
+      const defaultClause = col.dflt_value !== null && col.dflt_value !== undefined ? ` DEFAULT ${col.dflt_value}` : '';
+
+      try {
+        await this.env.READ_REPLICA.prepare(
+          `ALTER TABLE "${tableName}" ADD COLUMN "${colName}" ${type}${defaultClause}`
+        ).run();
+      } catch (alterErr: any) {
+        // Ignore if column already exists or cannot be added
+      }
+    }
+
+    // Ensure room_id column exists
+    try {
+      await this.env.READ_REPLICA.prepare(`ALTER TABLE "${tableName}" ADD COLUMN room_id TEXT`).run();
+    } catch (alterErr: any) {
+      // Ignore if column already exists
+    }
+
+    // Ensure _sync_ts column exists
+    try {
+      await this.env.READ_REPLICA.prepare(`ALTER TABLE "${tableName}" ADD COLUMN _sync_ts INTEGER`).run();
+    } catch (alterErr: any) {
+      // Ignore if column already exists
+    }
+
+    // Ensure index
+    try {
+      await this.env.READ_REPLICA.exec(`CREATE INDEX IF NOT EXISTS idx_${tableName}_room_id ON "${tableName}" (room_id)`);
+    } catch (idxErr) {
+      // Ignore index errors
+    }
+  }
+
   async replicateSchemaToD1() {
     if (!this.env.READ_REPLICA) return;
 
@@ -841,40 +944,16 @@ export class NanoStore extends DurableObject {
       
       for (const table of tables) {
         const tableName = table.name;
-        let createSql = table.sql;
-        if (!createSql) continue;
+        if (!tableName) continue;
 
-        // Security check
         if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) continue;
-        
-        // Ensure IF NOT EXISTS
-        if (!createSql.toUpperCase().includes('IF NOT EXISTS')) {
-            createSql = createSql.replace(/CREATE TABLE/i, 'CREATE TABLE IF NOT EXISTS');
-        }
 
-        // 1. Create table exactly as defined in DO
-        await this.env.READ_REPLICA.exec(createSql);
-
-        // 2. Add room_id column safely
         try {
-            await this.env.READ_REPLICA.prepare(`ALTER TABLE "${tableName}" ADD COLUMN room_id TEXT`).run();
-        } catch (alterErr: any) {
-            // Ignore if column already exists
+          await this.ensureTableInD1(tableName);
+          console.log(`Schema replicated for table ${tableName}`);
+        } catch (tableErr) {
+          console.error(`Failed to replicate schema for table ${tableName}:`, tableErr);
         }
-
-        // 2b. Add _sync_ts column for conflict-aware replication
-        try {
-          await this.env.READ_REPLICA.prepare(`ALTER TABLE "${tableName}" ADD COLUMN _sync_ts INTEGER`).run();
-        } catch (alterErr: any) {
-          // Ignore if column already exists
-        }
-        
-        // 3. Create index
-        try {
-            await this.env.READ_REPLICA.exec(`CREATE INDEX IF NOT EXISTS idx_${tableName}_room_id ON "${tableName}" (room_id)`);
-        } catch (idxErr) {}
-        
-        console.log(`Schema replicated for table ${tableName}`);
       }
     } catch (e) {
       console.error("Failed to replicate schema to D1:", e);
@@ -1126,7 +1205,52 @@ export class NanoStore extends DurableObject {
 
       await this.env.READ_REPLICA.batch(statements);
       console.log(`[Sync Engine] Batch synced ${rows.length} rows to D1 table ${table}`);
-    } catch (e) {
+    } catch (e: any) {
+      // Attempt auto-recovery for missing tables/columns
+      if (e?.message && (e.message.includes('no such table') || e.message.includes('no such column'))) {
+        console.warn(`[Sync Engine] Batch sync detected missing schema for '${table}'. Attempting repair...`);
+        try {
+          await this.ensureTableInD1(table);
+
+          const roomId = this.doId;
+          const useConflictUpsert = this.canUseConflictUpsert(table, rows[0]);
+          const templateRow = rows[0];
+          const keys = Object.keys(templateRow).filter(k => k !== 'room_id' && k !== '_sync_ts');
+          if (keys.length === 0) return;
+
+          const columns = [...keys, 'room_id', '_sync_ts'];
+          const columnStr = columns.map(c => `"${c}"`).join(', ');
+          const placeholderStr = columns.map(() => '?').join(', ');
+          const updateColumns = [...keys.filter(k => k !== 'id'), '_sync_ts'];
+          const updateSet = updateColumns.map(c => `"${c}" = excluded."${c}"`).join(', ');
+          const baseQuery = useConflictUpsert
+            ? `INSERT INTO "${table}" (${columnStr}) VALUES (${placeholderStr})
+               ON CONFLICT("id", "room_id") DO UPDATE SET ${updateSet}
+               WHERE excluded._sync_ts >= "${table}"._sync_ts`
+            : `INSERT OR REPLACE INTO "${table}" (${columnStr}) VALUES (${placeholderStr})`;
+
+          const retryStatements = rows.map(row => {
+            const syncTs = this.getNextSyncTimestamp();
+            const values = [
+              ...keys.map(k => {
+                const val = row[k];
+                return val === undefined ? null : val;
+              }),
+              roomId,
+              syncTs
+            ];
+
+            return this.env.READ_REPLICA.prepare(baseQuery).bind(...values);
+          });
+
+          await this.env.READ_REPLICA.batch(retryStatements);
+          console.log(`[Sync Engine] Batch sync auto-recovery succeeded for ${table}`);
+          return;
+        } catch (retryErr) {
+          console.error(`[Sync Engine] Batch sync auto-recovery failed for ${table}:`, retryErr);
+        }
+      }
+
       console.error(`[Sync Engine] Batch sync failed for table ${table}:`, e);
       // Don't throw, allow DO to continue operating
     }
