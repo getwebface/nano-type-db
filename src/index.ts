@@ -1503,19 +1503,23 @@ export default {
     // WebSocket Upgrade
     if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
        try {
-         // Simplify: Don't change the URL path. Let the DO handle /websocket or /connect.
-         // This avoids creating a new Request(url, ...) which risks losing the upgrade context in some runtime versions.
-         // We construct a new Request from the old one just to inject headers.
-         const wsRequest = new Request(request);
+         // Construct a CLEAN request for the Durable Object
+         // We explicitly copy headers to ensure Sec-WebSocket-* headers are preserved
+         // but allow us to inject our auth headers without mutation issues.
+         const headers = new Headers(request.headers);
+         headers.set("X-User-ID", session.user.id);
+         headers.set("X-Room-ID", roomId);
          
-         // Add the authenticated headers
-         wsRequest.headers.set("X-User-ID", session.user.id);
-         wsRequest.headers.set("X-Room-ID", roomId);
-         // Explicitly ensure upgrade headers are present (though new Request(req) usually keeps them)
-         if (!wsRequest.headers.has("Upgrade")) wsRequest.headers.set("Upgrade", "websocket");
-         if (!wsRequest.headers.has("Connection")) wsRequest.headers.set("Connection", "Upgrade");
+         // Force path to /connect to match DO expectation and simplify routing
+         const newUrl = new URL(request.url);
+         newUrl.pathname = "/connect";
 
-         return stub.fetch(wsRequest);
+         const wsRequest = new Request(newUrl.toString(), {
+             headers: headers,
+             method: request.method
+         });
+
+         return await stub.fetch(wsRequest);
        } catch (error: any) {
          console.error("WebSocket upgrade failed:", error);
          return new Response(`WebSocket upgrade failed: ${error.message}`, { status: 500 });
