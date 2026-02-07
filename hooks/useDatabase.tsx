@@ -1,12 +1,16 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import { DatabaseContextType, QueryResult, UpdateEvent, ToastMessage, Schema, UsageStat, OptimisticUpdate } from '../types';
 import { authClient } from '../src/lib/auth-client';
+import { hc } from 'hono/client';
+import type { AppType } from '../src/index';
 
 // Dynamic URL detection for production/dev
 const PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 const HOST = window.location.host; 
 const WORKER_URL = `${PROTOCOL}//${HOST}`; 
 const HTTP_URL = `${window.location.protocol}//${HOST}`;
+
+export const client = hc<AppType>(HTTP_URL);
 
 // In development with Vite proxy, use proxied WebSocket path
 const IS_DEV = import.meta.env.DEV;
