@@ -2864,13 +2864,13 @@ export class NanoStore extends DurableObject {
                         
                         // Broadcast schema update to all connected clients
                         this.broadcastSchemaUpdate();
-                    } catch (e: anymutation_error", 
-                            action: "createTable", 
-                            requestId: data.requestId,
-                        webSocket.send(JSON.stringify({ 
-                            type: "error", 
-                            error: `Failed to create table: ${e.message}` 
-                        }));
+                    } catch (e: any) {
+                      webSocket.send(JSON.stringify({
+                        type: "mutation_error",
+                        action: "createTable",
+                        requestId: data.requestId,
+                        error: `Failed to create table: ${e.message}`
+                      }));
                     }
                     break;
                 }
@@ -2878,9 +2878,7 @@ export class NanoStore extends DurableObject {
                 case "deleteTable": {
                     this.trackUsage('writes');
                     
-                    const { tableNamutation_error", 
-                            action: "deleteTable", 
-                            requestId: data.requestId,ata.payload || {};
+                        const { tableName } = data.payload || {};
                     
                     if (!tableName) {
                         webSocket.send(JSON.stringify({ 
@@ -2908,16 +2906,16 @@ export class NanoStore extends DurableObject {
                         break;
                     }
                     
-                    // SECURITY: Ramutation_error", 
-                            action: "deleteTable", 
-                            requestId: data.requestId,ing (10 table deletes per minute)
+                    // SECURITY: Rate limiting (10 table deletes per minute)
                     const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
                     if (!this.checkRateLimit(userId, "deleteTable", 10, 60000)) {
-                        webSocket.send(JSON.stringify({ 
-                            type: "error", 
-                            error: "Rate limit exceeded for deleteTable" 
-                        }));
-                        break;
+                      webSocket.send(JSON.stringify({
+                        type: "mutation_error",
+                        action: "deleteTable",
+                        requestId: data.requestId,
+                        error: "Rate limit exceeded for deleteTable"
+                      }));
+                      break;
                     }
                     
                     try {
@@ -2933,16 +2931,16 @@ export class NanoStore extends DurableObject {
                             data: { tableName }
                         }));
                         
-                        // Broadcasmutation_error", 
-                            action: "deleteTable", 
-                            requestId: data.requestId, update to all connected clients
+                        // Broadcast schema update to all connected clients
                         this.broadcastSchemaUpdate();
-                    } catch (e: any) {
-                        webSocket.send(JSON.stringify({ 
-                            type: "error", 
-                            error: `Failed to delete table: ${e.message}` 
+                      } catch (e: any) {
+                        webSocket.send(JSON.stringify({
+                          type: "mutation_error",
+                          action: "deleteTable",
+                          requestId: data.requestId,
+                          error: `Failed to delete table: ${e.message}`
                         }));
-                    }
+                      }
                     break;
                 }
 
