@@ -180,6 +180,7 @@ export default {
     // 3. Routing Checks
     const backendPaths = new Set([
         "/connect",
+        "/websocket",
         "/schema",
         "/manifest",
         "/download-client",
