@@ -160,6 +160,14 @@ app.get("/api/user-tier", async (c) => {
     }
 });
 
+app.get("/analytics", async (c) => {
+    // Mock analytics 
+     return c.json({ 
+        usage: [], 
+        meta: { timestamp: Date.now() } 
+     });
+});
+
 // WebSocket Handler Helper
 const handleWebSocket = async (c: any) => {
     // Check for WebSocket Upgrade

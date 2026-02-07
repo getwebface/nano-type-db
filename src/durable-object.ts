@@ -93,6 +93,7 @@ export class NanoStore extends DurableObject {
             // Zod Validation
             const result = WebSocketMessageSchema.safeParse(json);
             if (!result.success) {
+                console.error("Invalid WS message:", result.error);
                 ws.send(JSON.stringify({ 
                     type: 'error', 
                     error: 'Invalid message format', 
@@ -117,11 +118,52 @@ export class NanoStore extends DurableObject {
                 case 'ping':
                     ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
                     break;
+
+                case 'rpc':
+                    if (payload.method === 'getPresence') {
+                        // Mock presence for now or implement real presence tracking
+                        const response = {
+                            requestId: payload.requestId,
+                            data: [] // Empty presence list for now
+                        };
+                        ws.send(JSON.stringify(response));
+                    } else if (payload.method === 'streamIntent') {
+                         // Mock response
+                    } else {
+                         ws.send(JSON.stringify({ 
+                            requestId: payload.requestId,
+                            error: `Unknown method: ${payload.method}`
+                         }));
+                    }
+                    break;
                 
-                // Add more handlers as needed
+                case 'subscribe_query':
+                case 'query':
+                    // Mock query response for ghost-busting phase
+                    // Ideally check payload.sql and run against this.db
+                    // SECURITY WARNING: In production, do not allow raw SQL from client!
+                    // This is a legacy feature we are supporting.
+                    try {
+                        // Very basic unsafe proxy for legacy support
+                        const res = this.sql.exec(payload.sql).toArray();
+                        ws.send(JSON.stringify({
+                             type: 'query_result',
+                             data: res,
+                             sql: payload.sql
+                        }));
+                    } catch (e: any) {
+                         ws.send(JSON.stringify({ type: 'error', error: e.message }));
+                    }
+                    break;
+
+                case 'setCursor':
+                case 'setPresence':
+                    // Broadcast to other clients (not implemented in this minimal scope, but acknowledged)
+                    break;
             }
 
         } catch (e: any) {
+            console.error("WS Handler Error:", e);
             ws.send(JSON.stringify({ type: 'error', error: e.message }));
         }
     }
