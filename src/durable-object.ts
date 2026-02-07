@@ -138,6 +138,13 @@ export class NanoStore extends DurableObject {
                     try {
                         let responseData;
                         switch (payload.method) {
+                            case 'getPresence':
+                                responseData = []; 
+                                break;
+                            case 'streamIntent':
+                                responseData = { status: 'mock_stream' };
+                                break;
+
                             // --- DDL Operations (Kept as Raw SQL per "Anti-Ghost" Rules) ---
                             case 'createTable': {
                                 const { tableName, columns } = payload.payload;
@@ -267,7 +274,7 @@ export class NanoStore extends DurableObject {
                             }
 
                             default:
-                                responseData = { status: 'mock_response', method: payload.method };
+                                throw new Error(`Unknown RPC method: ${payload.method}`);
                         }
                         
                         ws.send(JSON.stringify({
