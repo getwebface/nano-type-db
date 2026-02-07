@@ -10,12 +10,15 @@ import { ApiKeySchema } from "./lib/models";
 import { NanoStore } from "./durable-object";
 import { createAuth } from "./lib/auth";
 import { z } from "zod";
+import type { ScheduledController, MessageBatch, ExecutionContext } from "cloudflare:workers";
+import embeddingConsumer from "./queue-consumer";
+import webhookConsumer from "./webhook-consumer";
 import { getAssetFromKV, MethodNotAllowedError, NotFoundError } from "@cloudflare/kv-asset-handler";
 // @ts-ignore
 import manifestJSON from "__STATIC_CONTENT_MANIFEST";
 const assetManifest = JSON.parse(manifestJSON);
 
-export { NanoStore };
+export { NanoStore, NanoStore as DataStore };
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -193,4 +196,21 @@ app.get("*", async (c) => {
 // Export type for Hono RPC
 export type AppType = typeof app;
 
-export default app;
+export default {
+    fetch: app.fetch,
+    async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext) {
+        console.log("Starting scheduled backup...");
+        const id = env.DATA_STORE.idFromName("demo-room");
+        const stub = env.DATA_STORE.get(id);
+        ctx.waitUntil(stub.fetch("http://do/backup"));
+    },
+    async queue(batch: MessageBatch, env: Env, ctx: ExecutionContext) {
+        if (batch.queue === "nanotype-embeddings") {
+            await embeddingConsumer.queue(batch, env);
+        } else if (batch.queue === "nanotype-webhooks") {
+            await webhookConsumer.queue(batch, env);
+        } else {
+             console.log("Unknown queue message", batch.queue);
+        }
+    }
+};
