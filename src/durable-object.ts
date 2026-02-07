@@ -120,19 +120,80 @@ export class NanoStore extends DurableObject {
                     break;
 
                 case 'rpc':
-                    if (payload.method === 'getPresence') {
-                        // Mock presence for now or implement real presence tracking
-                        const response = {
+                    try {
+                        let responseData;
+                        switch (payload.method) {
+                            case 'getPresence':
+                                responseData = []; 
+                                break;
+                            case 'streamIntent':
+                                responseData = { status: 'mock_stream' };
+                                break;
+                            case 'createTable':{
+                                const { tableName, columns } = payload.payload;
+                                const colDefs = columns.map((c: any) => {
+                                    let def = `${c.name} ${c.type}`;
+                                    if (c.primaryKey) def += ' PRIMARY KEY';
+                                    if (c.notNull) def += ' NOT NULL';
+                                    return def;
+                                }).join(', ');
+                                this.sql.exec(`CREATE TABLE IF NOT EXISTS ${tableName} (${colDefs})`);
+                                responseData = { success: true, table: tableName };
+                                break;
+                            }
+                            case 'deleteTable': {
+                                const { tableName } = payload.payload;
+                                this.sql.exec(`DROP TABLE IF EXISTS ${tableName}`);
+                                responseData = { success: true };
+                                break;
+                            }
+                            case 'batchInsert': {
+                                const { table, rows } = payload.payload;
+                                if (!rows || rows.length === 0) {
+                                    responseData = { inserted: 0, total: 0 };
+                                    break;
+                                }
+                                
+                                const keys = Object.keys(rows[0]);
+                                const placeholders = keys.map(() => '?').join(',');
+                                const stmt = this.sql.prepare(`INSERT INTO ${table} (${keys.join(',')}) VALUES (${placeholders})`);
+                                
+                                let inserted = 0;
+                                for (const row of rows) {
+                                    try {
+                                        stmt.run(...keys.map(k => row[k]));
+                                        inserted++;
+                                    } catch (e) {
+                                        console.error('Insert failed row:', e);
+                                    }
+                                }
+                                responseData = { data: { inserted, total: rows.length } };
+                                break;
+                            }
+                            case 'executeSQL': {
+                                const { sql, params } = payload.payload;
+                                const res = this.sql.exec(sql, ...(params || [])).toArray();
+                                responseData = res;
+                                break;
+                            }
+                            case 'listTasks': {
+                                // Legacy support
+                                const res = this.sql.exec("SELECT * FROM tasks LIMIT ? OFFSET ?", payload.payload.limit || 500, payload.payload.offset || 0).toArray();
+                                responseData = res;
+                                break;
+                            }
+                            default:
+                                throw new Error(`Unknown RPC method: ${payload.method}`);
+                        }
+                        
+                        ws.send(JSON.stringify({
                             requestId: payload.requestId,
-                            data: [] // Empty presence list for now
-                        };
-                        ws.send(JSON.stringify(response));
-                    } else if (payload.method === 'streamIntent') {
-                         // Mock response
-                    } else {
+                            data: responseData
+                        }));
+                    } catch (e: any) {
                          ws.send(JSON.stringify({ 
                             requestId: payload.requestId,
-                            error: `Unknown method: ${payload.method}`
+                            error: e.message
                          }));
                     }
                     break;
