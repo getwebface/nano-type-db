@@ -719,9 +719,13 @@ export class NanoStore extends DurableObject {
   async readFromD1(query: string, ...params: any[]): Promise<any[]> {
     // RE-ENABLED: D1 Read Replica for distributed read scaling
     // Falls back to local SQLite if D1 is unavailable or returns stale data
+    const rawQuery = query;
+    const rawParams = params;
+
+    const canUseReplica = !!this.env.READ_REPLICA && this.syncEngine.isHealthy && this.syncEngine.lastSyncTime > 0;
     
-    // Try D1 first for distributed reads
-    if (this.env.READ_REPLICA) {
+    // Try D1 first for distributed reads (only when sync engine is healthy)
+    if (canUseReplica) {
       try {
         // SECURITY: Validate query is read-only
         if (!SQLSanitizer.isReadOnly(query)) {
@@ -743,20 +747,38 @@ export class NanoStore extends DurableObject {
         }
         
         const result = await stmt.all();
+        const rows = result.results || [];
         
         // Track that we successfully used D1 for analytics
         this.trackUsage('reads');
+
+        // If replica returns empty but DO has data, fall back to local
+        if (rows.length === 0) {
+          const isSimpleSelect = SQLSanitizer.isReadOnly(rawQuery) && !/\b(join|union|intersect|except)\b/i.test(rawQuery);
+          if (isSimpleSelect) {
+            try {
+              const localRows = this.sql.exec(rawQuery, ...rawParams).toArray();
+              if (localRows.length > 0) {
+                console.warn("D1 returned empty result; falling back to DO SQLite for consistency.");
+                return localRows;
+              }
+            } catch (localErr) {
+              // If local fallback fails, return replica result (empty) to avoid masking errors
+              console.warn("Local fallback read failed:", localErr);
+            }
+          }
+        }
         
-        return result.results || [];
+        return rows;
       } catch (e) {
         console.warn("D1 read failed, falling back to DO SQLite:", e);
         // Fall through to local read
       }
     }
     
-    // Fallback to DO SQLite if D1 is unavailable or fails
+    // Fallback to DO SQLite if D1 is unavailable, unhealthy, or fails
     this.trackUsage('reads');
-    return this.sql.exec(query, ...params).toArray();
+    return this.sql.exec(rawQuery, ...rawParams).toArray();
   }
 
   /**
@@ -1872,18 +1894,34 @@ export class NanoStore extends DurableObject {
                       }
                     }
                         
-                    // 3. Replicate Data to D1 immediately (async)
-                    if (insertedRows.length > 0) {
-                      for (const row of insertedRows) {
-                        this.ctx.waitUntil(this.replicateToD1(table, 'insert', row));
-                      }
-                      // Broadcast updates
-                      for (const row of insertedRows) {
-                        this.broadcastUpdate(table, "added", row);
-                      }
+                    // 3. If nothing inserted, return error so UI doesn't show false success
+                    if (insertedRows.length === 0) {
+                      const firstError = insertErrors[0] ? ` First error: ${insertErrors[0]}` : '';
+                      webSocket.send(JSON.stringify({ 
+                        type: "mutation_error", 
+                        action: "batchInsert",
+                        updateId: data.updateId,
+                        requestId: data.requestId,
+                        error: `No rows were inserted.${firstError}`,
+                        data: {
+                          inserted: 0,
+                          total: rows.length,
+                          errors: insertErrors.slice(0, 5)
+                        }
+                      }));
+                      break;
+                    }
+
+                    // 4. Replicate Data to D1 immediately (async)
+                    for (const row of insertedRows) {
+                      this.ctx.waitUntil(this.replicateToD1(table, 'insert', row));
+                    }
+                    // Broadcast updates
+                    for (const row of insertedRows) {
+                      this.broadcastUpdate(table, "added", row);
                     }
                         
-                    // 4. Return Actual Results
+                    // 5. Return Actual Results
                     webSocket.send(JSON.stringify({ 
                       type: "mutation_success", 
                       action: "batchInsert",
