@@ -2809,14 +2809,14 @@ export class NanoStore extends DurableObject {
                     
                     // SECURITY: Rate limiting (10 table creates per minute)
                     const userId = this.webSocketUserIds.get(webSocket) || "anonymous";
-                    if (!this.checkmutation_error", 
-                            action: "createTable", 
-                            requestId: data.requestId,t(userId, "createTable", 10, 60000)) {
-                        webSocket.send(JSON.stringify({ 
-                            type: "error", 
-                            error: "Rate limit exceeded for createTable" 
-                        }));
-                        break;
+                    if (!this.checkRateLimit(userId, "createTable", 10, 60000)) {
+                      webSocket.send(JSON.stringify({
+                        type: "mutation_error",
+                        action: "createTable",
+                        requestId: data.requestId,
+                        error: "Rate limit exceeded for createTable"
+                      }));
+                      break;
                     }
                     
                     try {
