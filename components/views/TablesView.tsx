@@ -318,6 +318,8 @@ export const TablesView: React.FC = () => {
                 data={data || []}
                 tableName={selectedTable}
                 schema={schema?.[selectedTable] || []}
+                total={total}
+                loadMore={loadMore}
               />
             </div>
           </>

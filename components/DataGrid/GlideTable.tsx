@@ -8,6 +8,8 @@ interface GlideTableProps {
     data: any[];
     tableName: string;
     schema: ColumnDefinition[];
+    total: number;
+    loadMore: () => void;
 }
 
 const theme: Theme = {
@@ -29,7 +31,7 @@ const theme: Theme = {
     editorFontSize: "13px",
 };
 
-export const GlideTable: React.FC<GlideTableProps> = ({ data, tableName, schema }) => {
+export const GlideTable: React.FC<GlideTableProps> = ({ data, tableName, schema, total, loadMore }) => {
     const { rpc } = useDatabase();
 
     const columns: GridColumn[] = useMemo(() => {
@@ -83,6 +85,17 @@ export const GlideTable: React.FC<GlideTableProps> = ({ data, tableName, schema 
             data: value !== null && value !== undefined ? String(value) : "",
         };
     }, [data, schema]);
+
+    const onVisibleRegionChanged = useCallback((range: any) => {
+        // If the user has scrolled to the bottom 20% of loaded data
+        // AND we haven't loaded everything yet
+        if (
+            range.y + range.height >= data.length - 20 && 
+            data.length < total
+        ) {
+            loadMore();
+        }
+    }, [data.length, total, loadMore]);
 
     const onCellEdited = useCallback(async (cell: Item, newValue: EditableGridCell) => {
         const [col, row] = cell;
@@ -153,6 +166,7 @@ export const GlideTable: React.FC<GlideTableProps> = ({ data, tableName, schema 
                 rowMarkers="none"
                 width="100%"
                 height="100%"
+                onVisibleRegionChanged={onVisibleRegionChanged}
              />
         </div>
     );

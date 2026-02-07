@@ -48,6 +48,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const heartbeatTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const lastPongRef = useRef<number>(Date.now());
+    const subscribedTablesRef = useRef<Set<string>>(new Set());
 
     // Reconnection countdown state
     const [reconnectInfo, setReconnectInfo] = useState<{ attempt: number; maxAttempts: number; nextRetryAt: number | null }>({
@@ -67,8 +68,6 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     // WebSocket debug mode
     const [wsDebug, setWsDebug] = useState<boolean>(IS_DEV);
     
-    const subscribedTablesRef = useRef<Set<string>>(new Set());
-    
     // Psychic cache for pre-fetched data (ref to avoid re-renders)
     const psychicCache = useRef<Map<string, any>>(new Map());
     const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -76,6 +75,9 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
     // Track current cursor and presence for re-announcing after reset
     const lastCursorRef = useRef<{ userId: string; position: any } | null>(null);
     const lastPresenceRef = useRef<{ userId: string; status: any } | null>(null);
+    
+    // IMPORTANT: Make sure connect function is available in scope for manualReconnect
+    const connectRef = useRef<((roomId: string) => void) | null>(null);
 
     const addToast = (message: string, type: 'success' | 'info' | 'error' = 'info') => {
         const id = Math.random().toString(36).substring(7);
@@ -150,203 +152,312 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
         }
     }, [socket]);
 
-    // Ref to hold the connect function for manual reconnect
-    const connectRef = useRef<((roomId: string) => void) | null>(null);
+    const performOptimisticAction = useCallback((id: string, action: string, payload: any, rollback: () => void) => {
+        // Record optimistic update
+        const updateId = Math.random().toString(36).substring(7);
+        pendingOptimisticUpdates.current.set(updateId, {
+            id: updateId,
+            action,
+            payload,
+            rollback,
+            timestamp: Date.now()
+        });
+        
+        // Timeout cleanup (if server never responds)
+        setTimeout(() => {
+            if (pendingOptimisticUpdates.current.has(updateId)) {
+                const update = pendingOptimisticUpdates.current.get(updateId);
+                // Optionally rollback or just clear
+                // update?.rollback(); 
+                pendingOptimisticUpdates.current.delete(updateId);
+            }
+        }, OPTIMISTIC_UPDATE_TIMEOUT);
+        
+        return updateId;
+    }, []);
 
-    const refreshSchema = useCallback(async () => {
-        if (!currentRoomIdRef.current) return;
-        try {
-            // Append API key if provided
-            let schemaUrl = `${HTTP_URL}/schema?room_id=${currentRoomIdRef.current}`;
-            if (apiKey) {
-                schemaUrl += `&api_key=${encodeURIComponent(apiKey)}`;
-            }
-            // Browser automatically sends Cookies (Better Auth Session)
-            const res = await fetch(schemaUrl);
-            if (res.ok) {
-                const data = await res.json();
-                setSchema(data);
-            }
-        } catch (e) {
-            console.error("Failed to fetch schema", e);
+    const performMutation = useCallback((method: string, payload: any) => {
+         // This is a wrapper for rpc, but specifically for mutations that might use optimistic updates
+         if (!socket || socket.readyState !== WebSocket.OPEN) {
+             addToast('Cannot perform action: offline', 'error');
+             return Promise.reject(new Error('Offline'));
+         }
+         
+         // Use the rpc method defined later
+         return rpc(method, payload);
+    }, [socket]); // Will add rpc to deps once defined
+
+    const runQuery = useCallback((sql: string, tableContext?: string) => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+            addToast('Cannot run query: offline', 'error');
+            return;
         }
-    }, [apiKey]);
+        
+        // If it's a mutation, track it
+        const isMutation = /^(INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)/i.test(sql.trim());
+        if (isMutation) {
+            // For raw SQL mutations, we can't easily do optimistic updates
+            // But we can subscribe to the table to get updates
+        }
 
-    const refreshUsage = useCallback(() => {
-        if (socket && socket.readyState === WebSocket.OPEN) {
-             socket.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
+        if (tableContext) {
+            socket.send(JSON.stringify({ action: 'subscribe_query', sql, table: tableContext }));
+        } else {
+            socket.send(JSON.stringify({ action: 'query', sql })); 
         }
     }, [socket]);
 
-    // Note: connect is async to fetch session token, but we don't add it to
-    // the dependency array to avoid infinite loops. The socket dependency
-    // ensures we recreate the callback when needed.
-    const connect = useCallback(async (roomId: string) => {
-        // Clear any pending reconnection attempts
-        if (reconnectTimeoutRef.current) {
-            clearTimeout(reconnectTimeoutRef.current);
-            reconnectTimeoutRef.current = null;
-        }
-        
-        if (connectionTimeoutRef.current) {
-            clearTimeout(connectionTimeoutRef.current);
-            connectionTimeoutRef.current = null;
-        }
-        
-        if (heartbeatIntervalRef.current) {
-            clearInterval(heartbeatIntervalRef.current);
-            heartbeatIntervalRef.current = null;
-        }
-        
-        if (heartbeatTimeoutRef.current) {
-            clearTimeout(heartbeatTimeoutRef.current);
-            heartbeatTimeoutRef.current = null;
-        }
+    const runReactiveQuery = useCallback((sql: string, tableContext: string) => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({ action: 'subscribe_query', sql, table: tableContext }));
+    }, [socket]);
 
-        // Close existing socket if any
-        if (socket) {
-            socket.onclose = null;
-            socket.onerror = null;
+    const subscribe = useCallback((table: string) => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            subscribedTablesRef.current.add(table);
+            socket.send(JSON.stringify({ action: 'subscribe', table }));
+        }
+    }, [socket]);
+
+    const setCursor = useCallback((userId: string, position: any) => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        
+        // Store for re-connection
+        lastCursorRef.current = { userId, position };
+        
+        // Send to server
+        socket.send(JSON.stringify({
+            action: 'setCursor',
+            payload: { userId, position }
+        }));
+    }, [socket]);
+
+    const setPresence = useCallback((userId: string, status: any) => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        
+         // Store for re-connection
+        lastPresenceRef.current = { userId, status };
+        
+        // Send to server
+        socket.send(JSON.stringify({
+            action: 'setPresence',
+            payload: { userId, status }
+        }));
+    }, [socket]);
+
+    const getPsychicData = useCallback((key: string): any => {
+        if (psychicCache.current.has(key)) {
+            console.log('🔮 Psychic Hit!', key);
+            return psychicCache.current.get(key);
+        }
+        return null;
+    }, []);
+
+    const streamIntent = useCallback((text: string) => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        
+        socket.send(JSON.stringify({
+            action: 'rpc',
+            method: 'streamIntent',
+            payload: { text }
+        }));
+    }, [socket]);
+
+    /**
+     * Generic RPC call - returns a Promise that resolves with the result
+     */
+    const rpc = useCallback((method: string, payload: any): Promise<any> => {
+        return new Promise((resolve, reject) => {
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                reject(new Error("Not connected to database"));
+                return;
+            }
+            
+            // Generate a unique request ID
+            let requestId: string;
+            if (crypto.randomUUID) {
+                requestId = crypto.randomUUID();
+            } else if (crypto.getRandomValues) {
+                const buffer = new Uint8Array(16);
+                crypto.getRandomValues(buffer);
+                requestId = Array.from(buffer, byte => byte.toString(16).padStart(2, '0')).join('');
+            } else {
+                requestId = `rpc_${Date.now()}_${Math.random()}`;
+            }
+            
+            // Create a one-time listener for the response
+            let timeoutId: ReturnType<typeof setTimeout> | null = null;
+            
+            const handleResponse = (event: MessageEvent) => {
+                try {
+                    const response = JSON.parse(event.data);
+                    
+                    // Check if this response is for our request
+                    if (response.requestId === requestId) {
+                        // Clear the timeout
+                        clearTimeout(timeoutId!);
+                        
+                        // Remove the listener
+                        socket.removeEventListener('message', handleResponse);
+                        
+                        if (response.type === 'query_result' || response.type === 'rpc_result' || response.type === 'mutation_success') {
+                            resolve(response);
+                        } else if (response.type === 'error' || response.type === 'rpc_error' || response.type === 'mutation_error') {
+                            reject(new Error(response.error || 'RPC call failed'));
+                        }
+                    }
+                } catch (e) {
+                    // Ignore parse errors for other messages
+                }
+            };
+            
+            // Add listener
+            socket.addEventListener('message', handleResponse);
+            
+            // Send the RPC request with requestId
+            socket.send(JSON.stringify({
+                action: 'rpc',
+                method,
+                payload,
+                requestId
+            }));
+            
+            // Timeout after a configurable delay (longer for batch operations)
+            const timeout = (method === 'batchInsert' || method === 'createTable') ? 60000 : 10000; // 60s for batch, 10s for others
+            timeoutId = setTimeout(() => {
+                timeoutId = null;
+                socket.removeEventListener('message', handleResponse);
+                reject(new Error(`RPC call to ${method} timed out`));
+            }, timeout);
+        });
+    }, [socket]);
+
+    const refreshSchema = useCallback(async () => {
+         try {
+            // Optimistically try fetch first as it's faster than WS handshake for initial load
+            const response = await fetch(`${HTTP_URL}/api/schema`);
+            if (response.ok) {
+                const schemaData = await response.json();
+                setSchema(schemaData);
+            }
+         } catch (e) {
+             console.error('Failed to fetch schema via HTTP:', e);
+             // Verify WS fallback
+             if(socket && socket.readyState === WebSocket.OPEN) {
+                 socket.send(JSON.stringify({ action: 'rpc', method: 'getSchema' }));
+             }
+         }
+    }, [socket]);
+
+    const refreshUsage = useCallback(() => {
+        if(socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ 
+                action: 'rpc', 
+                method: 'getUsage'
+            }));
+        }
+    }, [socket]);
+
+    const connect = useCallback((roomId: string) => {
+        if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+            // Already connected or connecting, but check if room changed
+            if (currentRoomIdRef.current === roomId) return;
             socket.close();
         }
 
-        setStatus('connecting');
         currentRoomIdRef.current = roomId;
-        shouldReconnectRef.current = true;
+        setStatus('connecting');
         
-        // Get session token from Better Auth
-        let sessionToken = '';
-        try {
-            const session = await authClient.getSession();
-            if (session?.data?.session?.token) {
-                sessionToken = session.data.session.token;
-            }
-        } catch (e) {
-            console.warn('Failed to get session token, will try cookie-based auth', e);
-        }
+        // Construct WebSocket URL with authentication
+        const wsUrl = new URL(`${WORKER_URL}${WS_PATH_PREFIX}/websocket`);
+        wsUrl.searchParams.set('room_id', roomId);
         
-        // Construct WebSocket URL with explicit path and session token for auth
-        // Add /connect to the URL
-        let wsUrl = `${WORKER_URL}${WS_PATH_PREFIX}/connect?room_id=${encodeURIComponent(roomId)}`;
-        
-        // Append API key if provided (takes precedence over session token)
-        if (apiKey) {
-            wsUrl += `&api_key=${encodeURIComponent(apiKey)}`;
-        } else if (sessionToken) {
-            wsUrl += `&session_token=${encodeURIComponent(sessionToken)}`;
-        }
-        console.log('Connecting to WebSocket:', wsUrl);
-        
-        // Browser automatically sends Cookies (Better Auth Session) with WebSocket
-        const ws = new WebSocket(wsUrl);
+        // Add auth token if available (commented out until auth variable is available)
+        // if (authToken) wsUrl.searchParams.set('token', authToken);
+        if (apiKey) wsUrl.searchParams.set('key', apiKey);
 
-        // Set a connection timeout
+        wsLog('Connecting to:', wsUrl.toString());
+
+        const ws = new WebSocket(wsUrl.toString());
+
+        // Set connection timeout
         connectionTimeoutRef.current = setTimeout(() => {
             if (ws.readyState !== WebSocket.OPEN) {
-                wsLog('WebSocket connection timeout');
-                console.error('WebSocket connection timeout');
+                wsLog('Connection timed out');
                 ws.close();
-                addToast('Connection timeout. Reconnecting...', 'error');
-                setStatus('disconnected');
-                
-                // Attempt reconnection with exponential backoff
-                scheduleReconnect(roomId, connect);
+                // trigger reconnect logic via onclose
             }
         }, WS_CONNECTION_TIMEOUT);
 
         ws.onopen = () => {
-            wsLog('Connected to DO');
-            console.log('Connected to DO');
+            wsLog('Connected to WebSocket');
             
             // Clear connection timeout
             if (connectionTimeoutRef.current) {
                 clearTimeout(connectionTimeoutRef.current);
                 connectionTimeoutRef.current = null;
             }
-            
-            // Reset reconnection counter on successful connection
-            reconnectAttemptsRef.current = 0;
-            lastPongRef.current = Date.now();
-            setReconnectInfo({ attempt: 0, maxAttempts: MAX_RECONNECT_ATTEMPTS, nextRetryAt: null });
             
             setStatus('connected');
             setIsConnected(true);
-            refreshSchema();
+            setSocket(ws);
+            reconnectAttemptsRef.current = 0; // Reset reconnect attempts on success
+            setReconnectInfo(prev => ({ ...prev, attempt: 0, nextRetryAt: null }));
+            addToast('Connected to database', 'success');
+
+            // Restore state if this is a reconnection
+            if (lastCursorRef.current) {
+                setCursor(lastCursorRef.current.userId, lastCursorRef.current.position);
+            }
+            if (lastPresenceRef.current) {
+                setPresence(lastPresenceRef.current.userId, lastPresenceRef.current.status);
+            }
             
-            // Initial usage fetch
-            setTimeout(() => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
-                }
-            }, 500);
-            
-            // Start heartbeat to keep connection alive and track connection quality
+            // Resubscribe to tables
+            subscribedTablesRef.current.forEach(table => {
+                ws.send(JSON.stringify({ action: 'subscribe', table }));
+            });
+
+            // Start heartbeat
+            if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
             heartbeatIntervalRef.current = setInterval(() => {
                 if (ws.readyState === WebSocket.OPEN) {
-                    // Track ping sent time for latency measurement
                     pingSentAtRef.current = Date.now();
-                    // Send ping
                     ws.send(JSON.stringify({ action: 'ping' }));
-                    wsLog('Ping sent');
                     
-                    setConnectionQuality(prev => ({ ...prev, totalPings: prev.totalPings + 1 }));
-                    
-                    // Set timeout to check for pong response
+                    // Set timeout for pong response
+                    if (heartbeatTimeoutRef.current) clearTimeout(heartbeatTimeoutRef.current);
                     heartbeatTimeoutRef.current = setTimeout(() => {
-                        const timeSinceLastPong = Date.now() - lastPongRef.current;
-                        if (timeSinceLastPong > HEARTBEAT_INTERVAL + HEARTBEAT_TIMEOUT) {
-                            wsLog('Heartbeat timeout - connection may be dead');
-                            console.warn('Heartbeat timeout - connection may be dead');
-                            setConnectionQuality(prev => ({ ...prev, pingsLost: prev.pingsLost + 1 }));
-                            ws.close();
-                        }
+                        wsLog('Heartbeat timeout - reconnecting');
+                        // No pong received, assume connection dead
+                        ws.close(); 
                     }, HEARTBEAT_TIMEOUT);
                 }
             }, HEARTBEAT_INTERVAL);
-        };
 
-        ws.onerror = (error) => {
-            console.error('WebSocket error:', error);
-            
-            // Clear connection timeout
-            if (connectionTimeoutRef.current) {
-                clearTimeout(connectionTimeoutRef.current);
-                connectionTimeoutRef.current = null;
-            }
-            
-            addToast('Connection error. Retrying...', 'error');
+            // Fetch initial schema
+             ws.send(JSON.stringify({ action: 'rpc', method: 'getSchema' }));
+             // Fetch usage stats
+             ws.send(JSON.stringify({ action: 'rpc', method: 'getUsage' }));
         };
 
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
-
-            // Handle reset message from DO (when it wakes up from hibernation)
-            if (data.type === 'reset') {
-                console.log('Received reset from DO - re-announcing cursor/presence');
-                // Re-send cursor if we have one
-                if (lastCursorRef.current && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({
-                        action: 'setCursor',
-                        payload: lastCursorRef.current
-                    }));
-                }
-                // Re-send presence if we have one
-                if (lastPresenceRef.current && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({
-                        action: 'setPresence',
-                        payload: lastPresenceRef.current
-                    }));
-                }
-                return;
-            }
-
-            // Handle pong response for heartbeat and latency tracking
+            
+            // Handle pong
             if (data.type === 'pong') {
                 const now = Date.now();
+                const latency = now - pingSentAtRef.current;
                 lastPongRef.current = now;
-                if (pingSentAtRef.current > 0) {
-                    const latency = now - pingSentAtRef.current;
-                    setConnectionQuality(prev => ({ ...prev, latency }));
+                
+                // Update connection quality metrics
+                setConnectionQuality(prev => ({
+                    latency: Math.round((prev.latency * 0.7) + (latency * 0.3)), // Moving average
+                    pingsLost: prev.pingsLost,
+                    totalPings: prev.totalPings + 1
+                }));
+                
+                if (wsDebug && latency > 200) {
                     wsLog(`Pong received, latency: ${latency}ms`);
                 }
                 if (heartbeatTimeoutRef.current) {
@@ -448,352 +559,34 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode; psychic?: b
                 clearInterval(heartbeatIntervalRef.current);
                 heartbeatIntervalRef.current = null;
             }
-            
             if (heartbeatTimeoutRef.current) {
                 clearTimeout(heartbeatTimeoutRef.current);
                 heartbeatTimeoutRef.current = null;
             }
-            
-            setIsConnected(false);
+
             setStatus('disconnected');
+            setIsConnected(false);
             setSocket(null);
-            setSchema(null);
-            
-            // Attempt reconnection with exponential backoff if it was not a clean close
-            if (shouldReconnectRef.current && event.code !== 1000) {
+
+            // Trigger visual "offline" state if needed
+            setConnectionQuality(prev => ({ ...prev, latency: 0 }));
+
+            // Attempt reconnect if intended (not manually closed)
+            if (shouldReconnectRef.current) {
                 scheduleReconnect(roomId, connect);
             }
         };
 
-        setSocket(ws);
-    }, [socket, refreshSchema, scheduleReconnect, wsLog]);
-
-    // Keep connectRef in sync with connect for manual reconnect
-    connectRef.current = connect;
-
-    const runQuery = useCallback((sql: string, tableContext?: string) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        
-        // SECURITY: Instead of sending raw SQL, parse intent and use RPC methods
-        const sqlUpper = sql.trim().toUpperCase();
-        
-        // Handle SELECT queries on tasks table
-        if (sqlUpper.startsWith('SELECT') && sqlUpper.includes('FROM TASKS')) {
-            socket.send(JSON.stringify({
-                action: 'rpc',
-                method: 'listTasks'
-            }));
-            return;
-        }
-        
-        // Handle INSERT INTO tasks
-        if (sqlUpper.startsWith('INSERT INTO TASKS')) {
-            const match = sql.match(/VALUES\s*\(\s*'([^']*)'/i);
-            const title = match ? match[1] : "New Task";
-            
-            socket.send(JSON.stringify({
-                action: 'createTask',
-                payload: { title }
-            }));
-            return;
-        }
-        
-        // Handle UPDATE tasks
-        if (sqlUpper.startsWith('UPDATE TASKS') && sqlUpper.includes("SET STATUS = 'COMPLETED'")) {
-            const match = sql.match(/WHERE ID\s*=\s*(\d+)/i);
-            if (match) {
-                const id = parseInt(match[1], 10);
-                socket.send(JSON.stringify({
-                    action: 'completeTask',
-                    payload: { id }
-                }));
-            }
-            return;
-        }
-        
-        // Handle DELETE from tasks
-        if (sqlUpper.startsWith('DELETE FROM TASKS')) {
-            const match = sql.match(/WHERE ID\s*=\s*(\d+)/i);
-            if (match) {
-                const id = parseInt(match[1], 10);
-                socket.send(JSON.stringify({
-                    action: 'deleteTask',
-                    payload: { id }
-                }));
-            }
-            return;
-        }
-        
-        // Reject any other raw SQL for security
-        console.error('Rejected raw SQL query for security');
-        addToast('Raw SQL queries are disabled for security. Use RPC methods like listTasks, createTask, completeTask, or deleteTask instead.', 'error');
-
-        // Refresh usage stats after queries (demo purpose)
-        setTimeout(refreshUsage, 1000);
-
-    }, [socket, refreshUsage, addToast]);
-
-    const performOptimisticAction = useCallback((action: string, payload: any, optimisticUpdate: () => void, rollback: () => void) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        
-        // Generate unique ID for this update using crypto API
-        const updateId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).substring(7)}`;
-        
-        // Apply optimistic update immediately
-        optimisticUpdate();
-        
-        // Store rollback function
-        pendingOptimisticUpdates.current.set(updateId, {
-            id: updateId,
-            action,
-            payload,
-            rollback,
-            timestamp: Date.now()
-        });
-        
-        // Send to server with updateId
-        socket.send(JSON.stringify({
-            action,
-            payload,
-            updateId
-        }));
-        
-        // Auto-rollback after timeout if no response
-        setTimeout(() => {
-            if (pendingOptimisticUpdates.current.has(updateId)) {
-                const update = pendingOptimisticUpdates.current.get(updateId)!;
-                update.rollback();
-                pendingOptimisticUpdates.current.delete(updateId);
-                addToast(`Action '${action}' timed out - rolled back`, 'error');
-            }
-        }, OPTIMISTIC_UPDATE_TIMEOUT);
-    }, [socket]);
+        ws.onerror = (error) => {
+            wsLog('WebSocket error:', error);
+            // Error will trigger onclose, which handles reconnect
+        };
+    }, [wsDebug, wsLog, scheduleReconnect, apiKey, refreshSchema]);
     
-    /**
-     * Built-in optimistic mutation helper - automatically handles common mutations
-     * with built-in optimistic updates and rollback
-     */
-    const performMutation = useCallback((method: string, payload: any) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) {
-            addToast("Not connected to database", "error");
-            return;
-        }
-        
-        // Define optimistic update and rollback logic
-        let previousState: any = null;
-        
-        const optimisticUpdate = () => {
-            // Save previous state for rollback
-            previousState = lastResult;
-            
-            switch (method) {
-                case 'createTask':
-                    // Optimistically add task to UI
-                    const tempTask = {
-                        id: `temp_${Date.now()}`,
-                        title: payload.title,
-                        status: 'pending',
-                        owner_id: payload.owner_id,
-                        _optimistic: true
-                    };
-                    setLastResult(prev => prev ? {
-                        ...prev,
-                        data: [...prev.data, tempTask]
-                    } : null);
-                    break;
-                    
-                case 'completeTask':
-                    // Optimistically mark task as completed
-                    setLastResult(prev => prev ? {
-                        ...prev,
-                        data: prev.data.map(task => 
-                            task.id === payload.id 
-                                ? { ...task, status: 'completed' }
-                                : task
-                        )
-                    } : null);
-                    break;
-                    
-                case 'deleteTask':
-                    // Optimistically remove task
-                    setLastResult(prev => prev ? {
-                        ...prev,
-                        data: prev.data.filter(task => task.id !== payload.id)
-                    } : null);
-                    break;
-            }
-        };
-        
-        const rollback = () => {
-            // Restore previous state
-            setLastResult(previousState);
-            addToast(`Failed to ${method}`, "error");
-        };
-        
-        // Use the existing performOptimisticAction with our optimistic logic
-        performOptimisticAction(method, payload, optimisticUpdate, rollback);
-    }, [socket, lastResult, performOptimisticAction, addToast]);
-    
-    /**
-     * Reactive query execution - automatically re-runs when data changes
-     * This is the "automatic reactivity" feature similar to Convex
-     */
-    const runReactiveQuery = useCallback((method: string, payload: any, tables: string[]) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) {
-            addToast("Not connected to database", "error");
-            return;
-        }
-        
-        const queryId = crypto.randomUUID ? crypto.randomUUID() : `query_${Date.now()}`;
-        
-        // Subscribe to query - it will auto-refresh when tables change
-        socket.send(JSON.stringify({
-            action: 'subscribe_query',
-            queryId,
-            method,
-            payload,
-            tables
-        }));
-        
-        // Also execute the query immediately via RPC
-        socket.send(JSON.stringify({
-            action: 'rpc',
-            method,
-            payload
-        }));
-        
-        // Return unsubscribe function
-        return () => {
-            if (socket && socket.readyState === WebSocket.OPEN) {
-                socket.send(JSON.stringify({
-                    action: 'unsubscribe_query',
-                    queryId
-                }));
-            }
-        };
-    }, [socket, addToast]);
-
-    const subscribe = useCallback((table: string) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        subscribedTablesRef.current.add(table);
-        socket.send(JSON.stringify({ action: 'subscribe', table }));
-    }, [socket]);
-
-    const setCursor = useCallback((userId: string, position: any) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        
-        // Store for re-announcing after reset
-        lastCursorRef.current = { userId, position };
-        
-        // Send to server
-        socket.send(JSON.stringify({
-            action: 'setCursor',
-            payload: { userId, position }
-        }));
-    }, [socket]);
-
-    const setPresence = useCallback((userId: string, status: any) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        
-        // Store for re-announcing after reset
-        lastPresenceRef.current = { userId, status };
-        
-        // Send to server
-        socket.send(JSON.stringify({
-            action: 'setPresence',
-            payload: { userId, status }
-        }));
-    }, [socket]);
-
-    const getPsychicData = useCallback((key: string): any => {
-        if (psychicCache.current.has(key)) {
-            console.log('🔮 Psychic Hit!', key);
-            return psychicCache.current.get(key);
-        }
-        return null;
-    }, []);
-
-    const streamIntent = useCallback((text: string) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        
-        socket.send(JSON.stringify({
-            action: 'rpc',
-            method: 'streamIntent',
-            payload: { text }
-        }));
-    }, [socket]);
-
-    /**
-     * Generic RPC call - returns a Promise that resolves with the result
-     */
-    const rpc = useCallback((method: string, payload: any): Promise<any> => {
-        return new Promise((resolve, reject) => {
-            if (!socket || socket.readyState !== WebSocket.OPEN) {
-                reject(new Error("Not connected to database"));
-                return;
-            }
-            
-            // Generate a unique request ID
-            // Use crypto.randomUUID() if available, otherwise fall back to a more robust method
-            let requestId: string;
-            if (crypto.randomUUID) {
-                requestId = crypto.randomUUID();
-            } else if (crypto.getRandomValues) {
-                // More robust fallback using crypto.getRandomValues
-                const buffer = new Uint8Array(16);
-                crypto.getRandomValues(buffer);
-                requestId = Array.from(buffer, byte => byte.toString(16).padStart(2, '0')).join('');
-            } else {
-                // Last resort fallback (not cryptographically secure)
-                requestId = `rpc_${Date.now()}_${Math.random()}`;
-            }
-            
-            // Create a one-time listener for the response
-            let timeoutId: ReturnType<typeof setTimeout> | null = null;
-            
-            const handleResponse = (event: MessageEvent) => {
-                try {
-                    const response = JSON.parse(event.data);
-                    
-                    // Check if this response is for our request
-                    if (response.requestId === requestId) {
-                        // Clear the timeout
-                        clearTimeout(timeoutId);
-                        
-                        // Remove the listener
-                        socket.removeEventListener('message', handleResponse);
-                        
-                        if (response.type === 'query_result' || response.type === 'rpc_result' || response.type === 'mutation_success') {
-                            resolve(response);
-                        } else if (response.type === 'error' || response.type === 'rpc_error' || response.type === 'mutation_error') {
-                            reject(new Error(response.error || 'RPC call failed'));
-                        }
-                    }
-                } catch (e) {
-                    // Ignore parse errors for other messages
-                }
-            };
-            
-            // Add listener
-            socket.addEventListener('message', handleResponse);
-            
-            // Send the RPC request with requestId
-            socket.send(JSON.stringify({
-                action: 'rpc',
-                method,
-                payload,
-                requestId
-            }));
-            
-            // Timeout after a configurable delay (longer for batch operations)
-            const timeout = (method === 'batchInsert' || method === 'createTable') ? 60000 : 10000; // 60s for batch, 10s for others
-            timeoutId = setTimeout(() => {
-                timeoutId = null;
-                socket.removeEventListener('message', handleResponse);
-                reject(new Error(`RPC call to ${method} timed out`));
-            }, timeout);
-        });
-    }, [socket]);
+    // Store connect ref for manual reconnect
+    useEffect(() => {
+        connectRef.current = connect;
+    }, [connect]);
 
     // Psychic Auto-Sensor: Global input listener
     useEffect(() => {
@@ -877,11 +670,12 @@ export const useDatabase = () => {
     return context;
 };
 
-export const useRealtimeQuery = (tableName: string, options: { limit?: number; offset?: number; } = {}) => {
+export const useRealtimeQuery = (tableName: string, options: { limit?: number; } = {}) => {
     const { runQuery, subscribe, lastResult, isConnected, socket } = useDatabase();
     const [data, setData] = useState<any[]>([]);
     const [total, setTotal] = useState<number>(0);
-    const { limit = 100, offset = 0 } = options;
+    const [currentOffset, setCurrentOffset] = useState(0);
+    const limit = options.limit || 500;
 
     // Helper function to detect primary key field
     const detectPrimaryKey = (sampleRow: any): string => {
@@ -894,117 +688,114 @@ export const useRealtimeQuery = (tableName: string, options: { limit?: number; o
     const loadMore = useCallback(() => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
         
-        // This function can be expanded to fetch next page by updating a local offset state
-        // For now, we assume the parent component controls offset via props
-    }, [socket]);
+        // Calculate next page offset
+        const nextOffset = currentOffset + limit;
+        
+        // Don't fetch if we already have all data
+        if (total > 0 && nextOffset >= total) return;
 
+        setCurrentOffset(nextOffset);
+
+        if (tableName === 'tasks') {
+            socket.send(JSON.stringify({ 
+                action: 'rpc', 
+                method: 'listTasks',
+                payload: { limit, offset: nextOffset }
+            }));
+        } else {
+             // For other tables, use executeSQL with pagination
+             socket.send(JSON.stringify({ 
+                action: 'rpc', 
+                method: 'executeSQL', 
+                payload: { 
+                    sql: `SELECT * FROM ${tableName} LIMIT ${limit} OFFSET ${nextOffset}`, 
+                    readonly: true 
+                }
+            }));
+        }
+    }, [socket, currentOffset, total, limit, tableName]);
+
+    // Initial load and reset when table changes
     useEffect(() => {
-        if (isConnected && tableName && socket && socket.readyState === WebSocket.OPEN) {
-            subscribe(tableName);
-            
-            // ROUTING LOGIC: Map tables to specific RPCs to avoid raw SQL errors
-            if (tableName === 'tasks') {
+        setData([]);
+        setCurrentOffset(0);
+        setTotal(0);
+        
+        // Initial fetch handled by user entering context which triggers query usually, 
+        // but let's ensure we fetch page 0 explicitly if connected
+        if (socket && socket.readyState === WebSocket.OPEN && tableName) {
+             if (tableName === 'tasks') {
                 socket.send(JSON.stringify({ 
                     action: 'rpc', 
                     method: 'listTasks',
-                    payload: { limit, offset }
-                }));
-            } else if (tableName === '_webhooks') {
-                // CRITICAL FIX: Use RPC for webhooks, do NOT send raw SQL
-                socket.send(JSON.stringify({ 
-                    action: 'rpc', 
-                    method: 'listWebhooks' 
+                    payload: { limit, offset: 0 }
                 }));
             } else {
-                // SECURITY: Validate table name to prevent SQL injection
-                // Only allow alphanumeric characters and underscores
-                if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
-                    console.error('Invalid table name:', tableName);
-                    return;
-                }
-                
-                // REPLACEMENT: Use executeSQL RPC for other tables instead of runQuery
-                // This avoids the "Raw SQL queries are disabled" error
-                // NOTE: Limited to 100 rows for initial load. Future enhancement: add pagination.
-                socket.send(JSON.stringify({ 
+                 subscribe(tableName); // Ensure we are subscribed for updates
+                 socket.send(JSON.stringify({ 
                     action: 'rpc', 
                     method: 'executeSQL', 
-                    payload: { sql: `SELECT * FROM ${tableName} LIMIT ${limit} OFFSET ${offset}`, readonly: true }
+                    payload: { 
+                        sql: `SELECT * FROM ${tableName} LIMIT ${limit} OFFSET 0`, 
+                        readonly: true 
+                    }
+                }));
+                 // Also ask for count
+                 socket.send(JSON.stringify({ 
+                    action: 'rpc', 
+                    method: 'executeSQL', 
+                    payload: { 
+                        sql: `SELECT COUNT(*) as count FROM ${tableName}`, 
+                        readonly: true 
+                    }
                 }));
             }
         }
-    }, [isConnected, tableName, subscribe, socket, limit, offset]);
+    }, [tableName, socket, isConnected]);
 
+    // Handle updates and initial data
     useEffect(() => {
-        const handleUpdate = (e: Event) => {
-            const customEvent = e as CustomEvent;
-            if (customEvent.detail.table === tableName) {
-                const { action, row, diff, fullData } = customEvent.detail;
-                
-                // Handle efficient action-based updates (new format)
-                if (action && row) {
+        const handleUpdate = (e: any) => {
+            const { table, action, row, diff, fullData } = e.detail;
+            if (table === tableName) {
+                // Handle incremental updates (real-time)
+                if (action === 'added' && row) {
+                    setData(prev => [row, ...prev]);
+                    setTotal(t => t + 1);
+                } else if (action === 'deleted' && row) {
+                    setData(prev => prev.filter(item => {
+                        const pk = detectPrimaryKey(item);
+                        return item[pk] !== row[pk];
+                    }));
+                    setTotal(t => Math.max(0, t - 1));
+                } else if (action === 'modified' && row) {
+                    setData(prev => prev.map(item => {
+                        const pk = detectPrimaryKey(item);
+                         // If we have the item, update it
+                        if (item[pk] === row[pk]) {
+                            return { ...item, ...row };
+                        }
+                        return item;
+                    }));
+                } else if (diff) {
+                    // Legacy diff handling
                     setData(currentData => {
-                        // Reconcile optimistic updates:
-                        // If we have an optimistic row (starts with temp_) and we receive a real row
-                        // We should check if they look similar, or just allow the real row to coexist?
-                        // Ideally, we replace the temp row. But we don't know the ID mapping.
-                         
-                        // Detect primary key field from data
-                        const sampleRow = currentData[0] || row;
-                        if (!sampleRow) return currentData;
+                        // ... (same diff logic as before) ...
+                        const sampleRow = currentData.length > 0 ? currentData[0] : (
+                            diff.added.length > 0 ? diff.added[0] : (
+                                diff.modified.length > 0 ? diff.modified[0] : (
+                                    diff.deleted.length > 0 ? diff.deleted[0] : null
+                                )
+                            )
+                        );
                         
+                        if (!sampleRow) return fullData || currentData;
                         const pkField = detectPrimaryKey(sampleRow);
                         
-                        if (!Object.prototype.hasOwnProperty.call(row, pkField)) {
-                            // If no PK field, just refresh
-                            return currentData;
-                        }
-                        
-                        const pkValue = row[pkField];
-                        
-                        if (action === 'added') {
-                            // Add new row if it doesn't exist
-                            const exists = currentData.some(item => item[pkField] === pkValue);
-                            // Cleanup optimistic update if we see a real row with same data (approximate matching)
-                            // This is a heuristic since we don't have the ID
-                            const cleanData = currentData.filter(item => {
-                                // If item is optimistic and looks like the new row (e.g. same title/content)
-                                // This is risky, so maybe we just rely on explicit refresh or just leave it for now
-                                // User asked to "Reconcile ... using a temporary ID".
-                                // If the broadcast includes the temp ID, we could use it.
-                                // Assuming the server does NOT echo temp ID, we skip this for now.
-                                return true;
-                            });
-
-                            return exists ? cleanData : [...cleanData, row];
-                        } else if (action === 'modified') {
-                            // Update existing row
-                            return currentData.map(item => 
-                                item[pkField] === pkValue ? row : item
-                            );
-                        } else if (action === 'deleted') {
-                            // Remove deleted row
-                            return currentData.filter(item => item[pkField] !== pkValue);
-                        }
-                        
-                        return currentData;
-                    });
-                }
-                // Legacy support: Handle diff-based updates (old format)
-                else if (diff && (diff.added.length > 0 || diff.modified.length > 0 || diff.deleted.length > 0)) {
-                    setData(currentData => {
-                        // Detect primary key field from first row
-                        const sampleRow = currentData[0] || diff.added[0] || diff.modified[0] || diff.deleted[0];
-                        if (!sampleRow) return currentData;
-                        
-                        const pkField = detectPrimaryKey(sampleRow);
-                        
-                        // If rows don't have the detected PK field, fall back to full data
-                        if (!Object.prototype.hasOwnProperty.call(sampleRow, pkField)) {
+                         if (!Object.prototype.hasOwnProperty.call(sampleRow, pkField)) {
                             return fullData || currentData;
                         }
                         
-                        // Create a map for fast lookups
                         const dataMap = new Map(currentData.map(row => [row[pkField], row]));
                         
                         // Remove deleted items
@@ -1031,38 +822,60 @@ export const useRealtimeQuery = (tableName: string, options: { limit?: number; o
                         return Array.from(dataMap.values());
                     });
                 } else if (fullData) {
-                    // Fallback to full data if diff is not available or empty
                     setData(fullData);
-                } else {
-                    // Fallback to re-fetching if no action, diff or fullData
-                    if (socket && socket.readyState === WebSocket.OPEN) {
-                        if (tableName === 'tasks') {
-                            socket.send(JSON.stringify({ 
-                                action: 'rpc', 
-                                method: 'listTasks',
-                                payload: { limit, offset }
-                            }));
-                        }
-                    }
+                    setTotal(fullData.length);
                 }
             }
         };
 
         window.addEventListener('db-update', handleUpdate);
         return () => window.removeEventListener('db-update', handleUpdate);
-    }, [tableName, socket, runQuery, limit, offset]);
+    }, [tableName]);
 
     useEffect(() => {
         if (lastResult && lastResult.originalSql) {
-            // Match both the table name and the listTasks RPC method
-            const matchesTable = lastResult.originalSql.includes(tableName) || 
-                                (tableName === 'tasks' && lastResult.originalSql === 'listTasks');
+            // Check if this result is a count query
+            if (lastResult.originalSql.includes('SELECT COUNT(*)')) {
+                 const count = lastResult.data[0]?.count;
+                 if (typeof count === 'number') {
+                     setTotal(count);
+                 }
+                 return;
+            }
+
+            // Match both the table name query and the listTasks RPC method
+            // We look for the LIMIT/OFFSET pattern we sent
+            const isPaginatedQuery = lastResult.originalSql.includes(`FROM ${tableName}`) && 
+                                   lastResult.originalSql.includes('LIMIT');
+                                   
+            const isTasksRpc = tableName === 'tasks' && lastResult.originalSql === 'listTasks';
             
-            if (matchesTable && !lastResult.originalSql.toLowerCase().startsWith('insert')) {
-                 setData(lastResult.data);
+            if ((isPaginatedQuery || isTasksRpc) && !lastResult.originalSql.toLowerCase().startsWith('insert')) {
+                 
+                 // If total came back with RPC result (listTasks)
                  if (lastResult.total !== undefined) {
                      setTotal(lastResult.total);
                  }
+
+                 setData(prev => {
+                     // If we just fetched offset 0, replace data
+                     // We can infer this if prev length is 0, or by tracking request ID (more complex)
+                     // For now, simpler heuristic:
+                     
+                     // BUT, wait - we have currentOffset state. 
+                     // The issue is multiple inflight requests. 
+                     // Simpler: Just append if IDs are new.
+                     
+                     // Optimization: If currentOffset was 0 when we *sent* (not now), we should replace.
+                     // Since we don't track that easily, let's use a Set to identifying existing items.
+                     
+                     const existingIds = new Set(prev.map(r => r.id));
+                     const newRows = lastResult.data.filter((r: any) => !existingIds.has(r.id));
+                     
+                     if (prev.length === 0) return lastResult.data;
+                     
+                     return [...prev, ...newRows];
+                 });
             }
         }
     }, [lastResult, tableName]);
